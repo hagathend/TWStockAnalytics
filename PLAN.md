@@ -118,7 +118,11 @@ API 是另外的用量計費、需要在 Anthropic Console / OpenAI Platform / G
 
 #### 實測時發現並修正的問題
 
-- **TWSE/TPEx 資料被存成不同日期，導致「股價總覽」看起來少了一大半股票**：原本 TWSE/TPEx 的價量、融資融券、三大法人收集器各自信任 API 回傳資料裡內嵌的交易日期（ROC格式），但這幾個 OpenAPI 端點本來就只會回傳「最新一筆」、沒有指定日期的參數，兩邊「最新」有時候會不同步（例如其中一邊還沒更新），導致同一份資料被存成不同日期，UI 依日期查詢時只看得到其中一個市場。修法是統一改成用「收集當下的日期」存檔（`src/collectors/twse_official.py`），不再信任 API 內嵌日期。
+- **TWSE/TPEx 資料被存成不同日期，導致「股價總覽」看起來少了一大半股票（第一次修法，事後證實是錯的）**：一開始發現 TWSE/TPEx 各自信任 API 內嵌的交易日期時會不同步，於是把收集器改成統一用「收集當下的日期」覆蓋掉 API 回傳的日期。**這個做法後來被證實是錯的**：使用者拿奇亨網股價比對京元電子(2449)發現對不起來，查證後發現 `openapi.twse.com.tw` 的 `STOCK_DAY_ALL`／`MI_MARGN` 端點本身會延遲公布當天資料（同一時間點，TWSE 舊版 `rwd` 查詢介面已經是當天收盤價，`openapi` 卻還停留在前一個交易日），我們卻把這筆「其實是三天前」的資料強制蓋上「今天」的日期標籤，等於是造假日期、把舊資料偽裝成當天最新收盤價。**正確修法**：改用 TWSE 舊版 `rwd` 介面（可指定 `date` 參數、回應內會確認實際日期）取代 `openapi.twse.com.tw`：
+  - 股價改用「每日收盤行情」`https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX`（`type=ALLBUT0999` 排除權證/牛熊證）
+  - 融資融券改用 `https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN`（原本 openapi 版本完全沒有日期欄位，無從得知資料屬於哪一天）
+  - TPEx 各收集器則改回信任 API 回傳的實際交易日期，不再覆蓋成收集當下日期
+  - 教訓：政府開放資料 API 沒有明確標示的「最新一筆」不能假設一定是「今天」，寧可用資料本身標示的日期（可能因此跟其他市場的日期不同步），也不要為了畫面好看而覆蓋成錯誤的日期
 - **TPEx OpenAPI SSL 憑證問題**：`www.tpex.org.tw` 憑證鏈缺少 Subject Key Identifier 擴充欄位，Python 3.13 (OpenSSL 3.2+) 預設嚴格模式會拒絕連線。已在 `src/collectors/twse_official.py` 加上專用的 `_TpexSSLAdapter`，僅關閉 `X509_V_FLAG_X509_STRICT` 這一項嚴格檢查，憑證鏈驗證與主機名稱檢查仍正常執行（此變更已徵得使用者同意）。
 - **Google News RSS 查詢字串未編碼**：股票代號+名稱組成查詢字串時含空白，未做 URL encode 導致請求失敗，已改用 `urllib.parse.quote`。
 - **TWSE 三大法人買賣超 (T86) 資料量看似異常龐大（上萬筆）**：經確認為正常現象——`selectType=ALL` 會回傳當日所有上市「證券」（含權證、ETF 等衍生商品）的法人買賣超，數量遠多於普通股票數量。若之後只想看一般股票，可在查詢時依代碼長度/規則過濾。

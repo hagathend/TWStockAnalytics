@@ -1,8 +1,14 @@
 """TWSE (上市) / TPEx (上櫃) 官方 OpenAPI 收集器。
 
-- TWSE OpenAPI: https://openapi.twse.com.tw/
-- TWSE 舊版查詢介面 (rwd)：三大法人買賣超日報 (T86) 未收錄在 OpenAPI 中，改用此介面
-- TPEx OpenAPI: https://www.tpex.org.tw/openapi/
+- TWSE 舊版查詢介面 (rwd)：`openapi.twse.com.tw` 的 STOCK_DAY_ALL / MI_MARGN
+  實測會比 rwd 介面慢一拍公布當天資料（同一時間點 rwd 已經是當天收盤價，
+  openapi 還停留在前一個交易日），且 MI_MARGN 完全沒有日期欄位可以判斷資料屬於哪一天。
+  因此改用 rwd 介面（可指定 date 參數、回應內也會確認實際日期）：
+    - 每日收盤行情: https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX
+    - 三大法人買賣超日報 (T86): https://www.twse.com.tw/rwd/zh/fund/T86
+    - 融資融券 (MI_MARGN): https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN
+- TPEx OpenAPI: https://www.tpex.org.tw/openapi/（實測目前資料公布時間點正常，
+  但仍然信任 API 回傳裡的實際交易日期，不自行覆蓋，避免同一種問題發生在 TPEx 這邊）
 """
 
 import ssl
@@ -34,6 +40,16 @@ def _tpex_session() -> requests.Session:
     return session
 
 
+def _roc_date_to_iso(roc: str) -> str | None:
+    """將 '1150727' (民國年) 轉為 '2026-07-27'"""
+    if not roc or len(roc) < 7:
+        return None
+    year = int(roc[:3]) + 1911
+    month = roc[3:5]
+    day = roc[5:7]
+    return f"{year}-{month}-{day}"
+
+
 def _to_float(v):
     try:
         return float(str(v).replace(",", ""))
@@ -48,57 +64,92 @@ def _to_int(v):
         return None
 
 
-def fetch_twse_price() -> list[dict]:
-    """TWSE 上市每日收盤價量（最近一個交易日，官方 OpenAPI 沒有 date 參數）。
+def _find_table(tables: list[dict], required_field: str) -> dict | None:
+    for t in tables:
+        if t.get("fields") and required_field in t["fields"]:
+            return t
+    return None
 
-    儲存日期一律用「收集當下日期」而非 API 回傳裡的交易日期，
-    因為 TWSE/TPEx 各自的「最新一筆」有時不同步（例如某一邊還沒更新），
-    若各自沿用內嵌日期會導致兩個市場的資料被存成不同日期、UI 依日期查詢時只看得到其中一邊。
-    """
-    url = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
-    resp = requests.get(url, headers=_HEADERS, timeout=_TIMEOUT)
+
+def _parse_change(color_tag: str, diff_str: str) -> float | None:
+    """漲跌欄位是用 HTML 顏色標記方向（紅漲/綠跌），數值本身是絕對值，要自己補正負號"""
+    diff = _to_float(diff_str)
+    if diff is None:
+        return None
+    if "color:green" in (color_tag or ""):
+        return -diff
+    if "color:red" in (color_tag or ""):
+        return diff
+    return 0.0
+
+
+def fetch_twse_price(date: str | None = None) -> list[dict]:
+    """TWSE 上市每日收盤行情，date 格式 YYYYMMDD，預設為今天。
+    用 type=ALLBUT0999 排除權證/牛熊證，只留一般股票與 ETF 等（約1300多檔）。"""
+    date = date or _date.today().strftime("%Y%m%d")
+    url = "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX"
+    params = {"date": date, "type": "ALLBUT0999", "response": "json"}
+    resp = requests.get(url, headers=_HEADERS, params=params, timeout=_TIMEOUT)
     resp.raise_for_status()
-    today = _date.today().isoformat()
+    payload = resp.json()
+    if payload.get("stat") != "OK":
+        return []
+
+    table = _find_table(payload.get("tables", []), "證券代號")
+    if not table:
+        return []
+
+    iso_date = f"{date[:4]}-{date[4:6]}-{date[6:8]}"
     rows = []
-    for item in resp.json():
+    for cols in table["data"]:
         rows.append(
             {
-                "date": today,
+                "date": iso_date,
                 "market": "TWSE",
-                "code": item.get("Code"),
-                "name": item.get("Name"),
-                "open": _to_float(item.get("OpeningPrice")),
-                "high": _to_float(item.get("HighestPrice")),
-                "low": _to_float(item.get("LowestPrice")),
-                "close": _to_float(item.get("ClosingPrice")),
-                "change": _to_float(item.get("Change")),
-                "volume": _to_int(item.get("TradeVolume")),
-                "turnover": _to_int(item.get("TradeValue")),
+                "code": cols[0].strip(),
+                "name": cols[1].strip(),
+                "open": _to_float(cols[5]),
+                "high": _to_float(cols[6]),
+                "low": _to_float(cols[7]),
+                "close": _to_float(cols[8]),
+                "change": _parse_change(cols[9], cols[10]),
+                "volume": _to_int(cols[2]),
+                "turnover": _to_int(cols[4]),
             }
         )
     return rows
 
 
-def fetch_twse_margin() -> list[dict]:
-    """TWSE 上市融資融券（最近一個交易日）"""
-    url = "https://openapi.twse.com.tw/v1/exchangeReport/MI_MARGN"
-    resp = requests.get(url, headers=_HEADERS, timeout=_TIMEOUT)
+def fetch_twse_margin(date: str | None = None) -> list[dict]:
+    """TWSE 上市融資融券，date 格式 YYYYMMDD，預設為今天"""
+    date = date or _date.today().strftime("%Y%m%d")
+    url = "https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN"
+    params = {"date": date, "selectType": "ALL", "response": "json"}
+    resp = requests.get(url, headers=_HEADERS, params=params, timeout=_TIMEOUT)
     resp.raise_for_status()
-    today = _date.today().isoformat()
+    payload = resp.json()
+    if payload.get("stat") != "OK":
+        return []
+
+    table = _find_table(payload.get("tables", []), "代號")
+    if not table:
+        return []
+
+    iso_date = f"{date[:4]}-{date[4:6]}-{date[6:8]}"
     rows = []
-    for item in resp.json():
+    for cols in table["data"]:
         rows.append(
             {
-                "date": today,
+                "date": iso_date,
                 "market": "TWSE",
-                "code": item.get("股票代號"),
-                "name": item.get("股票名稱"),
-                "margin_balance": _to_int(item.get("融資今日餘額")),
-                "margin_buy": _to_int(item.get("融資買進")),
-                "margin_sell": _to_int(item.get("融資賣出")),
-                "short_balance": _to_int(item.get("融券今日餘額")),
-                "short_sell": _to_int(item.get("融券賣出")),
-                "short_cover": _to_int(item.get("融券現券償還")),
+                "code": cols[0].strip(),
+                "name": cols[1].strip(),
+                "margin_buy": _to_int(cols[2]),
+                "margin_sell": _to_int(cols[3]),
+                "margin_balance": _to_int(cols[6]),
+                "short_sell": _to_int(cols[9]),
+                "short_cover": _to_int(cols[10]),
+                "short_balance": _to_int(cols[12]),
             }
         )
     return rows
@@ -138,16 +189,15 @@ def fetch_twse_institutional(date: str | None = None) -> list[dict]:
 
 
 def fetch_tpex_price() -> list[dict]:
-    """TPEx 上櫃每日收盤價量（最近一個交易日）"""
+    """TPEx 上櫃每日收盤價量（最近一個交易日，信任 API 回傳的實際交易日期）"""
     url = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes"
     resp = _tpex_session().get(url, headers=_HEADERS, timeout=_TIMEOUT)
     resp.raise_for_status()
-    today = _date.today().isoformat()
     rows = []
     for item in resp.json():
         rows.append(
             {
-                "date": today,
+                "date": _roc_date_to_iso(item.get("Date", "")),
                 "market": "TPEx",
                 "code": item.get("SecuritiesCompanyCode"),
                 "name": item.get("CompanyName"),
@@ -164,16 +214,15 @@ def fetch_tpex_price() -> list[dict]:
 
 
 def fetch_tpex_margin() -> list[dict]:
-    """TPEx 上櫃融資融券（最近一個交易日）"""
+    """TPEx 上櫃融資融券（最近一個交易日，信任 API 回傳的實際交易日期）"""
     url = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_margin_balance"
     resp = _tpex_session().get(url, headers=_HEADERS, timeout=_TIMEOUT)
     resp.raise_for_status()
-    today = _date.today().isoformat()
     rows = []
     for item in resp.json():
         rows.append(
             {
-                "date": today,
+                "date": _roc_date_to_iso(item.get("Date", "")),
                 "market": "TPEx",
                 "code": item.get("SecuritiesCompanyCode"),
                 "name": item.get("CompanyName"),
@@ -198,11 +247,10 @@ def _find_value(item: dict, *substrings: str):
 
 
 def fetch_tpex_institutional() -> list[dict]:
-    """TPEx 上櫃三大法人買賣超（最近一個交易日）"""
+    """TPEx 上櫃三大法人買賣超（最近一個交易日，信任 API 回傳的實際交易日期）"""
     url = "https://www.tpex.org.tw/openapi/v1/tpex_3insti_daily_trading"
     resp = _tpex_session().get(url, headers=_HEADERS, timeout=_TIMEOUT)
     resp.raise_for_status()
-    today = _date.today().isoformat()
     rows = []
     for item in resp.json():
         foreign_net = _to_int(
@@ -215,7 +263,7 @@ def fetch_tpex_institutional() -> list[dict]:
         total_net = _to_int(item.get("TotalDifference"))
         rows.append(
             {
-                "date": today,
+                "date": _roc_date_to_iso(item.get("Date", "")),
                 "market": "TPEx",
                 "code": item.get("SecuritiesCompanyCode"),
                 "name": item.get("CompanyName"),
