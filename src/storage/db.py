@@ -65,6 +65,22 @@ CREATE TABLE IF NOT EXISTS collect_log (
     status TEXT NOT NULL,
     detail TEXT
 );
+
+CREATE TABLE IF NOT EXISTS ai_picks (
+    date TEXT NOT NULL,
+    rank INTEGER NOT NULL,
+    code TEXT NOT NULL,
+    name TEXT,
+    reason TEXT,
+    PRIMARY KEY (date, rank)
+);
+
+CREATE TABLE IF NOT EXISTS ai_analysis_summary (
+    date TEXT PRIMARY KEY,
+    provider TEXT,
+    summary TEXT,
+    created_at TEXT
+);
 """
 
 
@@ -202,3 +218,62 @@ def query_recent_logs(limit: int = 50):
             "SELECT * FROM collect_log ORDER BY id DESC LIMIT ?", (limit,)
         )
         return [dict(r) for r in cur.fetchall()]
+
+
+def query_code_history(table: str, code: str, limit: int = 30):
+    """查詢特定股票代號在指定表格內、依日期排序的歷史紀錄（本地資料庫累積的部分）"""
+    if table not in ("stock_price", "institutional", "margin"):
+        raise ValueError(f"不支援的表格: {table}")
+    with get_conn() as conn:
+        cur = conn.execute(
+            f"SELECT * FROM {table} WHERE code = ? ORDER BY date DESC LIMIT ?",
+            (code, limit),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def lookup_stock_name(code: str) -> str | None:
+    """從最近一次收集到的股價資料查詢股票名稱，供編輯觀察名單時自動帶入。"""
+    with get_conn() as conn:
+        cur = conn.execute(
+            "SELECT name FROM stock_price WHERE code = ? ORDER BY date DESC LIMIT 1",
+            (code,),
+        )
+        row = cur.fetchone()
+        return row["name"] if row else None
+
+
+def save_ai_picks(date: str, picks: list[dict]):
+    """picks: [{rank, code, name, reason}, ...]，同一天重新分析會先清掉舊資料再存新的"""
+    with get_conn() as conn:
+        conn.execute("DELETE FROM ai_picks WHERE date = ?", (date,))
+        conn.executemany(
+            "INSERT INTO ai_picks (date, rank, code, name, reason) VALUES (:date, :rank, :code, :name, :reason)",
+            [{**p, "date": date} for p in picks],
+        )
+
+
+def query_ai_picks(date: str):
+    with get_conn() as conn:
+        cur = conn.execute(
+            "SELECT * FROM ai_picks WHERE date = ? ORDER BY rank", (date,)
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def save_ai_analysis_summary(date: str, provider: str, summary: str):
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT OR REPLACE INTO ai_analysis_summary (date, provider, summary, created_at)
+               VALUES (?, ?, ?, ?)""",
+            (date, provider, summary, datetime.now().isoformat(timespec="seconds")),
+        )
+
+
+def query_ai_analysis_summary(date: str) -> dict | None:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "SELECT * FROM ai_analysis_summary WHERE date = ?", (date,)
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None

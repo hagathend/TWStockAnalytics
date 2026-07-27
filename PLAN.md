@@ -70,16 +70,34 @@
 ### 第二階段 — 進行中
 
 - [x] AI 供應商登入/設定介面（Streamlit「AI 設定」頁籤：選擇 Claude/GPT/Gemini、輸入並儲存各家 API Key 至 `data/ai_settings.json`、測試連線按鈕）
-- [ ] AI 新聞摘要 + 重點個股挑選（尚未接上真正的分析邏輯，目前設定頁只做登入/連線測試）
-- [ ] 重點個股籌碼分布 + 線型技術分析（AI 輔助判讀）
+- [x] 可編輯觀察名單（`data/watchlist.json`，UI 可自行新增/刪除股票，側邊欄點擊可跳轉到個股詳情頁）
+- [x] AI 新聞分析產生「新聞焦點 Top 20」：**改用複製貼上工作流程，不需要付費 API Key**（見下方說明），結果存入 `ai_picks` / `ai_analysis_summary` 資料表，側邊欄與「AI 分析」頁都會顯示
+- [x] 個股 K 線圖：「個股詳情」頁用 plotly 畫蠟燭圖，即時向 FinMind 抓近 90 天歷史（本地資料庫本身歷史很短，累積中）
+- [x] 多頁面導覽：改用 `st.navigation` + `st.Page`（總覽 / 個股詳情 / AI 分析 / AI 設定 四頁），觀察名單與 AI Top20 項目可點擊跳轉個股詳情頁
 - [ ] 報表產出（Markdown / HTML / PDF）
 - [ ] LINE Bot 串接，報表推播
 
+#### AI 分析為什麼改成複製貼上，而不是自動呼叫付費 API
+
+一開始設計是收集完資料後自動呼叫使用者在「AI 設定」頁存的 Claude/GPT/Gemini API Key 做分析。
+但使用者提出：Claude Pro / ChatGPT Plus / Gemini 訂閱的網頁版聊天**不能**當 API Key 用，
+API 是另外的用量計費、需要在 Anthropic Console / OpenAI Platform / Google AI Studio 個別申請並綁定帳單，
+使用者一開始並不知道要另外付費，因此改成預設走「複製貼上」流程，不強制產生費用：
+
+1. 「AI 分析」頁按「產生新聞分析提示詞」，把當天新聞整理成一份提示詞（`st.code` 顯示，右上角有複製按鈕）
+2. 使用者自行複製貼到平常在用的網頁版 Claude / ChatGPT / Gemini
+3. 把 AI 的回覆貼回「AI 分析」頁的文字框，按「解析並儲存」，程式會解析裡面的 JSON 存入資料庫
+
+`src/ai_providers.py` 仍保留真正呼叫付費 API 的 `generate_text()`，在「AI 分析」頁的「進階：直接呼叫付費 API」摺疊區塊可用（需先在「AI 設定」頁填好 Key），給願意付費、想要全自動的人使用。
+收集資料按鈕本身**不會**自動觸發任何 AI 呼叫（不論免費或付費），只會自動產生好提示詞放著讓使用者去複製。
+
 #### 實測時發現並修正的問題
 
+- **TWSE/TPEx 資料被存成不同日期，導致「股價總覽」看起來少了一大半股票**：原本 TWSE/TPEx 的價量、融資融券、三大法人收集器各自信任 API 回傳資料裡內嵌的交易日期（ROC格式），但這幾個 OpenAPI 端點本來就只會回傳「最新一筆」、沒有指定日期的參數，兩邊「最新」有時候會不同步（例如其中一邊還沒更新），導致同一份資料被存成不同日期，UI 依日期查詢時只看得到其中一個市場。修法是統一改成用「收集當下的日期」存檔（`src/collectors/twse_official.py`），不再信任 API 內嵌日期。
 - **TPEx OpenAPI SSL 憑證問題**：`www.tpex.org.tw` 憑證鏈缺少 Subject Key Identifier 擴充欄位，Python 3.13 (OpenSSL 3.2+) 預設嚴格模式會拒絕連線。已在 `src/collectors/twse_official.py` 加上專用的 `_TpexSSLAdapter`，僅關閉 `X509_V_FLAG_X509_STRICT` 這一項嚴格檢查，憑證鏈驗證與主機名稱檢查仍正常執行（此變更已徵得使用者同意）。
 - **Google News RSS 查詢字串未編碼**：股票代號+名稱組成查詢字串時含空白，未做 URL encode 導致請求失敗，已改用 `urllib.parse.quote`。
 - **TWSE 三大法人買賣超 (T86) 資料量看似異常龐大（上萬筆）**：經確認為正常現象——`selectType=ALL` 會回傳當日所有上市「證券」（含權證、ETF 等衍生商品）的法人買賣超，數量遠多於普通股票數量。若之後只想看一般股票，可在查詢時依代碼長度/規則過濾。
+- **Streamlit `use_container_width` 參數已過期**：改用新版 `width="stretch"`。
 
 ## 如何啟動
 
@@ -114,20 +132,24 @@ UI 啟動後開啟瀏覽器 http://localhost:8501，左側可手動點擊「立�
 schtasks /Create /TN "TWStock_DailyCollect" /TR "D:\workspace\TWStockAnalytics\scripts\run_daily_collect.bat" /SC DAILY /ST 20:00
 ```
 
-## 目錄結構（第一階段）
+## 目錄結構
 
 ```
 TWStockAnalytics/
 ├── PLAN.md
+├── README.md
 ├── requirements.txt
 ├── .env.example
 ├── .gitignore
 ├── start_ui.bat               # 雙擊即啟動 UI（不用打指令）
-├── data/                      # SQLite db / ai_settings.json 存放處
+├── data/                      # SQLite db / ai_settings.json / watchlist.json 存放處
 ├── src/
-│   ├── config.py              # 讀取 .env 設定（TWSE/FinMind token 等）
+│   ├── config.py              # 讀取 .env 設定（TWSE/FinMind token、預設觀察名單種子等）
 │   ├── config_ai.py           # AI 供應商設定讀寫 (data/ai_settings.json)
-│   ├── ai_providers.py        # Claude/GPT/Gemini 連線測試
+│   ├── config_watchlist.py    # 使用者自訂觀察名單讀寫 (data/watchlist.json)
+│   ├── ai_providers.py        # Claude/GPT/Gemini 連線測試 + 文字生成（付費API，進階選項用）
+│   ├── ai_analysis.py         # 產生新聞分析提示詞 + 解析使用者貼回的AI回覆
+│   ├── charting.py            # 個股K線圖 (plotly + FinMind 即時歷史)
 │   ├── collect_all.py         # 每日收集流程整合
 │   ├── collectors/
 │   │   ├── twse_official.py   # TWSE/TPEx 官方 OpenAPI
@@ -136,7 +158,7 @@ TWStockAnalytics/
 │   │   └── news_rss.py        # Google News RSS
 │   ├── storage/
 │   │   └── db.py              # SQLite 讀寫
-│   └── app.py                 # Streamlit 入口（含「AI 設定」頁籤）
+│   └── app.py                 # Streamlit 入口（總覽/個股詳情/AI分析/AI設定 四頁）
 └── scripts/
     ├── run_daily_collect.py   # 給排程器呼叫的每日收集流程
     └── run_daily_collect.bat  # 給 Windows 工作排程器呼叫

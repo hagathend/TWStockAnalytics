@@ -34,16 +34,6 @@ def _tpex_session() -> requests.Session:
     return session
 
 
-def _roc_date_to_iso(roc: str) -> str | None:
-    """將 '1150727' (民國年) 轉為 '2026-07-27'"""
-    if not roc or len(roc) < 7:
-        return None
-    year = int(roc[:3]) + 1911
-    month = roc[3:5]
-    day = roc[5:7]
-    return f"{year}-{month}-{day}"
-
-
 def _to_float(v):
     try:
         return float(str(v).replace(",", ""))
@@ -59,16 +49,21 @@ def _to_int(v):
 
 
 def fetch_twse_price() -> list[dict]:
-    """TWSE 上市每日收盤價量（最近一個交易日，官方 OpenAPI 沒有 date 參數）"""
+    """TWSE 上市每日收盤價量（最近一個交易日，官方 OpenAPI 沒有 date 參數）。
+
+    儲存日期一律用「收集當下日期」而非 API 回傳裡的交易日期，
+    因為 TWSE/TPEx 各自的「最新一筆」有時不同步（例如某一邊還沒更新），
+    若各自沿用內嵌日期會導致兩個市場的資料被存成不同日期、UI 依日期查詢時只看得到其中一邊。
+    """
     url = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
     resp = requests.get(url, headers=_HEADERS, timeout=_TIMEOUT)
     resp.raise_for_status()
+    today = _date.today().isoformat()
     rows = []
     for item in resp.json():
-        iso_date = _roc_date_to_iso(item.get("Date", ""))
         rows.append(
             {
-                "date": iso_date,
+                "date": today,
                 "market": "TWSE",
                 "code": item.get("Code"),
                 "name": item.get("Name"),
@@ -147,12 +142,12 @@ def fetch_tpex_price() -> list[dict]:
     url = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes"
     resp = _tpex_session().get(url, headers=_HEADERS, timeout=_TIMEOUT)
     resp.raise_for_status()
+    today = _date.today().isoformat()
     rows = []
     for item in resp.json():
-        iso_date = _roc_date_to_iso(item.get("Date", ""))
         rows.append(
             {
-                "date": iso_date,
+                "date": today,
                 "market": "TPEx",
                 "code": item.get("SecuritiesCompanyCode"),
                 "name": item.get("CompanyName"),
@@ -173,12 +168,12 @@ def fetch_tpex_margin() -> list[dict]:
     url = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_margin_balance"
     resp = _tpex_session().get(url, headers=_HEADERS, timeout=_TIMEOUT)
     resp.raise_for_status()
+    today = _date.today().isoformat()
     rows = []
     for item in resp.json():
-        iso_date = _roc_date_to_iso(item.get("Date", ""))
         rows.append(
             {
-                "date": iso_date,
+                "date": today,
                 "market": "TPEx",
                 "code": item.get("SecuritiesCompanyCode"),
                 "name": item.get("CompanyName"),
@@ -207,9 +202,9 @@ def fetch_tpex_institutional() -> list[dict]:
     url = "https://www.tpex.org.tw/openapi/v1/tpex_3insti_daily_trading"
     resp = _tpex_session().get(url, headers=_HEADERS, timeout=_TIMEOUT)
     resp.raise_for_status()
+    today = _date.today().isoformat()
     rows = []
     for item in resp.json():
-        iso_date = _roc_date_to_iso(item.get("Date", ""))
         foreign_net = _to_int(
             _find_value(item, "ForeignInvestorsIncludeMainlandAreaInvestors", "Difference")
         ) or 0
@@ -220,7 +215,7 @@ def fetch_tpex_institutional() -> list[dict]:
         total_net = _to_int(item.get("TotalDifference"))
         rows.append(
             {
-                "date": iso_date,
+                "date": today,
                 "market": "TPEx",
                 "code": item.get("SecuritiesCompanyCode"),
                 "name": item.get("CompanyName"),
