@@ -159,7 +159,9 @@ def home_page():
     )
 
     with tab_price:
-        filter_code = st.text_input("依股票代號篩選（留空顯示全部，僅本頁）", key="price_code")
+        filter_code = st.text_input(
+            "依股票代號或名稱搜尋（例如：2330 或 台積，留空顯示全部，僅本頁）", key="price_code"
+        )
         rows = db.query_stock_price(selected_date, filter_code or None)
         if rows:
             df = _display_df(rows, _PRICE_COLUMNS)
@@ -169,7 +171,7 @@ def home_page():
             st.info("此日期尚無股價資料，請先點擊左側「立即收集今日資料」")
 
     with tab_inst:
-        filter_code = st.text_input("依股票代號篩選", key="inst_code")
+        filter_code = st.text_input("依股票代號或名稱搜尋", key="inst_code")
         rows = db.query_institutional(selected_date, filter_code or None)
         if rows:
             df = _display_df(rows, _INSTITUTIONAL_COLUMNS)
@@ -179,7 +181,7 @@ def home_page():
             st.info("此日期尚無三大法人資料")
 
     with tab_margin:
-        filter_code = st.text_input("依股票代號篩選", key="margin_code")
+        filter_code = st.text_input("依股票代號或名稱搜尋", key="margin_code")
         rows = db.query_margin(selected_date, filter_code or None)
         if rows:
             df = _display_df(rows, _MARGIN_COLUMNS)
@@ -189,7 +191,7 @@ def home_page():
             st.info("此日期尚無融資融券資料")
 
     with tab_news:
-        filter_code = st.text_input("依股票代號篩選（新聞標題含代號時可用）", key="news_code")
+        filter_code = st.text_input("依股票代號或標題關鍵字搜尋", key="news_code")
         rows = db.query_news(selected_date, filter_code or None)
         if rows:
             for row in rows:

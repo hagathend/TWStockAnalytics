@@ -157,45 +157,53 @@ def log_step(step: str, status: str, detail: str = ""):
         )
 
 
-def query_stock_price(date: str, code: str | None = None):
+def query_stock_price(date: str, keyword: str | None = None):
     with get_conn() as conn:
-        if code:
+        if keyword:
+            like = f"%{keyword}%"
             cur = conn.execute(
-                "SELECT * FROM stock_price WHERE date = ? AND code = ?", (date, code)
+                "SELECT * FROM stock_price WHERE date = ? AND (code LIKE ? OR name LIKE ?)",
+                (date, like, like),
             )
         else:
             cur = conn.execute("SELECT * FROM stock_price WHERE date = ?", (date,))
         return [dict(r) for r in cur.fetchall()]
 
 
-def query_institutional(date: str, code: str | None = None):
+def query_institutional(date: str, keyword: str | None = None):
     with get_conn() as conn:
-        if code:
+        if keyword:
+            like = f"%{keyword}%"
             cur = conn.execute(
-                "SELECT * FROM institutional WHERE date = ? AND code = ?", (date, code)
+                "SELECT * FROM institutional WHERE date = ? AND (code LIKE ? OR name LIKE ?)",
+                (date, like, like),
             )
         else:
             cur = conn.execute("SELECT * FROM institutional WHERE date = ?", (date,))
         return [dict(r) for r in cur.fetchall()]
 
 
-def query_margin(date: str, code: str | None = None):
+def query_margin(date: str, keyword: str | None = None):
     with get_conn() as conn:
-        if code:
+        if keyword:
+            like = f"%{keyword}%"
             cur = conn.execute(
-                "SELECT * FROM margin WHERE date = ? AND code = ?", (date, code)
+                "SELECT * FROM margin WHERE date = ? AND (code LIKE ? OR name LIKE ?)",
+                (date, like, like),
             )
         else:
             cur = conn.execute("SELECT * FROM margin WHERE date = ?", (date,))
         return [dict(r) for r in cur.fetchall()]
 
 
-def query_news(date: str, related_code: str | None = None):
+def query_news(date: str, keyword: str | None = None):
     with get_conn() as conn:
-        if related_code:
+        if keyword:
+            like = f"%{keyword}%"
             cur = conn.execute(
-                "SELECT * FROM news WHERE date = ? AND related_code = ? ORDER BY published_at DESC",
-                (date, related_code),
+                """SELECT * FROM news WHERE date = ? AND (title LIKE ? OR related_code LIKE ?)
+                   ORDER BY published_at DESC""",
+                (date, like, like),
             )
         else:
             cur = conn.execute(
