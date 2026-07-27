@@ -10,10 +10,17 @@ import json
 from src.config import DATA_DIR
 
 _CONFIG_PATH = DATA_DIR / "ai_settings.json"
+_OLLAMA_CONFIG_PATH = DATA_DIR / "ollama_settings.json"
 
 PROVIDERS = ["claude", "gpt", "gemini"]
 
 _DEFAULT = {"active_provider": "claude", "keys": {p: "" for p in PROVIDERS}}
+
+_OLLAMA_DEFAULT = {
+    "host": "http://localhost:11434",
+    "model": "qwen2.5:7b",
+    "auto_analyze_after_collect": True,
+}
 
 
 def load_ai_settings() -> dict:
@@ -29,4 +36,17 @@ def load_ai_settings() -> dict:
 
 def save_ai_settings(settings: dict):
     with open(_CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(settings, f, ensure_ascii=False, indent=2)
+
+
+def load_ollama_settings() -> dict:
+    if not _OLLAMA_CONFIG_PATH.exists():
+        return dict(_OLLAMA_DEFAULT)
+    with open(_OLLAMA_CONFIG_PATH, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return {**_OLLAMA_DEFAULT, **data}
+
+
+def save_ollama_settings(settings: dict):
+    with open(_OLLAMA_CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(settings, f, ensure_ascii=False, indent=2)

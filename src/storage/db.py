@@ -251,6 +251,30 @@ def lookup_stock_name(code: str) -> str | None:
         return row["name"] if row else None
 
 
+def lookup_stock_code_by_name(name: str) -> str | None:
+    """從最近一次收集到的股價資料，用名稱反查股票代號。
+
+    用來校正 AI 分析結果：AI 有時會記錯代號和名稱的對應（例如把2454聯發科講成2357），
+    但新聞文字通常是用公司名稱而非代號，名稱相對可信，所以用名稱回頭查官方代號來源做校正。
+    """
+    if not name:
+        return None
+    with get_conn() as conn:
+        cur = conn.execute(
+            "SELECT code FROM stock_price WHERE name = ? ORDER BY date DESC LIMIT 1",
+            (name,),
+        )
+        row = cur.fetchone()
+        if row:
+            return row["code"]
+        cur = conn.execute(
+            "SELECT code FROM stock_price WHERE name LIKE ? ORDER BY date DESC LIMIT 1",
+            (f"%{name}%",),
+        )
+        row = cur.fetchone()
+        return row["code"] if row else None
+
+
 def save_ai_picks(date: str, picks: list[dict]):
     """picks: [{rank, code, name, reason}, ...]，同一天重新分析會先清掉舊資料再存新的"""
     with get_conn() as conn:

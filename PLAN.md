@@ -74,10 +74,35 @@
 - [x] AI 新聞分析產生「新聞焦點 Top 20」：**改用複製貼上工作流程，不需要付費 API Key**（見下方說明），結果存入 `ai_picks` / `ai_analysis_summary` 資料表，側邊欄與「AI 分析」頁都會顯示
 - [x] 個股 K 線圖：「個股詳情」頁用 plotly 畫蠟燭圖，即時向 FinMind 抓近 90 天歷史（本地資料庫本身歷史很短，累積中）
 - [x] 多頁面導覽：改用 `st.navigation` + `st.Page`（總覽 / 個股詳情 / AI 分析 / AI 設定 四頁），觀察名單與 AI Top20 項目可點擊跳轉個股詳情頁
+- [x] **Ollama 本機 AI 自動分析**：使用者提到自己有裝 Ollama，可以免費本機跑模型解決付費 API 的問題，因此串接上去並設為預設自動觸發（見下方說明）
 - [ ] 報表產出（Markdown / HTML / PDF）
 - [ ] LINE Bot 串接，報表推播
 
-#### AI 分析為什麼改成複製貼上，而不是自動呼叫付費 API
+#### Ollama 本機自動分析（目前預設方式）
+
+使用者提出自己電腦有裝 Ollama，可以解決 AI 分析要付費的問題。實測比較了使用者已安裝的幾個模型（用真實新聞資料跑同一個任務）：
+
+| 模型 | 耗時 | 結果 |
+|---|---|---|
+| **qwen2.5:7b** | ~15秒 | 格式正確、代號/名稱最乾淨、繁中推理清楚 |
+| qwen3.6 (36B MoE) | ~140秒 | 可用但代號常帶 `.TW` 尾巴，且慢約10倍 |
+| gemma4-12b-it-oym | ~25秒 | 代號和名稱常會對不起來、混用英文推理 |
+| 其他 RPG/Uncensored 微調版本 | - | 不建議，這類角色扮演微調對結構化任務不可靠 |
+
+因此預設模型選 `qwen2.5:7b`，並改用 Ollama 的 **structured output**（`format` 參數傳入 JSON Schema 強制格式，而非單純提示詞要求輸出JSON）大幅提高格式可靠度——同一個模型光靠文字提示會自創格式，加上 schema 後就完全正確。
+
+實作：
+- `src/ai_providers.py`：`list_ollama_models()` 列出本機已安裝模型、`generate_ollama_json()` 用 schema 強制格式呼叫
+- `src/ai_analysis.py`：`analyze_with_ollama()` 產生提示詞 → 呼叫 Ollama → 解析存入資料庫
+- `src/config_ai.py`：`load_ollama_settings()`/`save_ollama_settings()` 讀寫 `data/ollama_settings.json`（host、model、是否收集後自動分析，預設開啟）
+- 「AI 設定」頁新增 Ollama 區塊（連線測試+列出模型下拉選單），「AI 分析」頁把 Ollama 選項放在最上面（推薦選項）
+- 收集資料按鈕：若 Ollama 自動分析設定開啟（預設開），收集完會自動呼叫 Ollama 分析，不需要手動複製貼上
+
+**已知限制與修正**：AI（不只 Ollama，各家LLM都可能）偶爾會記錯「代號」和「名稱」的對應（實測发现例如把 2454 聯發科講成 2357，把台達電講成不存在的 6700），這是模型自己記憶推測代號造成的幻覺。修法是在 `src/ai_analysis.py` 的 `_verify_pick()` 用本地資料庫（官方 TWSE/TPEx 收集來的正確代號/名稱對照表）校正：新聞文字通常用公司名稱而非代號，相對可信，所以代號和名稱對不上時，改用名稱回頭查詢正確代號。
+
+複製貼上流程（`build_prompt` + `parse_and_save`）與付費 API 直接呼叫（`generate_text`）仍保留作為沒有裝 Ollama 時的備援選項。
+
+#### 複製貼上流程說明（Ollama 之外的備援選項）
 
 一開始設計是收集完資料後自動呼叫使用者在「AI 設定」頁存的 Claude/GPT/Gemini API Key 做分析。
 但使用者提出：Claude Pro / ChatGPT Plus / Gemini 訂閱的網頁版聊天**不能**當 API Key 用，

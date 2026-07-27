@@ -5,11 +5,17 @@ from datetime import date as _date
 import pandas as pd
 import streamlit as st
 
-from src.ai_analysis import build_prompt, parse_and_save
-from src.ai_providers import PROVIDER_LABELS, generate_text, test_connection
+from src.ai_analysis import analyze_with_ollama, build_prompt, parse_and_save
+from src.ai_providers import PROVIDER_LABELS, generate_text, list_ollama_models, test_connection
 from src.charting import build_candlestick
 from src.collect_all import run_daily_collect
-from src.config_ai import PROVIDERS, load_ai_settings, save_ai_settings
+from src.config_ai import (
+    PROVIDERS,
+    load_ai_settings,
+    load_ollama_settings,
+    save_ai_settings,
+    save_ollama_settings,
+)
 from src.config_watchlist import add_stock, load_watchlist, remove_stock
 from src.storage import db
 
@@ -89,10 +95,21 @@ def _render_sidebar() -> str:
             st.json(result)
 
             today = _date.today().isoformat()
-            ok, prompt_or_msg = build_prompt(today)
-            if ok:
-                st.session_state["pending_ai_prompt"] = prompt_or_msg
-                st.info("新聞分析提示詞已產生，請到左側「AI 分析」頁複製使用")
+            ollama_settings = load_ollama_settings()
+            if ollama_settings.get("auto_analyze_after_collect"):
+                with st.spinner(f"用本機 Ollama ({ollama_settings['model']}) 自動分析新聞中..."):
+                    ai_result = analyze_with_ollama(
+                        today, ollama_settings["host"], ollama_settings["model"]
+                    )
+                if ai_result["ok"]:
+                    st.success(f"AI 分析完成，已產生 {len(ai_result['picks'])} 檔新聞焦點")
+                else:
+                    st.warning(f"自動 AI 分析失敗（可到「AI 分析」頁改用複製貼上）：{ai_result['message']}")
+            else:
+                ok, prompt_or_msg = build_prompt(today)
+                if ok:
+                    st.session_state["pending_ai_prompt"] = prompt_or_msg
+                    st.info("新聞分析提示詞已產生，請到左側「AI 分析」頁複製使用")
 
         st.divider()
         st.header("查詢日期")
@@ -274,16 +291,28 @@ def detail_page():
 def ai_analysis_page():
     st.title("AI 分析")
     st.caption(
-        "免費做法：產生提示詞 → 複製貼到你平常用的網頁版 Claude / ChatGPT / Gemini → "
-        "把回覆貼回來解析，不需要另外申請付費 API Key。"
-        "若你已經有付費 API Key，也可以用下方「進階」選項直接呼叫、跳過複製貼上。"
+        "推薦用本機 Ollama 自動分析：免費、不需要 API Key，收集資料後也可以自動觸發。"
+        "沒有裝 Ollama 的話，可以用「複製貼上」流程，貼到你平常用的網頁版 Claude / ChatGPT / Gemini。"
+        "若你已經有付費 API Key，也可以用最下方「進階」選項直接呼叫。"
     )
 
     today = _date.today().isoformat()
     available_dates = db.query_available_dates() or [today]
     selected_date = st.selectbox("要分析哪一天收集到的新聞", available_dates)
 
-    st.subheader("1. 產生提示詞")
+    st.subheader("0. 用本機 Ollama 自動分析（推薦）")
+    ollama_settings = load_ollama_settings()
+    st.caption(f"目前設定：{ollama_settings['host']} ｜ 模型: {ollama_settings['model']}（可到「AI 設定」頁修改）")
+    if st.button("用 Ollama 分析這天的新聞", type="primary"):
+        with st.spinner(f"用本機 Ollama ({ollama_settings['model']}) 分析中，第一次跑可能要一兩分鐘..."):
+            result = analyze_with_ollama(selected_date, ollama_settings["host"], ollama_settings["model"])
+        if result["ok"]:
+            st.success(result["message"])
+        else:
+            st.error(result["message"])
+
+    st.divider()
+    st.subheader("1. 產生提示詞（複製貼上流程，沒裝 Ollama 時用）")
     if st.button("產生新聞分析提示詞"):
         ok, prompt_or_msg = build_prompt(selected_date)
         if ok:
@@ -347,8 +376,44 @@ def ai_analysis_page():
 
 def ai_settings_page():
     st.title("AI 設定")
+
+    st.subheader("本機 Ollama（推薦，免費）")
+    st.caption("需要先在本機安裝並啟動 Ollama（https://ollama.com/），不需要任何 API Key。")
+
+    ollama_settings = load_ollama_settings()
+    host = st.text_input("Ollama 位址", value=ollama_settings["host"])
+
+    ok, models_or_msg = list_ollama_models(host)
+    if ok:
+        models = models_or_msg
+        if not models:
+            st.warning("Ollama 已連線，但目前沒有任何模型，請先用 `ollama pull qwen2.5:7b` 下載")
+            model = ollama_settings["model"]
+        else:
+            current = ollama_settings["model"]
+            index = models.index(current) if current in models else 0
+            model = st.selectbox("要使用的模型", models, index=index)
+            st.caption("推薦 qwen2.5:7b：實測在這個新聞分析任務上速度快、JSON 格式遵循度最高、繁體中文推理清楚。")
+    else:
+        st.error(models_or_msg)
+        model = ollama_settings["model"]
+
+    auto_analyze = st.checkbox(
+        "收集資料後自動用 Ollama 分析新聞",
+        value=ollama_settings.get("auto_analyze_after_collect", True),
+    )
+
+    if st.button("儲存 Ollama 設定", type="primary"):
+        save_ollama_settings(
+            {"host": host, "model": model, "auto_analyze_after_collect": auto_analyze}
+        )
+        st.success("已儲存")
+
+    st.divider()
+
+    st.subheader("付費 API（進階，沒有裝 Ollama 或想用更強模型時使用）")
     st.caption(
-        "選擇之後新聞分析要用哪家 AI，並填入對應 API Key（供「AI 分析」頁的進階直接呼叫選項使用）。"
+        "選擇之後新聞分析要用哪家付費 AI，並填入對應 API Key（供「AI 分析」頁的進階直接呼叫選項使用）。"
         "Key 僅存在本機 data/ai_settings.json，不會上傳、不會加入 git。"
     )
 

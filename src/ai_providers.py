@@ -7,6 +7,8 @@
 如果之後要換更強的模型，改這裡的常數即可。
 """
 
+import requests
+
 PROVIDER_LABELS = {
     "claude": "Claude (Anthropic)",
     "gpt": "GPT (OpenAI)",
@@ -117,3 +119,45 @@ def generate_text(provider: str, api_key: str, prompt: str, max_tokens: int = 30
         return True, text
     except Exception as exc:  # noqa: BLE001 - 需要把任何底層SDK例外轉成使用者看得懂的訊息
         return False, f"AI 呼叫失敗: {exc}"
+
+
+# --- Ollama（本機、免費，不需要 API Key）---
+# 實測 qwen2.5:7b 在這個新聞分析任務上速度快、JSON schema 遵循度最高、繁體中文推理也清楚，
+# 比同機安裝的 36B MoE 模型快十倍、比角色扮演微調版本可靠得多，故設為預設模型。
+
+_OLLAMA_TIMEOUT = 180
+
+
+def list_ollama_models(host: str) -> tuple[bool, list[str] | str]:
+    """回傳 (是否成功, 模型名稱清單或錯誤訊息)"""
+    try:
+        resp = requests.get(f"{host}/api/tags", timeout=10)
+        resp.raise_for_status()
+        models = [m["name"] for m in resp.json().get("models", [])]
+        return True, models
+    except Exception as exc:  # noqa: BLE001 - 需要把連線例外轉成使用者看得懂的訊息
+        return False, f"無法連到 Ollama ({host})：{exc}"
+
+
+def generate_ollama_json(host: str, model: str, prompt: str, schema: dict) -> tuple[bool, str]:
+    """用 Ollama 的 structured output（傳入 JSON schema 強制格式）呼叫本機模型。
+    回傳 (是否成功, JSON文字或錯誤訊息)"""
+    try:
+        resp = requests.post(
+            f"{host}/api/generate",
+            json={
+                "model": model,
+                "prompt": prompt,
+                "stream": False,
+                "format": schema,
+                "think": False,
+            },
+            timeout=_OLLAMA_TIMEOUT,
+        )
+        resp.raise_for_status()
+        text = resp.json().get("response", "")
+        if not text.strip():
+            return False, "Ollama 回傳了空白內容（模型可能不支援 structured output，或思考時間耗盡）"
+        return True, text
+    except Exception as exc:  # noqa: BLE001 - 需要把任何底層例外轉成使用者看得懂的訊息
+        return False, f"Ollama 呼叫失敗: {exc}"
