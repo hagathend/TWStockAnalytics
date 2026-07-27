@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+data/*.db
+data/*.sqlite3
+data/ai_settings.json
+data/*.log
+.streamlit/

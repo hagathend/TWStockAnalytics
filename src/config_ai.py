@@ -1,0 +1,32 @@
+"""AI 供應商設定的本地儲存（選用供應商 + 各家 API Key）。
+
+存成 data/ai_settings.json，純本機明文儲存（不會提交進 git，見 .gitignore）。
+與 .env 分開存放，是因為這裡的值要能在 Streamlit 執行期間即時讀寫、
+不需要重啟程式套用 .env 才會生效。
+"""
+
+import json
+
+from src.config import DATA_DIR
+
+_CONFIG_PATH = DATA_DIR / "ai_settings.json"
+
+PROVIDERS = ["claude", "gpt", "gemini"]
+
+_DEFAULT = {"active_provider": "claude", "keys": {p: "" for p in PROVIDERS}}
+
+
+def load_ai_settings() -> dict:
+    if not _CONFIG_PATH.exists():
+        return dict(_DEFAULT)
+    with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    merged = dict(_DEFAULT)
+    merged.update(data)
+    merged["keys"] = {**_DEFAULT["keys"], **data.get("keys", {})}
+    return merged
+
+
+def save_ai_settings(settings: dict):
+    with open(_CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(settings, f, ensure_ascii=False, indent=2)

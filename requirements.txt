@@ -1,0 +1,10 @@
+requests>=2.31
+beautifulsoup4>=4.12
+lxml>=5.0
+feedparser>=6.0
+pandas>=2.2
+python-dotenv>=1.0
+streamlit>=1.38
+anthropic>=0.34
+openai>=1.40
+google-genai>=1.0
