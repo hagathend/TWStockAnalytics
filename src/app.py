@@ -15,6 +15,59 @@ st.set_page_config(page_title="台股每日資訊收集", layout="wide")
 
 db.init_db()
 
+_PRICE_COLUMNS = {
+    "date": "日期",
+    "market": "市場",
+    "code": "代號",
+    "name": "名稱",
+    "open": "開盤價",
+    "high": "最高價",
+    "low": "最低價",
+    "close": "收盤價",
+    "change": "漲跌",
+    "volume": "成交量(股)",
+    "turnover": "成交金額(元)",
+}
+
+_INSTITUTIONAL_COLUMNS = {
+    "date": "日期",
+    "market": "市場",
+    "code": "代號",
+    "name": "名稱",
+    "foreign_net": "外資買賣超(股)",
+    "trust_net": "投信買賣超(股)",
+    "dealer_net": "自營商買賣超(股)",
+    "total_net": "三大法人合計買賣超(股)",
+}
+
+_MARGIN_COLUMNS = {
+    "date": "日期",
+    "market": "市場",
+    "code": "代號",
+    "name": "名稱",
+    "margin_balance": "融資餘額(股)",
+    "margin_buy": "融資買進(股)",
+    "margin_sell": "融資賣出(股)",
+    "short_balance": "融券餘額(股)",
+    "short_sell": "融券賣出(股)",
+    "short_cover": "融券償還(股)",
+}
+
+_LOG_COLUMNS = {
+    "id": "編號",
+    "run_at": "執行時間",
+    "step": "項目",
+    "status": "狀態",
+    "detail": "詳細",
+}
+
+
+def _display_df(rows: list[dict], column_labels: dict[str, str]) -> pd.DataFrame:
+    df = pd.DataFrame(rows)
+    return df.rename(columns=column_labels)[
+        [column_labels[c] for c in column_labels if c in df.columns]
+    ]
+
 st.title("台股每日資訊收集")
 st.caption("第一階段：定時收集盤後價量 / 三大法人 / 融資融券 / 新聞。AI 籌碼與線型分析邏輯為第二階段規劃中，目前先提供供應商設定介面。")
 
@@ -47,7 +100,7 @@ with tab_price:
     filter_code = st.text_input("依股票代號篩選（留空顯示全部，僅本頁）", key="price_code")
     rows = db.query_stock_price(selected_date, filter_code or None)
     if rows:
-        df = pd.DataFrame(rows)
+        df = _display_df(rows, _PRICE_COLUMNS)
         st.dataframe(df, use_container_width=True, hide_index=True)
         st.caption(f"共 {len(df)} 筆")
     else:
@@ -57,7 +110,7 @@ with tab_inst:
     filter_code = st.text_input("依股票代號篩選", key="inst_code")
     rows = db.query_institutional(selected_date, filter_code or None)
     if rows:
-        df = pd.DataFrame(rows)
+        df = _display_df(rows, _INSTITUTIONAL_COLUMNS)
         st.dataframe(df, use_container_width=True, hide_index=True)
         st.caption(f"共 {len(df)} 筆")
     else:
@@ -67,7 +120,7 @@ with tab_margin:
     filter_code = st.text_input("依股票代號篩選", key="margin_code")
     rows = db.query_margin(selected_date, filter_code or None)
     if rows:
-        df = pd.DataFrame(rows)
+        df = _display_df(rows, _MARGIN_COLUMNS)
         st.dataframe(df, use_container_width=True, hide_index=True)
         st.caption(f"共 {len(df)} 筆")
     else:
@@ -95,7 +148,7 @@ with tab_news:
 with tab_log:
     logs = db.query_recent_logs()
     if logs:
-        st.dataframe(pd.DataFrame(logs), use_container_width=True, hide_index=True)
+        st.dataframe(_display_df(logs, _LOG_COLUMNS), use_container_width=True, hide_index=True)
     else:
         st.info("尚無收集紀錄")
 
