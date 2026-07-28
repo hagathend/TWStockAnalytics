@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS news (
     url TEXT UNIQUE,
     summary TEXT,
     content TEXT,
+    excerpt TEXT,
     related_code TEXT,
     published_at TEXT,
     collected_at TEXT
@@ -99,10 +100,11 @@ def get_conn():
 def init_db():
     with get_conn() as conn:
         conn.executescript(SCHEMA)
-        try:
-            conn.execute("ALTER TABLE news ADD COLUMN content TEXT")
-        except sqlite3.OperationalError:
-            pass  # 欄位已存在（舊資料庫升級用，新建的資料庫已經在 SCHEMA 裡就有這欄）
+        for column, col_type in [("content", "TEXT"), ("excerpt", "TEXT")]:
+            try:
+                conn.execute(f"ALTER TABLE news ADD COLUMN {column} {col_type}")
+            except sqlite3.OperationalError:
+                pass  # 欄位已存在（舊資料庫升級用，新建的資料庫已經在 SCHEMA 裡就有這欄）
 
 
 def save_stock_price(rows: list[dict]):
@@ -153,6 +155,12 @@ def save_news(rows: list[dict]):
                    VALUES (:date, :source, :title, :url, :summary, :content, :related_code, :published_at, :collected_at)""",
                 row,
             )
+
+
+def save_news_excerpt(news_id: int, excerpt: str):
+    """存入 AI 深度分析時逐篇產生的重點摘要，供之後在 UI 顯示 / 報表使用"""
+    with get_conn() as conn:
+        conn.execute("UPDATE news SET excerpt = ? WHERE id = ?", (excerpt, news_id))
 
 
 def log_step(step: str, status: str, detail: str = ""):
@@ -215,6 +223,17 @@ def query_news(date: str, keyword: str | None = None):
             cur = conn.execute(
                 "SELECT * FROM news WHERE date = ? ORDER BY published_at DESC", (date,)
             )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def query_news_excerpts(date: str):
+    """查詢已經做過深度分析、有存逐篇摘要(excerpt)的新聞，供AI分析頁顯示/未來報表使用"""
+    with get_conn() as conn:
+        cur = conn.execute(
+            """SELECT * FROM news WHERE date = ? AND excerpt IS NOT NULL
+               ORDER BY published_at DESC""",
+            (date,),
+        )
         return [dict(r) for r in cur.fetchall()]
 
 

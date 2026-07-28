@@ -248,6 +248,7 @@ def analyze_with_ollama_deep(
             pass
 
     summaries = []
+    article_excerpts = []
     for i, article in enumerate(articles, start=1):
         content = (
             article.get("content")
@@ -257,6 +258,15 @@ def analyze_with_ollama_deep(
         )
         excerpt = _summarize_article(host, model, article["title"], content)
         summaries.append(f"{i}. {article['title']} — {excerpt}")
+        db.save_news_excerpt(article["id"], excerpt)
+        article_excerpts.append(
+            {
+                "title": article["title"],
+                "url": article.get("url"),
+                "source": article["source"],
+                "excerpt": excerpt,
+            }
+        )
         if progress_callback:
             progress_callback(i, total, f"摘要中: {article['title'][:20]}")
 
@@ -266,7 +276,13 @@ def analyze_with_ollama_deep(
 
     gen_ok, text = generate_ollama_json(host, model, prompt, _PICKS_SCHEMA)
     if not gen_ok:
-        return {"ok": False, "message": text, "summary": "", "picks": []}
+        return {
+            "ok": False,
+            "message": text,
+            "summary": "",
+            "picks": [],
+            "article_excerpts": article_excerpts,
+        }
 
     try:
         parsed = json.loads(text)
@@ -278,6 +294,9 @@ def analyze_with_ollama_deep(
             "message": f"Ollama 回覆的 JSON 無法解析（錯誤: {exc}）\n\n原始回覆:\n{text[:500]}",
             "summary": "",
             "picks": [],
+            "article_excerpts": article_excerpts,
         }
 
-    return _save_result(date, f"ollama-deep:{model}", summary, raw_picks)
+    result = _save_result(date, f"ollama-deep:{model}", summary, raw_picks)
+    result["article_excerpts"] = article_excerpts
+    return result

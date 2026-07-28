@@ -296,6 +296,34 @@ def detail_page():
         st.caption("此日期尚無相關新聞（新聞的關聯代號目前只有標題內含代號時才會標記）")
 
 
+def _render_article_excerpts(selected_date: str):
+    """顯示深度分析逐篇產生的新聞摘要：優先顯示這次剛跑完、還在記憶體裡的結果，
+    沒有的話就從資料庫撈上一次分析存下來的紀錄（excerpt 欄位）。"""
+    last_result = st.session_state.get("last_deep_result")
+    if st.session_state.get("last_deep_result_date") == selected_date and last_result:
+        excerpts = last_result.get("article_excerpts", [])
+        source_label = "剛剛這次分析"
+    else:
+        rows = db.query_news_excerpts(selected_date)
+        excerpts = [
+            {"title": r["title"], "url": r["url"], "source": r["source"], "excerpt": r["excerpt"]}
+            for r in rows
+        ]
+        source_label = "先前分析留下的紀錄"
+
+    if not excerpts:
+        return
+
+    st.subheader(f"逐篇新聞摘要（{source_label}，共 {len(excerpts)} 則）")
+    st.caption("這些是深度分析時，AI 針對每則新聞內文各自產生的重點摘要，之後可以直接拿來當報表素材。")
+    for item in excerpts:
+        with st.container(border=True):
+            title_line = f"**[{item['title']}]({item['url']})**" if item.get("url") else f"**{item['title']}**"
+            st.markdown(title_line)
+            st.caption(f"來源: {item['source']}")
+            st.write(item["excerpt"])
+
+
 def ai_analysis_page():
     st.title("AI 分析")
     st.caption(
@@ -328,10 +356,14 @@ def ai_analysis_page():
             progress_callback=_update_progress,
         )
         progress_bar.empty()
+        st.session_state["last_deep_result_date"] = selected_date
+        st.session_state["last_deep_result"] = result
         if result["ok"]:
             st.success(result["message"])
         else:
             st.error(result["message"])
+
+    _render_article_excerpts(selected_date)
 
     st.divider()
     st.subheader("1. 產生提示詞（複製貼上流程，沒裝 Ollama 時用）")

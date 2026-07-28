@@ -76,6 +76,7 @@
 - [x] 多頁面導覽：改用 `st.navigation` + `st.Page`（總覽 / 個股詳情 / AI 分析 / AI 設定 四頁），觀察名單與 AI Top20 項目可點擊跳轉個股詳情頁
 - [x] **Ollama 本機 AI 自動分析**：使用者提到自己有裝 Ollama，可以免費本機跑模型解決付費 API 的問題，因此串接上去並設為預設自動觸發（見下方說明）
 - [x] **AI 深度分析（逐篇抓內文摘要）**：使用者發現 qwen2.5:7b 沒辦法自己爬網頁，只能就給定的文字做摘要，因此改成「先抓每則新聞的內文 → 逐篇AI摘要 → 彙整摘要再送一次AI選前20檔」的兩階段流程，取代原本只看標題+短摘要的做法（見下方說明）
+- [x] 逐篇摘要結果存入 `news.excerpt` 欄位並顯示在「AI 分析」頁，結構化資料可作為之後報表產出的素材
 - [ ] 報表產出（Markdown / HTML / PDF）
 - [ ] LINE Bot 串接，報表推播
 
@@ -95,6 +96,8 @@
 - 主函式 `analyze_with_ollama_deep(date, host, model, progress_callback)`，`progress_callback(current, total, message)` 用於 Streamlit 顯示進度條
 - **收集資料按鈕**與「AI 分析」頁都改用這個深度版本（直接取代原本的快速版，非另外加一個按鈕，這是使用者的明確選擇——即使會讓收集按鈕卡上幾分鐘）
 - 原本的 `analyze_with_ollama()`（只看標題快速版）保留在程式碼裡未刪除，但 UI 已經不會呼叫到它
+
+**逐篇摘要結果會存起來、顯示在「AI 分析」頁**：使用者提出想看每則新聞被 AI 摘要出的重點，也希望之後能拿來當報表素材。`news` 表新增 `excerpt` 欄位（`db.save_news_excerpt()` 寫入），`analyze_with_ollama_deep()` 回傳值也帶上 `article_excerpts` 清單（title/url/source/excerpt）。「AI 分析」頁的 `_render_article_excerpts()` 優先顯示這次剛跑完、還在 `st.session_state` 裡的結果，沒有的話就用 `db.query_news_excerpts(date)` 撈上次分析留下的紀錄——這樣即使重新整理頁面或換過日期，先前分析過的逐篇摘要仍然看得到，也已經是結構化資料（date/source/title/url/excerpt），可以直接餵給之後的報表產出功能。
 
 #### Ollama 本機自動分析（目前預設方式）
 
