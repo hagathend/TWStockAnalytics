@@ -5,8 +5,8 @@ from datetime import date as _date
 import pandas as pd
 import streamlit as st
 
-from src.ai_analysis import analyze_with_ollama_deep, build_prompt, parse_and_save
-from src.ai_providers import PROVIDER_LABELS, generate_text, list_ollama_models, test_connection
+from src.ai_analysis import analyze_deep_with_provider, analyze_with_ollama_deep, build_prompt, parse_and_save
+from src.ai_providers import PROVIDER_LABELS, list_ollama_models, test_connection
 from src.charting import build_candlestick
 from src.collect_all import run_daily_collect
 from src.config_ai import (
@@ -366,7 +366,39 @@ def ai_analysis_page():
     _render_article_excerpts(selected_date)
 
     st.divider()
-    st.subheader("1. 產生提示詞（複製貼上流程，沒裝 Ollama 時用）")
+    st.subheader("0b. 用雲端 API 深度分析（Gemini 免費額度 / Claude·GPT 需付費）")
+    ai_settings = load_ai_settings()
+    cloud_provider = st.radio(
+        "選擇雲端供應商",
+        PROVIDERS,
+        format_func=lambda p: PROVIDER_LABELS[p],
+        horizontal=True,
+        key="cloud_provider_deep",
+    )
+    cloud_api_key = ai_settings["keys"].get(cloud_provider, "")
+    if cloud_provider == "gemini":
+        st.caption("Gemini 有真正免費的額度（不用綁信用卡），到 Google AI Studio 申請 Key 後在「AI 設定」頁填入即可。")
+    else:
+        st.caption(f"{PROVIDER_LABELS[cloud_provider]} 是另外計費的付費 API，此按鈕會實際產生費用。")
+    if not cloud_api_key:
+        st.info(f"尚未在「AI 設定」頁填入 {PROVIDER_LABELS[cloud_provider]} 的 API Key")
+    elif st.button(f"用 {PROVIDER_LABELS[cloud_provider]} 深度分析這天的新聞"):
+        progress_bar = st.progress(0.0, text="準備中...")
+
+        def _update_cloud_progress(cur, total, msg):
+            progress_bar.progress(cur / total if total else 0.0, text=f"{msg} ({cur}/{total})")
+
+        result = analyze_deep_with_provider(
+            selected_date, cloud_provider, cloud_api_key, progress_callback=_update_cloud_progress
+        )
+        progress_bar.empty()
+        if result["ok"]:
+            st.success(result["message"])
+        else:
+            st.error(result["message"])
+
+    st.divider()
+    st.subheader("1. 產生提示詞（複製貼上流程，不想接任何 API 時用）")
     if st.button("產生新聞分析提示詞"):
         ok, prompt_or_msg = build_prompt(selected_date)
         if ok:
@@ -390,28 +422,6 @@ def ai_analysis_page():
             st.success(result["message"])
         else:
             st.error(result["message"])
-
-    st.divider()
-    with st.expander("進階：直接呼叫付費 API（跳過複製貼上，需先在「AI 設定」頁填好 Key）"):
-        ai_settings = load_ai_settings()
-        provider = ai_settings["active_provider"]
-        api_key = ai_settings["keys"].get(provider, "")
-        st.caption(f"目前設定使用: {PROVIDER_LABELS[provider]}（此按鈕會實際呼叫付費 API，依供應商計費規則產生費用）")
-        if st.button(f"直接呼叫 {PROVIDER_LABELS[provider]} 分析"):
-            ok, prompt_or_msg = build_prompt(selected_date)
-            if not ok:
-                st.warning(prompt_or_msg)
-            else:
-                with st.spinner("呼叫 AI 中，請稍候..."):
-                    gen_ok, text = generate_text(provider, api_key, prompt_or_msg)
-                if not gen_ok:
-                    st.error(text)
-                else:
-                    result = parse_and_save(selected_date, provider, text)
-                    if result["ok"]:
-                        st.success(result["message"])
-                    else:
-                        st.error(result["message"])
 
     st.divider()
     st.subheader(f"{selected_date} 目前的分析結果")

@@ -18,7 +18,10 @@ PROVIDER_LABELS = {
 _GENERATION_MODELS = {
     "claude": "claude-3-5-haiku-20241022",
     "gpt": "gpt-4o-mini",
-    "gemini": "gemini-2.0-flash",
+    # 用 "-latest" 別名而非特定日期快照：實測 gemini-2.5-flash 這個快照對「新帳號」
+    # 回傳 404「no longer available to new users」，即使 models.list() 有列出來也一樣叫不動；
+    # gemini-flash-latest 這個別名永遠指向目前可用的最新 flash 模型，比較不會受個別快照下架影響
+    "gemini": "gemini-flash-latest",
 }
 
 

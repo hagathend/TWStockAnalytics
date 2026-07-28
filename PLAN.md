@@ -99,6 +99,19 @@
 
 **逐篇摘要結果會存起來、顯示在「AI 分析」頁**：使用者提出想看每則新聞被 AI 摘要出的重點，也希望之後能拿來當報表素材。`news` 表新增 `excerpt` 欄位（`db.save_news_excerpt()` 寫入），`analyze_with_ollama_deep()` 回傳值也帶上 `article_excerpts` 清單（title/url/source/excerpt）。「AI 分析」頁的 `_render_article_excerpts()` 優先顯示這次剛跑完、還在 `st.session_state` 裡的結果，沒有的話就用 `db.query_news_excerpts(date)` 撈上次分析留下的紀錄——這樣即使重新整理頁面或換過日期，先前分析過的逐篇摘要仍然看得到，也已經是結構化資料（date/source/title/url/excerpt），可以直接餵給之後的報表產出功能。
 
+#### 雲端 API 深度分析（Gemini 免費額度 / Claude·GPT 付費，作為 Ollama 的替代選項）
+
+使用者發現 Gemini 有提供真正免費的 API 額度（不用綁信用卡，去 Google AI Studio 申請即可），問能不能把「自己爬網頁文字 + 交給 Gemini 分析」這種用法接進來。因為我們已經有「抓內文→逐篇摘要→彙整挑股」這一整套（原本是 Ollama 專用），所以把共用邏輯抽出來，讓 Gemini/Claude/GPT 都能重用同一套流程：
+
+- `src/ai_analysis.py` 新增 `_gather_and_summarize(date, summarize_fn, progress_callback, inter_call_delay)`：原本 `analyze_with_ollama_deep()` 裡「抓內文＋逐篇摘要＋存excerpt」的邏輯抽出來共用，只有 `summarize_fn`（實際呼叫哪家AI）跟供應商相關
+- 新增 `analyze_deep_with_provider(date, provider, api_key, progress_callback)`：跟 Ollama 版走同一套流程，差別是呼叫 `src/ai_providers.py` 的 `generate_text()`（Gemini/Claude/GPT 共用的付費/免費API呼叫函式），且沒有 Ollama 的 structured output，最終JSON用既有的 `_extract_json()` 容錯解析
+- 雲端 API 沒有速率限制的保護機制，逐篇呼叫之間加了 2 秒間隔（`_PAID_API_INTER_CALL_DELAY`）降低碰到免費額度請求頻率限制的機會
+- Gemini 模型最後定案用 `gemini-flash-latest`（別名，永遠指向目前可用的最新flash模型）。中間繞了一圈：一開始照使用者提供的範例改成 `gemini-2.5-flash`，`test_connection()`（呼叫 `models.list()`）也確實列得出這個型號，但實際呼叫 `generate_content()` 卻回 404「This model models/gemini-2.5-flash is no longer available to new users」——**models.list() 列得出來，不代表這個帳號真的能呼叫它**，這是個容易誤判的陷阱。改用 `-latest` 別名（而非寫死特定日期快照）解決，這樣以後 Google 汰換掉某個快照版本也不會突然壞掉
+- 「AI 分析」頁新增「0b. 用雲端 API 深度分析」區塊，可選 Claude/GPT/Gemini（用 radio 切換），沒填 Key 會提示去「AI 設定」頁填；原本底部「進階：直接呼叫付費API」的舊版淺層 quick-call 已移除，被這個更準確的深度版取代
+- 這是使用者自己的真實 Gemini Key 實測過的（`test_connection` confirmed 連線成功，看得到 gemini-2.5-flash/2.5-pro/2.0-flash 等可用模型）
+
+Ollama 仍是預設自動觸發的選項（免費、本機、不需要任何帳號），雲端 API 版是使用者自己選用的替代方案，不影響預設行為。
+
 #### Ollama 本機自動分析（目前預設方式）
 
 使用者提出自己電腦有裝 Ollama，可以解決 AI 分析要付費的問題。實測比較了使用者已安裝的幾個模型（用真實新聞資料跑同一個任務）：

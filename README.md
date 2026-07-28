@@ -11,7 +11,7 @@
   - **FinMind API**：交叉驗證與補充
   - **鉅亨網 API + Google News RSS**：當日新聞與個股延伸新聞搜尋
 - 資料存入本地 SQLite，可依日期 / 股票代碼 / 名稱模糊搜尋查詢
-- **AI 新聞深度分析（本機 Ollama，免費）**：先幫每則新聞抓內文（鉅亨網API內建、Google News RSS 用 headless 瀏覽器解析 JS 轉址），逐篇摘要後再彙整挑出當日前20檔重點個股，收集資料後自動觸發，不需要付費 API Key
+- **AI 新聞深度分析**：先幫每則新聞抓內文（鉅亨網API內建、Google News RSS 用 headless 瀏覽器解析 JS 轉址），逐篇摘要後再彙整挑出當日前20檔重點個股。預設用**本機 Ollama**（免費、自動觸發、不需要任何 API Key），也可以改用**雲端 API**（Gemini 免費額度 / Claude·GPT 付費）當替代選項
 - 可編輯觀察名單 + AI 新聞焦點 Top20，點擊可跳轉個股詳情頁（K線圖 + 籌碼歷史 + 相關新聞）
 - **Streamlit 網頁 UI**：手動觸發收集、瀏覽已收集資料、AI 供應商設定（Ollama 為主，Claude / GPT / Gemini API Key 作為進階選項）
 - 每日 20:00 排程腳本，可註冊進 Windows 工作排程器自動執行

@@ -1,17 +1,20 @@
 """用當日新聞產生「新聞焦點 Top 20」觀察名單。
 
-三種分析方式：
-1. **Ollama（推薦，免費、自動）**：本機跑開源模型，用 structured output 強制 JSON 格式，
+分析方式：
+1. **Ollama 深度分析（推薦，免費、自動）**：本機跑開源模型，逐篇抓內文摘要後彙整挑股，
    收集資料後可自動觸發，不需要任何 API Key。
-2. **複製貼上**：產生提示詞給使用者複製到免費的網頁版 Claude / ChatGPT / Gemini，
-   再把回覆貼回來解析。適合沒有裝 Ollama 的情況。
-3. **付費 API 直接呼叫**：src/ai_providers.py 的 generate_text，需要使用者自己的付費 Key。
+2. **雲端 API 深度分析（Gemini/Claude/GPT）**：跟 Ollama 同一套「抓內文→逐篇摘要→彙整挑股」
+   流程，只是摘要/挑股呼叫換成雲端 API。Gemini 有真正免費的額度（不用綁信用卡），
+   Claude/GPT 是另外計費的付費 API。都需要先在「AI 設定」頁填 Key。
+3. **複製貼上**：產生提示詞給使用者複製到免費的網頁版 Claude / ChatGPT / Gemini，
+   再把回覆貼回來解析。適合完全不想接任何 API 的情況。
 """
 
 import json
 import re
+import time
 
-from src.ai_providers import generate_ollama_json, generate_ollama_text
+from src.ai_providers import generate_ollama_json, generate_ollama_text, generate_text
 from src.collectors.article_fetcher import ArticleFetcher
 from src.storage import db
 
@@ -201,29 +204,21 @@ def analyze_with_ollama(date: str, host: str, model: str) -> dict:
     return _save_result(date, f"ollama:{model}", summary, raw_picks)
 
 
-def _summarize_article(host: str, model: str, title: str, content: str) -> str:
-    """逐篇摘要，失敗時優雅降級直接用標題代替，不中斷整批處理"""
-    if not content:
-        return title
-    prompt = _ARTICLE_SUMMARY_PROMPT.format(title=title, content=content)
-    ok, text = generate_ollama_text(host, model, prompt)
-    return text if ok else title
+def _gather_and_summarize(
+    date: str, summarize_fn, progress_callback=None, inter_call_delay: float = 0.0
+) -> tuple[str | None, list[str], list[dict]]:
+    """深度分析共用的第一階段：取每則新聞的內文（鉅亨網已經有、Google News RSS 用
+    headless 瀏覽器解析JS轉址後抓取），逐篇呼叫 summarize_fn(title, content) -> str 摘要。
 
+    summarize_fn 是唯一跟供應商相關的部分（Ollama本機 / Gemini / Claude / GPT），
+    抓內文與批次處理邏輯都共用，避免每個供應商各寫一份。
 
-def analyze_with_ollama_deep(
-    date: str, host: str, model: str, progress_callback=None
-) -> dict:
-    """深度分析：先幫每則新聞抓內文（鉅亨網已經有、Google News RSS 用 headless 瀏覽器
-    解析JS轉址後抓取），逐篇送AI摘要，最後把所有摘要彙整起來再送一次AI挑出前20檔。
+    inter_call_delay：每次呼叫 summarize_fn 之間的間隔秒數，付費/雲端 API 有請求頻率限制時用。
 
-    這個做法比 analyze_with_ollama() 準確（qwen2.5:7b 自己沒辦法爬網頁，
-    只能靠我們先把內文準備好給它），但因為要逐篇呼叫AI，會慢很多（視新聞則數可能要幾分鐘）。
-
-    progress_callback(current, total, message) 可選，用於UI顯示進度。
-    """
+    回傳 (錯誤訊息或None, 逐篇摘要文字清單, article_excerpts清單)"""
     news_rows = db.query_news(date)
     if not news_rows:
-        return {"ok": False, "message": "此日期尚無新聞資料，請先收集資料", "summary": "", "picks": []}
+        return "此日期尚無新聞資料，請先收集資料", [], []
 
     # 分開取鉅亨網一般新聞 + RSS 個股延伸新聞，避免其中一種來源（通常是較多筆的鉅亨網）
     # 把另一種排擠掉——RSS 雖然筆數少，但是針對觀察名單個股的精準新聞，很重要
@@ -256,7 +251,7 @@ def analyze_with_ollama_deep(
             or article.get("summary")
             or ""
         )
-        excerpt = _summarize_article(host, model, article["title"], content)
+        excerpt = summarize_fn(article["title"], content) if content else article["title"]
         summaries.append(f"{i}. {article['title']} — {excerpt}")
         db.save_news_excerpt(article["id"], excerpt)
         article_excerpts.append(
@@ -269,9 +264,37 @@ def analyze_with_ollama_deep(
         )
         if progress_callback:
             progress_callback(i, total, f"摘要中: {article['title'][:20]}")
+        if inter_call_delay and i < total:
+            time.sleep(inter_call_delay)
+
+    return None, summaries, article_excerpts
+
+
+def analyze_with_ollama_deep(
+    date: str, host: str, model: str, progress_callback=None
+) -> dict:
+    """深度分析（本機 Ollama 版）：先幫每則新聞抓內文，逐篇送AI摘要，
+    最後把所有摘要彙整起來再送一次AI挑出前20檔。
+
+    這個做法比 analyze_with_ollama() 準確（qwen2.5:7b 自己沒辦法爬網頁，
+    只能靠我們先把內文準備好給它），但因為要逐篇呼叫AI，會慢很多（視新聞則數可能要幾分鐘）。
+
+    progress_callback(current, total, message) 可選，用於UI顯示進度。
+    """
+
+    def _summarize(title: str, content: str) -> str:
+        prompt = _ARTICLE_SUMMARY_PROMPT.format(title=title, content=content)
+        ok, text = generate_ollama_text(host, model, prompt)
+        return text if ok else title
+
+    error, summaries, article_excerpts = _gather_and_summarize(
+        date, _summarize, progress_callback
+    )
+    if error:
+        return {"ok": False, "message": error, "summary": "", "picks": []}
 
     prompt = _DEEP_PROMPT_TEMPLATE.format(
-        date=date, count=total, summaries_block="\n".join(summaries)
+        date=date, count=len(summaries), summaries_block="\n".join(summaries)
     )
 
     gen_ok, text = generate_ollama_json(host, model, prompt, _PICKS_SCHEMA)
@@ -298,5 +321,63 @@ def analyze_with_ollama_deep(
         }
 
     result = _save_result(date, f"ollama-deep:{model}", summary, raw_picks)
+    result["article_excerpts"] = article_excerpts
+    return result
+
+
+# 雲端 API（Gemini 免費額度 / Claude、GPT 付費）沒有像 Ollama 一樣可以強制 JSON schema，
+# 每次呼叫之間留一點間隔避免碰到免費額度的請求頻率限制
+_PAID_API_INTER_CALL_DELAY = 2.0
+
+
+def analyze_deep_with_provider(
+    date: str, provider: str, api_key: str, progress_callback=None
+) -> dict:
+    """深度分析（雲端 API 版：Gemini/Claude/GPT）：跟 analyze_with_ollama_deep 同一套
+    「抓內文→逐篇摘要→彙整挑股」流程，只是換成呼叫 src/ai_providers.py 的付費/免費雲端 API。
+    Gemini 有真正免費額度（不用綁信用卡），Claude/GPT 是計費API。
+
+    progress_callback(current, total, message) 可選，用於UI顯示進度。
+    """
+
+    def _summarize(title: str, content: str) -> str:
+        prompt = _ARTICLE_SUMMARY_PROMPT.format(title=title, content=content)
+        ok, text = generate_text(provider, api_key, prompt, max_tokens=300)
+        return text if ok else title
+
+    error, summaries, article_excerpts = _gather_and_summarize(
+        date, _summarize, progress_callback, inter_call_delay=_PAID_API_INTER_CALL_DELAY
+    )
+    if error:
+        return {"ok": False, "message": error, "summary": "", "picks": []}
+
+    prompt = _DEEP_PROMPT_TEMPLATE.format(
+        date=date, count=len(summaries), summaries_block="\n".join(summaries)
+    )
+
+    gen_ok, text = generate_text(provider, api_key, prompt, max_tokens=3000)
+    if not gen_ok:
+        return {
+            "ok": False,
+            "message": text,
+            "summary": "",
+            "picks": [],
+            "article_excerpts": article_excerpts,
+        }
+
+    try:
+        parsed = _extract_json(text)
+        summary = parsed.get("summary", "")
+        raw_picks = parsed.get("picks", [])
+    except Exception as exc:  # noqa: BLE001 - 雲端API沒有structured output，回覆格式不受100%控制
+        return {
+            "ok": False,
+            "message": f"回覆的 JSON 無法解析（錯誤: {exc}）\n\n原始回覆:\n{text[:500]}",
+            "summary": "",
+            "picks": [],
+            "article_excerpts": article_excerpts,
+        }
+
+    result = _save_result(date, f"{provider}-deep", summary, raw_picks)
     result["article_excerpts"] = article_excerpts
     return result
