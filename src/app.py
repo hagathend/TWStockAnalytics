@@ -17,6 +17,7 @@ from src.config_ai import (
     save_ollama_settings,
 )
 from src.config_watchlist import add_stock, load_watchlist, remove_stock
+from src.stock_analysis import build_stock_analysis_prompt, save_stock_analysis
 from src.storage import db
 
 st.set_page_config(page_title="台股每日資訊收集", layout="wide")
@@ -295,6 +296,34 @@ def detail_page():
     else:
         st.caption("此日期尚無相關新聞（新聞的關聯代號目前只有標題內含代號時才會標記）")
 
+    st.divider()
+    st.subheader("AI 個股分析（複製貼上流程）")
+    st.caption(
+        "產生包含籌碼歷史、股價與相關新聞的提示詞，複製貼到你平常用的網頁版 Claude / ChatGPT / "
+        "Gemini，請它分析籌碼面與未來展望，再把結果貼回來儲存，之後會收錄進「報表」頁。"
+    )
+    if st.button("產生個股分析提示詞", key="gen_stock_prompt"):
+        st.session_state["stock_prompt_code"] = code
+        st.session_state["stock_prompt"] = build_stock_analysis_prompt(code)
+
+    if st.session_state.get("stock_prompt_code") == code and st.session_state.get("stock_prompt"):
+        st.code(st.session_state["stock_prompt"], language=None)
+        st.caption("複製上面的內容，貼到你平常用的網頁版 AI，把回覆貼到下面")
+
+    raw_stock_analysis = st.text_area("貼上 AI 的分析結果", height=200, key="stock_analysis_input")
+    if st.button("儲存個股分析", key="save_stock_analysis_btn"):
+        result = save_stock_analysis(code, raw_stock_analysis)
+        if result["ok"]:
+            st.success(result["message"])
+        else:
+            st.warning(result["message"])
+
+    existing_analysis = db.query_stock_analysis(_date.today().isoformat(), code)
+    if existing_analysis:
+        st.markdown("**今天已儲存的分析**")
+        st.write(existing_analysis[0]["analysis"])
+        st.caption(f"儲存時間: {existing_analysis[0]['created_at']}")
+
 
 def _render_article_excerpts(selected_date: str):
     """顯示深度分析逐篇產生的新聞摘要：優先顯示這次剛跑完、還在記憶體裡的結果，
@@ -520,11 +549,80 @@ def ai_settings_page():
         st.success(f"已儲存，目前使用的 AI 供應商: {PROVIDER_LABELS[active_provider]}")
 
 
+def _format_net(value) -> str:
+    return f"{value:+,}" if value is not None else "-"
+
+
+def _build_report_text(date: str) -> str:
+    lines = [f"# 台股每日報告 - {date}", ""]
+
+    lines.append("## 新聞摘要")
+    ai_summary = db.query_ai_analysis_summary(date)
+    if ai_summary:
+        lines.append(ai_summary["summary"])
+        lines.append(f"\n*分析來源: {ai_summary['provider']}｜產生時間: {ai_summary['created_at']}*")
+    else:
+        lines.append("_（此日期尚無新聞分析摘要，請到「AI 分析」頁產生）_")
+    lines.append("")
+
+    lines.append("## 今日新聞焦點個股（含三大法人買賣超）")
+    picks = db.query_ai_picks(date)
+    if picks:
+        lines.append("| 排名 | 代號 | 名稱 | 關注原因 | 外資買賣超(股) | 投信買賣超(股) | 自營商買賣超(股) |")
+        lines.append("|---|---|---|---|---|---|---|")
+        for p in picks:
+            inst_rows = db.query_institutional(date, p["code"])
+            inst = inst_rows[0] if inst_rows else None
+            foreign = _format_net(inst["foreign_net"]) if inst else "-"
+            trust = _format_net(inst["trust_net"]) if inst else "-"
+            dealer = _format_net(inst["dealer_net"]) if inst else "-"
+            lines.append(
+                f"| {p['rank']} | {p['code']} | {p['name']} | {p['reason']} | {foreign} | {trust} | {dealer} |"
+            )
+    else:
+        lines.append("_（此日期尚無 AI 分析結果，請到「AI 分析」頁產生）_")
+    lines.append("")
+
+    lines.append("## 個股深度分析")
+    stock_analyses = db.query_stock_analysis(date)
+    if stock_analyses:
+        for sa in stock_analyses:
+            lines.append(f"### {sa['code']} {sa['name']}")
+            lines.append(sa["analysis"])
+            lines.append(f"\n*儲存時間: {sa['created_at']}*")
+            lines.append("")
+    else:
+        lines.append("_（此日期尚無個股深度分析，可到「個股詳情」頁為關注的股票產生分析）_")
+
+    return "\n".join(lines)
+
+
+def report_page():
+    st.title("每日報告")
+    st.caption("彙整新聞摘要、AI 新聞焦點個股（含當日三大法人買賣超）、個股深度分析，可直接複製或下載。")
+
+    today = _date.today().isoformat()
+    available_dates = db.query_available_dates() or [today]
+    selected_date = st.selectbox("選擇報告日期", available_dates, key="report_date")
+
+    report_text = _build_report_text(selected_date)
+    st.markdown(report_text)
+
+    st.divider()
+    st.download_button(
+        "下載報告 (Markdown)",
+        report_text,
+        file_name=f"twstock_report_{selected_date}.md",
+        mime="text/markdown",
+    )
+
+
 HOME_PAGE = st.Page(home_page, title="總覽", icon="📊", default=True)
 DETAIL_PAGE = st.Page(detail_page, title="個股詳情", icon="📈")
 AI_ANALYSIS_PAGE = st.Page(ai_analysis_page, title="AI 分析", icon="🤖")
+REPORT_PAGE = st.Page(report_page, title="每日報告", icon="📝")
 AI_SETTINGS_PAGE = st.Page(ai_settings_page, title="AI 設定", icon="⚙️")
 
 if __name__ == "__main__":
-    nav = st.navigation([HOME_PAGE, DETAIL_PAGE, AI_ANALYSIS_PAGE, AI_SETTINGS_PAGE])
+    nav = st.navigation([HOME_PAGE, DETAIL_PAGE, AI_ANALYSIS_PAGE, REPORT_PAGE, AI_SETTINGS_PAGE])
     nav.run()

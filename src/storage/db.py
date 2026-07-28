@@ -1,6 +1,6 @@
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import date as _date, datetime, timedelta
 
 from src.config import DB_PATH
 
@@ -82,6 +82,15 @@ CREATE TABLE IF NOT EXISTS ai_analysis_summary (
     provider TEXT,
     summary TEXT,
     created_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS stock_analysis (
+    date TEXT NOT NULL,
+    code TEXT NOT NULL,
+    name TEXT,
+    analysis TEXT,
+    created_at TEXT,
+    PRIMARY KEY (date, code)
 );
 """
 
@@ -334,3 +343,39 @@ def query_ai_analysis_summary(date: str) -> dict | None:
         )
         row = cur.fetchone()
         return dict(row) if row else None
+
+
+def save_stock_analysis(date: str, code: str, name: str, analysis: str):
+    """存入使用者從網頁版AI複製貼回來的個股籌碼/未來展望分析"""
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT OR REPLACE INTO stock_analysis (date, code, name, analysis, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (date, code, name, analysis, datetime.now().isoformat(timespec="seconds")),
+        )
+
+
+def query_stock_analysis(date: str, code: str | None = None):
+    with get_conn() as conn:
+        if code:
+            cur = conn.execute(
+                "SELECT * FROM stock_analysis WHERE date = ? AND code = ?", (date, code)
+            )
+        else:
+            cur = conn.execute("SELECT * FROM stock_analysis WHERE date = ?", (date,))
+        return [dict(r) for r in cur.fetchall()]
+
+
+def query_news_by_keyword(keyword: str, days: int = 7, limit: int = 10):
+    """搜尋最近N天內標題/關聯代號/摘要符合關鍵字的新聞，供個股分析湊相關新聞用
+    （不像 query_news 限定單一日期，這裡是跨最近幾天搜尋）"""
+    since = (_date.today() - timedelta(days=days)).isoformat()
+    like = f"%{keyword}%"
+    with get_conn() as conn:
+        cur = conn.execute(
+            """SELECT * FROM news WHERE date >= ?
+               AND (title LIKE ? OR related_code LIKE ? OR excerpt LIKE ?)
+               ORDER BY published_at DESC LIMIT ?""",
+            (since, like, like, like, limit),
+        )
+        return [dict(r) for r in cur.fetchall()]

@@ -77,8 +77,26 @@
 - [x] **Ollama 本機 AI 自動分析**：使用者提到自己有裝 Ollama，可以免費本機跑模型解決付費 API 的問題，因此串接上去並設為預設自動觸發（見下方說明）
 - [x] **AI 深度分析（逐篇抓內文摘要）**：使用者發現 qwen2.5:7b 沒辦法自己爬網頁，只能就給定的文字做摘要，因此改成「先抓每則新聞的內文 → 逐篇AI摘要 → 彙整摘要再送一次AI選前20檔」的兩階段流程，取代原本只看標題+短摘要的做法（見下方說明）
 - [x] 逐篇摘要結果存入 `news.excerpt` 欄位並顯示在「AI 分析」頁，結構化資料可作為之後報表產出的素材
-- [ ] 報表產出（Markdown / HTML / PDF）
+- [x] **個股籌碼/未來展望分析（複製貼上流程）+ 每日報告產出**：見下方說明
 - [ ] LINE Bot 串接，報表推播
+
+#### 個股籌碼分析 + 每日報告（2026-07-28）
+
+個股層級的分析（籌碼面判斷、未來展望）需要比較強的推理能力，使用者認為這種任務不像新聞摘要那樣適合丟給本機小模型，因此比照新聞分析的「複製貼上」模式，而不是再接一套 Ollama/API 自動呼叫：
+
+1. `src/stock_analysis.py`：`build_stock_analysis_prompt(code)` 組出一份提示詞，內容包含：
+   - 近期股價（FinMind 即時抓，最近30天，顯示最後15筆）
+   - 近期三大法人買賣超歷史（本地資料庫累積，`db.query_code_history("institutional", code)`）
+   - 近期融資融券歷史（本地資料庫累積）
+   - 相關新聞（新增 `db.query_news_by_keyword(keyword, days=7)`，跨最近7天用代號/名稱搜尋標題、關聯代號、逐篇摘要欄位，去重合併）
+   - 要求 AI 回答兩件事：**籌碼面分析**（法人買賣超趨勢、融資融券訊號、多空判斷）+ **個股未來預期**（短期1-2週展望、機會與風險）
+2. `save_stock_analysis(code, analysis_text)` 存進新增的 `stock_analysis` 資料表（date, code, name, analysis, created_at）
+3. 「個股詳情」頁新增「AI 個股分析」區塊：按鈕產生提示詞（`st.code` 顯示，可複製）→ 使用者自行貼到網頁版 AI → 貼回結果 → 存檔；也會顯示當天已存的分析
+4. 新增「每日報告」頁（`report_page()`，`_build_report_text()`）彙整：
+   - 新聞摘要（`ai_analysis_summary` 表）
+   - 今日新聞焦點個股 Top20（`ai_picks` 表），**每檔都併上當天的三大法人買賣超**（`db.query_institutional(date, code)`，這樣不用把全市場上萬筆法人資料整個塞進報告，只顯示跟報告相關的重點個股）
+   - 個股深度分析（`stock_analysis` 表，只顯示當天已經產生過分析的股票）
+   - 輸出成 Markdown，頁面直接渲染，也提供「下載報告」按鈕匯出 `.md` 檔
 
 #### AI 深度分析：逐篇抓內文摘要（目前預設方式，取代單次呼叫版）
 
@@ -225,6 +243,7 @@ TWStockAnalytics/
 │   ├── config_watchlist.py    # 使用者自訂觀察名單讀寫 (data/watchlist.json)
 │   ├── ai_providers.py        # Ollama/Claude/GPT/Gemini 呼叫（連線測試+文字生成+structured output）
 │   ├── ai_analysis.py         # AI新聞分析：深度版(逐篇摘要)/快速版/複製貼上解析，皆共用
+│   ├── stock_analysis.py      # 個股籌碼分析提示詞產生 + 複製貼上結果儲存
 │   ├── charting.py            # 個股K線圖 (plotly + FinMind 即時歷史)
 │   ├── collect_all.py         # 每日收集流程整合
 │   ├── collectors/
@@ -235,7 +254,7 @@ TWStockAnalytics/
 │   │   └── article_fetcher.py # Playwright headless瀏覽器，解析RSS連結的JS轉址取得全文
 │   ├── storage/
 │   │   └── db.py              # SQLite 讀寫
-│   └── app.py                 # Streamlit 入口（總覽/個股詳情/AI分析/AI設定 四頁）
+│   └── app.py                 # Streamlit 入口（總覽/個股詳情/AI分析/每日報告/AI設定 五頁）
 └── scripts/
     ├── run_daily_collect.py   # 給排程器呼叫的每日收集流程
     └── run_daily_collect.bat  # 給 Windows 工作排程器呼叫
