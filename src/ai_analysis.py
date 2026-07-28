@@ -21,8 +21,8 @@ from src.storage import db
 _MAX_NEWS_ITEMS = 60
 _SUMMARY_TRUNCATE = 150
 
-_MAX_CNYES_FOR_DEEP = 15  # 鉅亨網一般市場新聞
-_MAX_RSS_FOR_DEEP = 10  # Google News RSS 個股延伸新聞（watchlist個股專屬，數量少但精準要保留）
+_MAX_CNYES_FOR_DEEP = 40  # 鉅亨網一般市場新聞：涵蓋整個大盤，篇數多才能覆蓋到夠多不同的公司
+_MAX_RSS_FOR_DEEP = 15  # Google News RSS 個股延伸新聞（只涵蓋watchlist那幾檔，篇數增加不太會擴大公司覆蓋範圍，保留少量即可）
 
 _ARTICLE_SUMMARY_PROMPT = """請閱讀以下台股新聞內文，用不超過100字的繁體中文摘要重點，
 特別留意有沒有提到具體公司名稱/股票代號、影響方向（利多/利空）、關鍵數字（營收、財報、目標價等）。
@@ -67,6 +67,64 @@ _PICKS_SCHEMA = {
     },
     "required": ["summary", "picks"],
 }
+
+# 新聞篇數多的時候，一次把所有摘要塞進同一個提示詞會讓模型表現變差
+# （實測55篇摘要塞在一起，qwen2.5:7b 只挑出2檔、還漂移成簡體字輸出）。
+# 改成分批：每批只找候選個股（不用湊到20檔，找到多少算多少），批次之間去重後，
+# 再用一次「候選清單→最終20檔」的呼叫做排序，這樣每次進模型的內容都不會太長。
+_BATCH_SIZE = 15
+
+_BATCH_PICKS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "picks": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "code": {"type": "string"},
+                    "name": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["code", "name", "reason"],
+            },
+        },
+    },
+    "required": ["picks"],
+}
+
+_BATCH_PICKS_PROMPT = """以下是幾則台股新聞摘要。
+
+請「列出」這些摘要中每一個有明確提到具體公司名稱或股票代號、且帶有實質內容
+（例如：財報數字、法說會、合作案、股價異動、目標價等）的個股。不要因為覺得
+「不夠重要」就自己先篩掉——只要摘要有明確提到某家公司的具體消息就列出來，
+重要性判斷留給後續步驟處理。同一則新聞如果提到多家公司，都要列出來。
+
+盡量附上正確的股票代號，每檔給不超過 40 字的摘要原因。只有在這批摘要完全沒有
+提到任何具體公司時，才回傳空陣列。
+
+請「只」回傳以下 JSON 格式的內容，不要加上任何說明文字：
+{{"picks": [{{"code": "2330", "name": "台積電", "reason": "..."}}]}}
+
+新聞摘要：
+{batch_block}
+"""
+
+_FINAL_RANK_PROMPT = """你是台股新聞分析助手。以下是根據 {date} 新聞整理出的候選個股清單
+（共 {count} 檔，每一檔都已經有實際新聞依據，這是篩選過的候選名單，不是原始新聞）。
+
+請完成以下工作：
+1. 用 3-5 句話總結今天新聞的重點主題與市場氣氛
+2. 把清單中「每一檔」個股都納入最終結果（最多列出 20 檔），依重要程度排序。
+   只有在確定兩檔是同一家公司重複時才合併，不要因為主觀覺得某檔「不夠重要」
+   就自己刪減——這份候選清單已經是篩選過的結果，原則上都要保留
+
+請「只」回傳以下 JSON 格式的內容，不要加上任何說明文字、不要用 markdown code fence 包起來：
+{{"summary": "...", "picks": [{{"code": "2330", "name": "台積電", "reason": "..."}}]}}
+
+候選個股清單：
+{candidates_block}
+"""
 
 _PROMPT_TEMPLATE = """你是台股新聞分析助手。以下是 {date} 收集到的台股新聞標題與摘要（共 {count} 則）。
 
@@ -136,7 +194,7 @@ def _normalize_picks(raw_picks: list[dict]) -> list[dict]:
     picks = []
     for i, p in enumerate(raw_picks[:20], start=1):
         code = str(p.get("code", "")).strip()
-        code = re.sub(r"\.(TW|TWO|TPEX)$", "", code, flags=re.IGNORECASE)
+        code = re.sub(r"[.\-](TW|TWO|TPEX)$", "", code, flags=re.IGNORECASE)
         name = p.get("name", "")
         code, name = _verify_pick(code, name)
         picks.append(
@@ -155,6 +213,82 @@ def _save_result(date: str, provider_label: str, summary: str, raw_picks: list[d
     db.save_ai_picks(date, picks)
     db.save_ai_analysis_summary(date, provider_label, summary)
     return {"ok": True, "message": "分析結果已儲存", "summary": summary, "picks": picks}
+
+
+def _dedup_candidates(raw_candidates: list[dict]) -> list[dict]:
+    """依代號去重複，同一代號只留第一次出現的（不同批次講同一檔股票，原因通常大同小異）"""
+    seen = set()
+    deduped = []
+    for c in raw_candidates:
+        code = str(c.get("code", "")).strip()
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        deduped.append(c)
+    return deduped
+
+
+def _select_top_picks(date: str, summaries: list[str], call_llm) -> tuple[str | None, str, list[dict]]:
+    """從逐篇摘要中挑出最終的前20檔個股。
+
+    call_llm(prompt, schema) -> (是否成功, 文字內容或錯誤訊息)。schema 是 dict，
+    Ollama 用來強制輸出格式；雲端 API（沒有 structured output）可以忽略這個參數。
+
+    篇數不多時直接一次彙整；篇數多的話（實測超過20篇左右）改成分批只找候選個股、
+    去重後再用一次「候選清單→最終20檔」彙整，避免一次塞太多內容讓模型表現變差
+    （曾經實測55篇摘要一次彙整，模型只挑出2檔還漂移成簡體字輸出）。
+
+    回傳 (錯誤訊息或None, 總結文字, 原始picks清單)"""
+    if len(summaries) <= _BATCH_SIZE:
+        prompt = _DEEP_PROMPT_TEMPLATE.format(
+            date=date, count=len(summaries), summaries_block="\n".join(summaries)
+        )
+        ok, text = call_llm(prompt, _PICKS_SCHEMA)
+        if not ok:
+            return text, "", []
+        try:
+            parsed = _extract_json(text)
+        except Exception as exc:  # noqa: BLE001 - 需要把任何解析例外轉成使用者看得懂的訊息
+            return f"回覆的 JSON 無法解析（錯誤: {exc}）\n\n原始回覆:\n{text[:500]}", "", []
+        return None, parsed.get("summary", ""), parsed.get("picks", [])
+
+    batches = [summaries[i : i + _BATCH_SIZE] for i in range(0, len(summaries), _BATCH_SIZE)]
+    raw_candidates = []
+    for batch in batches:
+        batch_prompt = _BATCH_PICKS_PROMPT.format(batch_block="\n".join(batch))
+        ok, text = call_llm(batch_prompt, _BATCH_PICKS_SCHEMA)
+        if not ok:
+            continue  # 單一批次失敗就跳過，不中斷整體分析
+        try:
+            parsed = _extract_json(text)
+        except Exception:  # noqa: BLE001 - 單一批次解析失敗，優雅跳過
+            continue
+        # 這裡就先校正代號/名稱（而不是等到最終結果才校正），
+        # 這樣候選清單本身是乾淨的，最後彙整排序時模型看到的資訊才一致
+        for p in parsed.get("picks", []):
+            code = re.sub(r"[.\-](TW|TWO|TPEX)$", "", str(p.get("code", "")).strip(), flags=re.IGNORECASE)
+            name = p.get("name", "")
+            code, name = _verify_pick(code, name)
+            raw_candidates.append({"code": code, "name": name, "reason": p.get("reason", "")})
+
+    candidates = _dedup_candidates(raw_candidates)
+    if not candidates:
+        return "分批分析後沒有找到任何候選個股", "", []
+
+    candidates_block = "\n".join(
+        f"{c.get('code', '')} {c.get('name', '')} — {c.get('reason', '')}" for c in candidates
+    )
+    prompt = _FINAL_RANK_PROMPT.format(
+        date=date, count=len(candidates), candidates_block=candidates_block
+    )
+    ok, text = call_llm(prompt, _PICKS_SCHEMA)
+    if not ok:
+        return text, "", []
+    try:
+        parsed = _extract_json(text)
+    except Exception as exc:  # noqa: BLE001 - 需要把任何解析例外轉成使用者看得懂的訊息
+        return f"回覆的 JSON 無法解析（錯誤: {exc}）\n\n原始回覆:\n{text[:500]}", "", []
+    return None, parsed.get("summary", ""), parsed.get("picks", [])
 
 
 def parse_and_save(date: str, provider_label: str, raw_response: str) -> dict:
@@ -293,28 +427,14 @@ def analyze_with_ollama_deep(
     if error:
         return {"ok": False, "message": error, "summary": "", "picks": []}
 
-    prompt = _DEEP_PROMPT_TEMPLATE.format(
-        date=date, count=len(summaries), summaries_block="\n".join(summaries)
-    )
+    def _call_llm(prompt: str, schema: dict) -> tuple[bool, str]:
+        return generate_ollama_json(host, model, prompt, schema)
 
-    gen_ok, text = generate_ollama_json(host, model, prompt, _PICKS_SCHEMA)
-    if not gen_ok:
+    error, summary, raw_picks = _select_top_picks(date, summaries, _call_llm)
+    if error:
         return {
             "ok": False,
-            "message": text,
-            "summary": "",
-            "picks": [],
-            "article_excerpts": article_excerpts,
-        }
-
-    try:
-        parsed = json.loads(text)
-        summary = parsed.get("summary", "")
-        raw_picks = parsed.get("picks", [])
-    except Exception as exc:  # noqa: BLE001 - Ollama回覆理論上已受schema約束，仍需保護解析失敗的情況
-        return {
-            "ok": False,
-            "message": f"Ollama 回覆的 JSON 無法解析（錯誤: {exc}）\n\n原始回覆:\n{text[:500]}",
+            "message": error,
             "summary": "",
             "picks": [],
             "article_excerpts": article_excerpts,
@@ -351,28 +471,14 @@ def analyze_deep_with_provider(
     if error:
         return {"ok": False, "message": error, "summary": "", "picks": []}
 
-    prompt = _DEEP_PROMPT_TEMPLATE.format(
-        date=date, count=len(summaries), summaries_block="\n".join(summaries)
-    )
+    def _call_llm(prompt: str, schema: dict) -> tuple[bool, str]:
+        return generate_text(provider, api_key, prompt, max_tokens=3000)
 
-    gen_ok, text = generate_text(provider, api_key, prompt, max_tokens=3000)
-    if not gen_ok:
+    error, summary, raw_picks = _select_top_picks(date, summaries, _call_llm)
+    if error:
         return {
             "ok": False,
-            "message": text,
-            "summary": "",
-            "picks": [],
-            "article_excerpts": article_excerpts,
-        }
-
-    try:
-        parsed = _extract_json(text)
-        summary = parsed.get("summary", "")
-        raw_picks = parsed.get("picks", [])
-    except Exception as exc:  # noqa: BLE001 - 雲端API沒有structured output，回覆格式不受100%控制
-        return {
-            "ok": False,
-            "message": f"回覆的 JSON 無法解析（錯誤: {exc}）\n\n原始回覆:\n{text[:500]}",
+            "message": error,
             "summary": "",
             "picks": [],
             "article_excerpts": article_excerpts,
