@@ -82,6 +82,12 @@ def _display_df(rows: list[dict], column_labels: dict[str, str]) -> pd.DataFrame
     ]
 
 
+def _md_linebreaks(text: str) -> str:
+    """AI回覆通常一行一個重點，但 Markdown 規則裡單一換行會被當成空白吃掉、
+    不會顯示成新的一行，要轉成 Markdown 的強制換行語法（兩個空白+換行）才會正確顯示。"""
+    return (text or "").replace("\n", "  \n")
+
+
 def _go_to_detail(code: str):
     st.session_state["selected_code"] = code
     st.switch_page(DETAIL_PAGE)
@@ -323,7 +329,7 @@ def detail_page():
     existing_analysis = db.query_stock_analysis(_date.today().isoformat(), code)
     if existing_analysis:
         st.markdown("**今天已儲存的分析**")
-        st.write(existing_analysis[0]["analysis"])
+        st.write(_md_linebreaks(existing_analysis[0]["analysis"]))
         st.caption(f"儲存時間: {existing_analysis[0]['created_at']}")
 
 
@@ -352,7 +358,7 @@ def _render_article_excerpts(selected_date: str):
             title_line = f"**[{item['title']}]({item['url']})**" if item.get("url") else f"**{item['title']}**"
             st.markdown(title_line)
             st.caption(f"來源: {item['source']}")
-            st.write(item["excerpt"])
+            st.write(_md_linebreaks(item["excerpt"]))
 
 
 def ai_analysis_page():
@@ -498,7 +504,7 @@ def ai_analysis_page():
     existing_market = db.query_market_analysis(selected_date)
     if existing_market:
         st.markdown("**已儲存的大盤分析**")
-        st.write(existing_market["analysis"])
+        st.write(_md_linebreaks(existing_market["analysis"]))
         st.caption(f"儲存時間: {existing_market['created_at']}")
 
 
@@ -594,7 +600,7 @@ def _build_report_text(date: str) -> str:
     lines.append("## 新聞摘要")
     ai_summary = db.query_ai_analysis_summary(date)
     if ai_summary:
-        lines.append(ai_summary["summary"])
+        lines.append(_md_linebreaks(ai_summary["summary"]))
         lines.append(f"\n*分析來源: {ai_summary['provider']}｜產生時間: {ai_summary['created_at']}*")
     else:
         lines.append("_（此日期尚無新聞分析摘要，請到「AI 分析」頁產生）_")
@@ -603,7 +609,7 @@ def _build_report_text(date: str) -> str:
     lines.append("## 大盤整體籌碼分析")
     market_analysis = db.query_market_analysis(date)
     if market_analysis:
-        lines.append(market_analysis["analysis"])
+        lines.append(_md_linebreaks(market_analysis["analysis"]))
         lines.append(f"\n*儲存時間: {market_analysis['created_at']}*")
     else:
         lines.append("_（此日期尚無大盤分析，請到「AI 分析」頁產生）_")
@@ -632,7 +638,7 @@ def _build_report_text(date: str) -> str:
     if stock_analyses:
         for sa in stock_analyses:
             lines.append(f"### {sa['code']} {sa['name']}")
-            lines.append(sa["analysis"])
+            lines.append(_md_linebreaks(sa["analysis"]))
             lines.append(f"\n*儲存時間: {sa['created_at']}*")
             lines.append("")
     else:
