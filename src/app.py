@@ -5,7 +5,7 @@ from datetime import date as _date
 import pandas as pd
 import streamlit as st
 
-from src.ai_analysis import analyze_with_ollama, build_prompt, parse_and_save
+from src.ai_analysis import analyze_with_ollama_deep, build_prompt, parse_and_save
 from src.ai_providers import PROVIDER_LABELS, generate_text, list_ollama_models, test_connection
 from src.charting import build_candlestick
 from src.collect_all import run_daily_collect
@@ -97,12 +97,20 @@ def _render_sidebar() -> str:
             today = _date.today().isoformat()
             ollama_settings = load_ollama_settings()
             if ollama_settings.get("auto_analyze_after_collect"):
-                with st.spinner(f"用本機 Ollama ({ollama_settings['model']}) 自動分析新聞中..."):
-                    ai_result = analyze_with_ollama(
-                        today, ollama_settings["host"], ollama_settings["model"]
-                    )
+                progress_bar = st.progress(0.0, text="準備深度分析（先抓內文再逐篇摘要，可能要幾分鐘）...")
+
+                def _update_progress(cur, total, msg):
+                    progress_bar.progress(cur / total if total else 0.0, text=f"{msg} ({cur}/{total})")
+
+                ai_result = analyze_with_ollama_deep(
+                    today,
+                    ollama_settings["host"],
+                    ollama_settings["model"],
+                    progress_callback=_update_progress,
+                )
+                progress_bar.empty()
                 if ai_result["ok"]:
-                    st.success(f"AI 分析完成，已產生 {len(ai_result['picks'])} 檔新聞焦點")
+                    st.success(f"AI 深度分析完成，已產生 {len(ai_result['picks'])} 檔新聞焦點")
                 else:
                     st.warning(f"自動 AI 分析失敗（可到「AI 分析」頁改用複製貼上）：{ai_result['message']}")
             else:
@@ -300,12 +308,26 @@ def ai_analysis_page():
     available_dates = db.query_available_dates() or [today]
     selected_date = st.selectbox("要分析哪一天收集到的新聞", available_dates)
 
-    st.subheader("0. 用本機 Ollama 自動分析（推薦）")
+    st.subheader("0. 用本機 Ollama 深度分析（推薦）")
     ollama_settings = load_ollama_settings()
-    st.caption(f"目前設定：{ollama_settings['host']} ｜ 模型: {ollama_settings['model']}（可到「AI 設定」頁修改）")
-    if st.button("用 Ollama 分析這天的新聞", type="primary"):
-        with st.spinner(f"用本機 Ollama ({ollama_settings['model']}) 分析中，第一次跑可能要一兩分鐘..."):
-            result = analyze_with_ollama(selected_date, ollama_settings["host"], ollama_settings["model"])
+    st.caption(
+        f"目前設定：{ollama_settings['host']} ｜ 模型: {ollama_settings['model']}（可到「AI 設定」頁修改）。"
+        "會先幫每則新聞抓內文（鉅亨網已內建、Google News 用 headless 瀏覽器解析）再逐篇摘要，"
+        "比只看標題準確很多，但也比較慢（視新聞則數可能要幾分鐘）。"
+    )
+    if st.button("用 Ollama 深度分析這天的新聞", type="primary"):
+        progress_bar = st.progress(0.0, text="準備中...")
+
+        def _update_progress(cur, total, msg):
+            progress_bar.progress(cur / total if total else 0.0, text=f"{msg} ({cur}/{total})")
+
+        result = analyze_with_ollama_deep(
+            selected_date,
+            ollama_settings["host"],
+            ollama_settings["model"],
+            progress_callback=_update_progress,
+        )
+        progress_bar.empty()
         if result["ok"]:
             st.success(result["message"])
         else:

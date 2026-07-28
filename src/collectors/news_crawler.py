@@ -1,14 +1,20 @@
-"""鉅亨網 (cnyes) 台股新聞收集器，使用其公開 JSON API（免爬 HTML）。"""
+"""鉅亨網 (cnyes) 台股新聞收集器，使用其公開 JSON API（免爬 HTML）。
 
+這個 API 的回應本身就包含文章全文（content 欄位，HTML 實體跳脫過的 HTML），
+所以不用另外爬網站，直接解析存起來即可，供之後 AI 逐篇摘要用。"""
+
+import html
 import re
 from datetime import datetime, timedelta
 
 import requests
+from bs4 import BeautifulSoup
 
 _HEADERS = {"User-Agent": "Mozilla/5.0"}
 _TIMEOUT = 20
 _CATEGORY = "tw_stock"  # 台股分類
 _CODE_IN_TITLE = re.compile(r"\((\d{4,6}[A-Z]?)\)")
+_MAX_CONTENT_LENGTH = 4000
 
 
 def _extract_code(title: str) -> str | None:
@@ -16,6 +22,16 @@ def _extract_code(title: str) -> str | None:
     精準分類留待第二階段交給 AI 判斷。"""
     match = _CODE_IN_TITLE.search(title or "")
     return match.group(1) if match else None
+
+
+def _extract_content_text(raw_content: str) -> str:
+    """content 欄位是 HTML 實體跳脫過的 HTML（例如 &lt;p&gt;...&lt;/p&gt;），
+    要先反跳脫還原成真正的 HTML 標籤，再用 BeautifulSoup 去標籤取純文字。"""
+    if not raw_content:
+        return ""
+    unescaped = html.unescape(raw_content)
+    text = BeautifulSoup(unescaped, "html.parser").get_text(separator=" ", strip=True)
+    return text[:_MAX_CONTENT_LENGTH]
 
 
 def fetch_cnyes_news(hours: int = 26, limit: int = 100) -> list[dict]:
@@ -53,6 +69,7 @@ def fetch_cnyes_news(hours: int = 26, limit: int = 100) -> list[dict]:
                 "title": title,
                 "url": f"https://news.cnyes.com/news/id/{news_id}" if news_id else None,
                 "summary": (item.get("summary") or "")[:500],
+                "content": _extract_content_text(item.get("content", "")),
                 "related_code": _extract_code(title),
                 "published_at": published_at,
                 "collected_at": collected_at,

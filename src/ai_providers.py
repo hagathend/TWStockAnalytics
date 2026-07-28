@@ -161,3 +161,21 @@ def generate_ollama_json(host: str, model: str, prompt: str, schema: dict) -> tu
         return True, text
     except Exception as exc:  # noqa: BLE001 - 需要把任何底層例外轉成使用者看得懂的訊息
         return False, f"Ollama 呼叫失敗: {exc}"
+
+
+def generate_ollama_text(host: str, model: str, prompt: str) -> tuple[bool, str]:
+    """呼叫本機模型產生一般文字（不強制JSON格式），用於逐篇新聞摘要這種單純文字輸出的任務。
+    回傳 (是否成功, 文字內容或錯誤訊息)"""
+    try:
+        resp = requests.post(
+            f"{host}/api/generate",
+            json={"model": model, "prompt": prompt, "stream": False, "think": False},
+            timeout=_OLLAMA_TIMEOUT,
+        )
+        resp.raise_for_status()
+        text = resp.json().get("response", "").strip()
+        if not text:
+            return False, "Ollama 回傳了空白內容"
+        return True, text
+    except Exception as exc:  # noqa: BLE001 - 需要把任何底層例外轉成使用者看得懂的訊息
+        return False, f"Ollama 呼叫失敗: {exc}"

@@ -75,8 +75,26 @@
 - [x] 個股 K 線圖：「個股詳情」頁用 plotly 畫蠟燭圖，即時向 FinMind 抓近 90 天歷史（本地資料庫本身歷史很短，累積中）
 - [x] 多頁面導覽：改用 `st.navigation` + `st.Page`（總覽 / 個股詳情 / AI 分析 / AI 設定 四頁），觀察名單與 AI Top20 項目可點擊跳轉個股詳情頁
 - [x] **Ollama 本機 AI 自動分析**：使用者提到自己有裝 Ollama，可以免費本機跑模型解決付費 API 的問題，因此串接上去並設為預設自動觸發（見下方說明）
+- [x] **AI 深度分析（逐篇抓內文摘要）**：使用者發現 qwen2.5:7b 沒辦法自己爬網頁，只能就給定的文字做摘要，因此改成「先抓每則新聞的內文 → 逐篇AI摘要 → 彙整摘要再送一次AI選前20檔」的兩階段流程，取代原本只看標題+短摘要的做法（見下方說明）
 - [ ] 報表產出（Markdown / HTML / PDF）
 - [ ] LINE Bot 串接，報表推播
+
+#### AI 深度分析：逐篇抓內文摘要（目前預設方式，取代單次呼叫版）
+
+使用者發現 qwen2.5:7b 速度雖快，但它沒辦法自己把網頁內容爬出來分析——只能就「已經準備好的文字」做摘要或判斷。原本 `analyze_with_ollama()` 只把新聞標題+API自帶的短摘要餵給AI，資訊量不夠。改成兩階段流程：
+
+1. **取得每則新聞的內文**：
+   - 鉅亨網 (cnyes)：API 回應本身就含全文（`content` 欄位，HTML實體跳脫過的HTML），不用額外爬，`src/collectors/news_crawler.py` 解析存進 `news.content` 欄位即可
+   - Google News RSS：RSS 提供的連結是 `news.google.com` 的中介頁面，要靠 JavaScript 才會轉址到真正的新聞網站，單純用 `requests` 抓不到轉址後內容（實測直接拿到 Google 的空殼 HTML）。改用 Playwright headless 瀏覽器（`src/collectors/article_fetcher.py`）實際開啟連結讓 JS 執行、轉址完成後抓取內文，用「先找 `<article>` 標籤、找不到就退回抓整個 body」的 best-effort 方式應付不同新聞網站的頁面結構
+2. **逐篇摘要**：`src/ai_analysis.py` 的 `_summarize_article()` 對每則新聞的內文呼叫一次 qwen2.5:7b（純文字輸出，非JSON schema），產出不超過100字的重點摘要
+3. **彙整挑股**：把所有逐篇摘要彙整成一份新提示詞，再呼叫一次 qwen2.5:7b（用 `_PICKS_SCHEMA` 強制JSON格式）挑出前20檔重點個股
+
+實測（2026-07-28，25篇新聞：15篇鉅亨網+10篇RSS）耗時約 90-100 秒，比原本單次呼叫（~15秒）慢很多，但分析品質好很多（有真正的新聞內文可以判斷，而不是只看標題臆測）。
+
+- `_MAX_CNYES_FOR_DEEP = 15`、`_MAX_RSS_FOR_DEEP = 10`：限制篇數控制總耗時，且刻意分開限制兩種來源、各自保底，避免鉅亨網數量較多把 RSS（個股觀察名單專屬新聞）全部排擠掉
+- 主函式 `analyze_with_ollama_deep(date, host, model, progress_callback)`，`progress_callback(current, total, message)` 用於 Streamlit 顯示進度條
+- **收集資料按鈕**與「AI 分析」頁都改用這個深度版本（直接取代原本的快速版，非另外加一個按鈕，這是使用者的明確選擇——即使會讓收集按鈕卡上幾分鐘）
+- 原本的 `analyze_with_ollama()`（只看標題快速版）保留在程式碼裡未刪除，但 UI 已經不會呼叫到它
 
 #### Ollama 本機自動分析（目前預設方式）
 
@@ -137,7 +155,10 @@ cd TWStockAnalytics
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
+playwright install chromium
 ```
+
+（`playwright install chromium` 是額外的一次性步驟，會下載一個 headless 瀏覽器核心，供 AI 深度分析解析 Google News RSS 的連結用，`pip install` 本身不會自動下載瀏覽器）
 
 日常使用：直接雙擊專案根目錄的 `start_ui.bat` 即可啟動 UI（會自動開啟瀏覽器 http://localhost:8501），不需要每次手動打指令。
 
@@ -176,15 +197,16 @@ TWStockAnalytics/
 │   ├── config.py              # 讀取 .env 設定（TWSE/FinMind token、預設觀察名單種子等）
 │   ├── config_ai.py           # AI 供應商設定讀寫 (data/ai_settings.json)
 │   ├── config_watchlist.py    # 使用者自訂觀察名單讀寫 (data/watchlist.json)
-│   ├── ai_providers.py        # Claude/GPT/Gemini 連線測試 + 文字生成（付費API，進階選項用）
-│   ├── ai_analysis.py         # 產生新聞分析提示詞 + 解析使用者貼回的AI回覆
+│   ├── ai_providers.py        # Ollama/Claude/GPT/Gemini 呼叫（連線測試+文字生成+structured output）
+│   ├── ai_analysis.py         # AI新聞分析：深度版(逐篇摘要)/快速版/複製貼上解析，皆共用
 │   ├── charting.py            # 個股K線圖 (plotly + FinMind 即時歷史)
 │   ├── collect_all.py         # 每日收集流程整合
 │   ├── collectors/
-│   │   ├── twse_official.py   # TWSE/TPEx 官方 OpenAPI
+│   │   ├── twse_official.py   # TWSE/TPEx 官方 OpenAPI + rwd介面
 │   │   ├── finmind.py         # FinMind API
-│   │   ├── news_crawler.py    # 鉅亨網 API
-│   │   └── news_rss.py        # Google News RSS
+│   │   ├── news_crawler.py    # 鉅亨網 API（含全文content欄位）
+│   │   ├── news_rss.py        # Google News RSS（個股延伸新聞）
+│   │   └── article_fetcher.py # Playwright headless瀏覽器，解析RSS連結的JS轉址取得全文
 │   ├── storage/
 │   │   └── db.py              # SQLite 讀寫
 │   └── app.py                 # Streamlit 入口（總覽/個股詳情/AI分析/AI設定 四頁）

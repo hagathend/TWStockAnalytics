@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS news (
     title TEXT NOT NULL,
     url TEXT UNIQUE,
     summary TEXT,
+    content TEXT,
     related_code TEXT,
     published_at TEXT,
     collected_at TEXT
@@ -98,6 +99,10 @@ def get_conn():
 def init_db():
     with get_conn() as conn:
         conn.executescript(SCHEMA)
+        try:
+            conn.execute("ALTER TABLE news ADD COLUMN content TEXT")
+        except sqlite3.OperationalError:
+            pass  # 欄位已存在（舊資料庫升級用，新建的資料庫已經在 SCHEMA 裡就有這欄）
 
 
 def save_stock_price(rows: list[dict]):
@@ -141,10 +146,11 @@ def save_news(rows: list[dict]):
         return
     with get_conn() as conn:
         for row in rows:
+            row = {"content": None, **row}  # content 是後來才加的欄位，不是每個來源都會提供
             conn.execute(
                 """INSERT OR IGNORE INTO news
-                   (date, source, title, url, summary, related_code, published_at, collected_at)
-                   VALUES (:date, :source, :title, :url, :summary, :related_code, :published_at, :collected_at)""",
+                   (date, source, title, url, summary, content, related_code, published_at, collected_at)
+                   VALUES (:date, :source, :title, :url, :summary, :content, :related_code, :published_at, :collected_at)""",
                 row,
             )
 
