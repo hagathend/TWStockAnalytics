@@ -78,7 +78,20 @@
 - [x] **AI 深度分析（逐篇抓內文摘要）**：使用者發現 qwen2.5:7b 沒辦法自己爬網頁，只能就給定的文字做摘要，因此改成「先抓每則新聞的內文 → 逐篇AI摘要 → 彙整摘要再送一次AI選前20檔」的兩階段流程，取代原本只看標題+短摘要的做法（見下方說明）
 - [x] 逐篇摘要結果存入 `news.excerpt` 欄位並顯示在「AI 分析」頁，結構化資料可作為之後報表產出的素材
 - [x] **個股籌碼/未來展望分析（複製貼上流程）+ 每日報告產出**：見下方說明
+- [x] **大盤整體籌碼分析（複製貼上流程）**：見下方說明
 - [ ] LINE Bot 串接，報表推播
+
+#### 大盤整體籌碼分析（2026-07-28）
+
+使用者要求也要有大盤層級（不是單一個股）的籌碼分析，一樣走複製貼上流程，回覆要精簡（總字數500字內）：
+- `src/market_analysis.py`：`build_market_analysis_prompt(date)` 組出提示詞，內容包含
+  全市場三大法人買賣超加總（`db.query_market_institutional_summary()`）、當日漲跌家數
+  （`db.query_market_breadth()`，只算 TWSE 上市，因為 TPEx 股價表混雜大量債券ETF會讓
+  統計失真）、當日新聞摘要與焦點個股 Top20；要求AI回答四項（短期展望/中期展望/籌碼分析/
+  目前熱門產業和股票消息），總字數限制500字內
+- `save_market_analysis()` 存進新增的 `market_analysis` 表（date, analysis, created_at）
+- 放在「AI 分析」頁（不是個股層級的頁面，因為這是「當天」層級的分析，跟新聞分析同一頁比較合理）
+- 「每日報告」的 `_build_report_text()` 在新聞摘要之後、個股列表之前插入這個區塊
 
 #### 個股籌碼分析 + 每日報告（2026-07-28）
 
@@ -250,6 +263,7 @@ TWStockAnalytics/
 │   ├── ai_providers.py        # Ollama/Claude/GPT/Gemini 呼叫（連線測試+文字生成+structured output）
 │   ├── ai_analysis.py         # AI新聞分析：深度版(逐篇摘要)/快速版/複製貼上解析，皆共用
 │   ├── stock_analysis.py      # 個股籌碼分析提示詞產生 + 複製貼上結果儲存
+│   ├── market_analysis.py     # 大盤整體籌碼分析提示詞產生 + 複製貼上結果儲存
 │   ├── report_pdf.py          # 報告Markdown轉PDF (複用Playwright/Chromium)
 │   ├── charting.py            # 個股K線圖 (plotly + FinMind 即時歷史)
 │   ├── collect_all.py         # 每日收集流程整合

@@ -92,6 +92,12 @@ CREATE TABLE IF NOT EXISTS stock_analysis (
     created_at TEXT,
     PRIMARY KEY (date, code)
 );
+
+CREATE TABLE IF NOT EXISTS market_analysis (
+    date TEXT PRIMARY KEY,
+    analysis TEXT,
+    created_at TEXT
+);
 """
 
 
@@ -379,3 +385,49 @@ def query_news_by_keyword(keyword: str, days: int = 7, limit: int = 10):
             (since, like, like, like, limit),
         )
         return [dict(r) for r in cur.fetchall()]
+
+
+def query_market_institutional_summary(date: str) -> dict:
+    """全市場三大法人買賣超加總（不分個股），供大盤籌碼分析用"""
+    with get_conn() as conn:
+        cur = conn.execute(
+            """SELECT SUM(foreign_net) AS foreign_total, SUM(trust_net) AS trust_total,
+                      SUM(dealer_net) AS dealer_total, SUM(total_net) AS total_net
+               FROM institutional WHERE date = ?""",
+            (date,),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else {}
+
+
+def query_market_breadth(date: str, market: str = "TWSE") -> dict:
+    """當日漲跌家數統計。預設只看 TWSE（上市，用 ALLBUT0999 排除權證的乾淨資料），
+    因為 TPEx 的股價表混雜大量債券ETF，會讓漲跌家數統計失真。"""
+    with get_conn() as conn:
+        cur = conn.execute(
+            """SELECT
+                   SUM(CASE WHEN change > 0 THEN 1 ELSE 0 END) AS up,
+                   SUM(CASE WHEN change < 0 THEN 1 ELSE 0 END) AS down,
+                   SUM(CASE WHEN change = 0 THEN 1 ELSE 0 END) AS flat
+               FROM stock_price WHERE date = ? AND market = ?""",
+            (date, market),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else {}
+
+
+def save_market_analysis(date: str, analysis: str):
+    """存入使用者從網頁版AI複製貼回來的大盤整體籌碼分析"""
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT OR REPLACE INTO market_analysis (date, analysis, created_at)
+               VALUES (?, ?, ?)""",
+            (date, analysis, datetime.now().isoformat(timespec="seconds")),
+        )
+
+
+def query_market_analysis(date: str) -> dict | None:
+    with get_conn() as conn:
+        cur = conn.execute("SELECT * FROM market_analysis WHERE date = ?", (date,))
+        row = cur.fetchone()
+        return dict(row) if row else None

@@ -17,6 +17,7 @@ from src.config_ai import (
     save_ollama_settings,
 )
 from src.config_watchlist import add_stock, load_watchlist, remove_stock
+from src.market_analysis import build_market_analysis_prompt, save_market_analysis
 from src.report_pdf import markdown_to_pdf
 from src.stock_analysis import build_stock_analysis_prompt, save_stock_analysis
 from src.storage import db
@@ -467,6 +468,39 @@ def ai_analysis_page():
     else:
         st.caption("尚無分析結果")
 
+    st.divider()
+    st.subheader("大盤整體籌碼分析（複製貼上流程）")
+    st.caption(
+        "彙整大盤三大法人買賣超合計、漲跌家數、當日新聞摘要與焦點個股，產生提示詞，"
+        "複製貼到你平常用的網頁版 AI，回覆控制在500字內，包含短期/中期展望、籌碼分析、"
+        "目前熱門產業與個股消息。結果會收錄進「每日報告」頁。"
+    )
+    if st.button("產生大盤分析提示詞"):
+        ok, prompt_or_msg = build_market_analysis_prompt(selected_date)
+        if ok:
+            st.session_state["market_prompt"] = prompt_or_msg
+        else:
+            st.warning(prompt_or_msg)
+
+    market_prompt = st.session_state.get("market_prompt", "")
+    if market_prompt:
+        st.code(market_prompt, language=None)
+        st.caption("複製上面的內容，貼到網頁版 AI，把回覆貼到下面")
+
+    raw_market_analysis = st.text_area("貼上 AI 的大盤分析結果", height=200, key="market_analysis_input")
+    if st.button("儲存大盤分析", key="save_market_analysis_btn"):
+        result = save_market_analysis(raw_market_analysis, selected_date)
+        if result["ok"]:
+            st.success(result["message"])
+        else:
+            st.warning(result["message"])
+
+    existing_market = db.query_market_analysis(selected_date)
+    if existing_market:
+        st.markdown("**已儲存的大盤分析**")
+        st.write(existing_market["analysis"])
+        st.caption(f"儲存時間: {existing_market['created_at']}")
+
 
 def ai_settings_page():
     st.title("AI 設定")
@@ -564,6 +598,15 @@ def _build_report_text(date: str) -> str:
         lines.append(f"\n*分析來源: {ai_summary['provider']}｜產生時間: {ai_summary['created_at']}*")
     else:
         lines.append("_（此日期尚無新聞分析摘要，請到「AI 分析」頁產生）_")
+    lines.append("")
+
+    lines.append("## 大盤整體籌碼分析")
+    market_analysis = db.query_market_analysis(date)
+    if market_analysis:
+        lines.append(market_analysis["analysis"])
+        lines.append(f"\n*儲存時間: {market_analysis['created_at']}*")
+    else:
+        lines.append("_（此日期尚無大盤分析，請到「AI 分析」頁產生）_")
     lines.append("")
 
     lines.append("## 今日新聞焦點個股（含三大法人買賣超）")
