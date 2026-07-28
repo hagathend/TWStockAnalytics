@@ -97,6 +97,12 @@
    - 今日新聞焦點個股 Top20（`ai_picks` 表），**每檔都併上當天的三大法人買賣超**（`db.query_institutional(date, code)`，這樣不用把全市場上萬筆法人資料整個塞進報告，只顯示跟報告相關的重點個股）
    - 個股深度分析（`stock_analysis` 表，只顯示當天已經產生過分析的股票）
    - 輸出成 Markdown，頁面直接渲染，也提供「下載報告」按鈕匯出 `.md` 檔
+5. **PDF 匯出**：使用者不想要 Markdown 格式，希望有 PDF。做法是重複利用已經為了解析 Google News RSS
+   而裝的 Playwright/Chromium（見上方「AI 深度分析」段落），不需要另外裝 wkhtmltopdf 之類的外部工具：
+   `src/report_pdf.py` 的 `markdown_to_pdf()` 用 `markdown` 套件把報告文字轉成 HTML（套用簡單 CSS，
+   中文字型指定 Microsoft JhengHei/PMingLiU），再用 Chromium 的「列印成PDF」功能（`page.pdf()`）輸出。
+   「每日報告」頁按「產生 PDF」後才顯示下載按鈕（PDF 產生需要幾秒鐘，不在每次頁面渲染時都跑）。
+   實測繁體中文、表格、分頁都正常。
 
 #### AI 深度分析：逐篇抓內文摘要（目前預設方式，取代單次呼叫版）
 
@@ -244,6 +250,7 @@ TWStockAnalytics/
 │   ├── ai_providers.py        # Ollama/Claude/GPT/Gemini 呼叫（連線測試+文字生成+structured output）
 │   ├── ai_analysis.py         # AI新聞分析：深度版(逐篇摘要)/快速版/複製貼上解析，皆共用
 │   ├── stock_analysis.py      # 個股籌碼分析提示詞產生 + 複製貼上結果儲存
+│   ├── report_pdf.py          # 報告Markdown轉PDF (複用Playwright/Chromium)
 │   ├── charting.py            # 個股K線圖 (plotly + FinMind 即時歷史)
 │   ├── collect_all.py         # 每日收集流程整合
 │   ├── collectors/

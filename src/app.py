@@ -17,6 +17,7 @@ from src.config_ai import (
     save_ollama_settings,
 )
 from src.config_watchlist import add_stock, load_watchlist, remove_stock
+from src.report_pdf import markdown_to_pdf
 from src.stock_analysis import build_stock_analysis_prompt, save_stock_analysis
 from src.storage import db
 
@@ -609,12 +610,30 @@ def report_page():
     st.markdown(report_text)
 
     st.divider()
-    st.download_button(
-        "下載報告 (Markdown)",
-        report_text,
-        file_name=f"twstock_report_{selected_date}.md",
-        mime="text/markdown",
-    )
+    col1, col2 = st.columns(2)
+    with col1:
+        st.download_button(
+            "下載報告 (Markdown)",
+            report_text,
+            file_name=f"twstock_report_{selected_date}.md",
+            mime="text/markdown",
+        )
+    with col2:
+        if st.button("產生 PDF"):
+            with st.spinner("產生 PDF 中..."):
+                st.session_state["report_pdf_bytes"] = markdown_to_pdf(report_text)
+                st.session_state["report_pdf_date"] = selected_date
+
+        if (
+            st.session_state.get("report_pdf_date") == selected_date
+            and st.session_state.get("report_pdf_bytes")
+        ):
+            st.download_button(
+                "下載報告 (PDF)",
+                st.session_state["report_pdf_bytes"],
+                file_name=f"twstock_report_{selected_date}.pdf",
+                mime="application/pdf",
+            )
 
 
 HOME_PAGE = st.Page(home_page, title="總覽", icon="📊", default=True)
