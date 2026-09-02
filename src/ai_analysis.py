@@ -15,7 +15,9 @@ import re
 import time
 
 from src.ai_providers import generate_ollama_json, generate_ollama_text, generate_text
+from src.collectors import firecrawl_fetcher
 from src.collectors.article_fetcher import ArticleFetcher
+from src.config_ai import load_scraping_settings
 from src.storage import db
 
 _MAX_NEWS_ITEMS = 60
@@ -338,6 +340,43 @@ def analyze_with_ollama(date: str, host: str, model: str) -> dict:
     return _save_result(date, f"ollama:{model}", summary, raw_picks)
 
 
+def _fetch_missing_content(articles: list[dict], progress_callback=None) -> dict[int, str | None]:
+    """抓取缺少內文的新聞（主要是 Google News RSS 來源）。
+    優先用 Firecrawl（如果有設定 API Key，免費額度每月1000次，抓取品質通常較好），
+    抓不到或沒設定 Key 的部分，退回本機 Playwright（免費、無次數限制但較慢）。"""
+    if not articles:
+        return {}
+
+    fetched: dict[int, str | None] = {}
+    remaining = articles
+
+    firecrawl_key = load_scraping_settings().get("firecrawl_api_key", "")
+    if firecrawl_key:
+        remaining = []
+        for i, article in enumerate(articles, start=1):
+            content = firecrawl_fetcher.fetch(article["url"], firecrawl_key)
+            if content:
+                fetched[article["id"]] = content
+            else:
+                remaining.append(article)  # Firecrawl 抓不到的，留給 Playwright 再試一次
+            if progress_callback:
+                progress_callback(i, len(articles), f"Firecrawl 抓取中: {article['title'][:20]}")
+
+    if remaining:
+        try:
+            with ArticleFetcher() as fetcher:
+                for i, article in enumerate(remaining, start=1):
+                    fetched[article["id"]] = fetcher.fetch(article["url"])
+                    if progress_callback:
+                        progress_callback(
+                            i, len(remaining), f"Playwright 抓取中: {article['title'][:20]}"
+                        )
+        except Exception:  # noqa: BLE001 - Playwright若因環境問題整批失敗，優雅降級全部改用標題/短摘要
+            pass
+
+    return fetched
+
+
 def _gather_and_summarize(
     date: str, summarize_fn, progress_callback=None, inter_call_delay: float = 0.0
 ) -> tuple[str | None, list[str], list[dict]]:
@@ -361,20 +400,9 @@ def _gather_and_summarize(
     articles = cnyes_rows + rss_rows
     total = len(articles)
 
-    # 先批次抓取缺少內文的新聞（主要是 Google News RSS 來源），共用同一個瀏覽器實例
+    # 先批次抓取缺少內文的新聞（主要是 Google News RSS 來源）
     needs_fetch = [a for a in articles if not a.get("content") and a.get("url")]
-    fetched_content: dict[int, str | None] = {}
-    if needs_fetch:
-        try:
-            with ArticleFetcher() as fetcher:
-                for i, article in enumerate(needs_fetch, start=1):
-                    fetched_content[article["id"]] = fetcher.fetch(article["url"])
-                    if progress_callback:
-                        progress_callback(
-                            i, len(needs_fetch), f"抓取內文中: {article['title'][:20]}"
-                        )
-        except Exception:  # noqa: BLE001 - Playwright若因環境問題整批失敗，優雅降級全部改用標題/短摘要
-            pass
+    fetched_content = _fetch_missing_content(needs_fetch, progress_callback)
 
     summaries = []
     article_excerpts = []

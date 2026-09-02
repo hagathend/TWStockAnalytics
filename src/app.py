@@ -9,12 +9,15 @@ from src.ai_analysis import analyze_deep_with_provider, analyze_with_ollama_deep
 from src.ai_providers import PROVIDER_LABELS, list_ollama_models, test_connection
 from src.charting import build_candlestick
 from src.collect_all import run_daily_collect
+from src.collectors.firecrawl_fetcher import test_connection as firecrawl_test_connection
 from src.config_ai import (
     PROVIDERS,
     load_ai_settings,
     load_ollama_settings,
+    load_scraping_settings,
     save_ai_settings,
     save_ollama_settings,
+    save_scraping_settings,
 )
 from src.config_watchlist import add_stock, load_watchlist, remove_stock
 from src.market_analysis import build_market_analysis_prompt, save_market_analysis
@@ -542,6 +545,34 @@ def ai_settings_page():
             {"host": host, "model": model, "auto_analyze_after_collect": auto_analyze}
         )
         st.success("已儲存")
+
+    st.divider()
+
+    st.subheader("Firecrawl（內文擷取，選用）")
+    st.caption(
+        "深度分析要抓 Google News RSS 連結的文章內文時，優先用 Firecrawl（免費額度每月1000次，"
+        "不用信用卡，通常比本機 Playwright 抓得更乾淨），沒設定 Key 就自動退回 Playwright。"
+        "到 https://www.firecrawl.dev/ 申請 API Key。"
+    )
+    scraping_settings = load_scraping_settings()
+    firecrawl_key = st.text_input(
+        "Firecrawl API Key",
+        value=scraping_settings.get("firecrawl_api_key", ""),
+        type="password",
+        placeholder="輸入 Firecrawl API Key（留空則不使用，改用 Playwright）",
+    )
+    col_save_fc, col_test_fc = st.columns([1, 1])
+    with col_save_fc:
+        if st.button("儲存 Firecrawl 設定"):
+            save_scraping_settings({"firecrawl_api_key": firecrawl_key})
+            st.success("已儲存")
+    with col_test_fc:
+        if st.button("測試連線", key="test_firecrawl"):
+            ok, message = firecrawl_test_connection(firecrawl_key)
+            if ok:
+                st.success(message)
+            else:
+                st.error(message)
 
     st.divider()
 

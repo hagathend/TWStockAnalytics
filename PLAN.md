@@ -106,6 +106,27 @@
 `_build_report_text()` 組裝報告文字時（這樣網頁顯示、Markdown 下載檔、PDF 轉換都會正確換行，因為
 PDF 也是先轉成 HTML 再用 Chromium 列印，同樣走 Markdown 解析規則）。
 
+#### Firecrawl 作為 Playwright 的優先內文擷取選項（2026-09-02）
+
+使用者問到 [Firecrawl](https://www.firecrawl.dev/)（專門的網頁擷取API服務）能不能用在這個專案。
+免費額度每月1,000次、不用信用卡，跟目前每天大概只需要抓 `_MAX_RSS_FOR_DEEP`（15）篇 Google News RSS
+文章的用量（鉅亨網已經有全文，不用額外抓）比起來綽綽有餘。且實測發現我們自己寫的 Playwright
+「找 `<article>` 標籤、找不到就抓整個 body」heuristic 在某些網站（例如某篇 Yahoo香港財經）會抓到整個
+導覽選單等雜訊，Firecrawl 作為專門服務品質通常更穩定。
+
+- `src/collectors/firecrawl_fetcher.py`：`fetch(url, api_key)` 呼叫 `POST https://api.firecrawl.dev/v2/scrape`
+  （注意是 v2 不是 v1，串接前有先查過官方文件確認目前版本），回傳 `data.markdown` 欄位；
+  `test_connection(api_key)` 驗證用（會消耗1個額度，Firecrawl 沒有免費的純驗證端點）
+- `src/config_ai.py` 新增 `load_scraping_settings()`/`save_scraping_settings()`，存進
+  `data/scraping_settings.json`（已加進 .gitignore）
+- `src/ai_analysis.py` 新增 `_fetch_missing_content()`：**優先用 Firecrawl（如果有設定Key），
+  抓不到或沒設定Key的部分才退回 Playwright**，取代原本 `_gather_and_summarize()` 裡直接呼叫
+  Playwright 的邏輯。兩者都失敗時優雅降級用標題代替，不會中斷整批分析
+- 「AI 設定」頁新增「Firecrawl（內文擷取，選用）」區塊，可填 Key + 測試連線，留空就完全不影響
+  現有行為（自動退回 Playwright）
+- Playwright（`src/collectors/article_fetcher.py`）**沒有移除**，`report_pdf.py` 產生PDF還需要它，
+  而且是 Firecrawl 沒設定/失敗時的免費備援
+
 #### 個股籌碼分析 + 每日報告（2026-07-28）
 
 個股層級的分析（籌碼面判斷、未來展望）需要比較強的推理能力，使用者認為這種任務不像新聞摘要那樣適合丟給本機小模型，因此比照新聞分析的「複製貼上」模式，而不是再接一套 Ollama/API 自動呼叫：
@@ -285,7 +306,8 @@ TWStockAnalytics/
 │   │   ├── finmind.py         # FinMind API
 │   │   ├── news_crawler.py    # 鉅亨網 API（含全文content欄位）
 │   │   ├── news_rss.py        # Google News RSS（個股延伸新聞）
-│   │   └── article_fetcher.py # Playwright headless瀏覽器，解析RSS連結的JS轉址取得全文
+│   │   ├── article_fetcher.py # Playwright headless瀏覽器，解析RSS連結的JS轉址取得全文(備援)
+│   │   └── firecrawl_fetcher.py # Firecrawl API擷取文章全文(優先選項，免費額度1000次/月)
 │   ├── storage/
 │   │   └── db.py              # SQLite 讀寫
 │   └── app.py                 # Streamlit 入口（總覽/個股詳情/AI分析/每日報告/AI設定 五頁）

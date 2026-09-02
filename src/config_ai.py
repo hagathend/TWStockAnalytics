@@ -11,6 +11,7 @@ from src.config import DATA_DIR
 
 _CONFIG_PATH = DATA_DIR / "ai_settings.json"
 _OLLAMA_CONFIG_PATH = DATA_DIR / "ollama_settings.json"
+_SCRAPING_CONFIG_PATH = DATA_DIR / "scraping_settings.json"
 
 PROVIDERS = ["claude", "gpt", "gemini"]
 
@@ -21,6 +22,8 @@ _OLLAMA_DEFAULT = {
     "model": "qwen2.5:7b",
     "auto_analyze_after_collect": True,
 }
+
+_SCRAPING_DEFAULT = {"firecrawl_api_key": ""}
 
 
 def load_ai_settings() -> dict:
@@ -49,4 +52,18 @@ def load_ollama_settings() -> dict:
 
 def save_ollama_settings(settings: dict):
     with open(_OLLAMA_CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(settings, f, ensure_ascii=False, indent=2)
+
+
+def load_scraping_settings() -> dict:
+    """Firecrawl 等內文擷取服務的設定（選用，沒設定就退回本機 Playwright）"""
+    if not _SCRAPING_CONFIG_PATH.exists():
+        return dict(_SCRAPING_DEFAULT)
+    with open(_SCRAPING_CONFIG_PATH, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return {**_SCRAPING_DEFAULT, **data}
+
+
+def save_scraping_settings(settings: dict):
+    with open(_SCRAPING_CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(settings, f, ensure_ascii=False, indent=2)

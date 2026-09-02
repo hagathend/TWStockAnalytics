@@ -7,6 +7,7 @@ data/*.db
 data/*.sqlite3
 data/ai_settings.json
 data/ollama_settings.json
+data/scraping_settings.json
 data/watchlist.json
 data/*.log
 .streamlit/
