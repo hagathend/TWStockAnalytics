@@ -1,11 +1,22 @@
 """台股每日資訊收集 - Streamlit UI"""
 
-from datetime import date as _date
+import sys
+from pathlib import Path
 
-import pandas as pd
-import streamlit as st
+# 用 `streamlit run src/app.py` 啟動時，Streamlit 只會把腳本所在的 src/ 加進 sys.path，
+# 專案根目錄不在裡面，下面的 `from src.xxx import ...` 就會噴 ModuleNotFoundError: No module named 'src'。
+# （改用 `python -m streamlit run` 剛好能動，是因為 -m 會把當前工作目錄加進 sys.path，屬於巧合。）
+# 這裡主動把專案根目錄補進 sys.path，讓兩種啟動方式（含 start_ui.bat）都能正常運作。
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
-from src.ai_analysis import analyze_deep_with_provider, analyze_with_ollama_deep, build_prompt, parse_and_save
+from datetime import date as _date  # noqa: E402
+
+import pandas as pd  # noqa: E402
+import streamlit as st  # noqa: E402
+
+from src.ai_analysis import analyze_deep_with_provider, analyze_with_ollama_deep, build_prompt, parse_and_save  # noqa: E402
 from src.ai_providers import PROVIDER_LABELS, list_ollama_models, test_connection
 from src.charting import build_candlestick
 from src.collect_all import run_daily_collect
