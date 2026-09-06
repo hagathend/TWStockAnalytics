@@ -79,7 +79,30 @@
 - [x] 逐篇摘要結果存入 `news.excerpt` 欄位並顯示在「AI 分析」頁，結構化資料可作為之後報表產出的素材
 - [x] **個股籌碼/未來展望分析（複製貼上流程）+ 每日報告產出**：見下方說明
 - [x] **大盤整體籌碼分析（複製貼上流程）**：見下方說明
+- [x] **技術指標計算 + 線型分析**：見下方說明
 - [ ] LINE Bot 串接，報表推播
+
+#### 技術指標計算 + 線型分析（2026-09-06）
+
+原本 PLAN 的目標就有「線型分析」，但先前只做了畫 K 線圖，**沒有任何技術指標**，
+而且個股分析提示詞餵給 AI 的是「最近15天的原始 OHLCV 數字」，等於要 AI 瞪著原始價格用眼睛看
+——LLM 這樣判讀技術面本來就不準。做法跟「先抓內文再摘要」同樣邏輯：**先用程式把指標算好，再餵給 AI 判讀**。
+
+- `src/indicators.py`（新增）：用 pandas 計算 MA5/20/60、RSI(14, Wilder平滑)、
+  MACD(12,26,9，台股慣稱 DIF/MACD/柱狀體OSC)、KD(9,3,3，K/D 初始值50逐筆遞推)、
+  布林通道(20,2，母體標準差)、量能均量。純數學、無 AI，結果確定可重現。
+  `summarize_for_prompt()` 把最新一筆整理成文字（只陳述數值與客觀狀態，多空結論留給 AI 判斷）
+- **驗證方式**：MA5/20/60 與手算 rolling mean 逐一比對相符、RSI 與獨立寫的 Wilder 迴圈實作
+  比對到小數點後6位相符、OSC == DIF-DEA、RSI/K/D 皆落在 0-100、布林上軌>中軌>下軌且中軌==MA20
+- `src/charting.py`：K線圖疊上 MA5/20/60 三條均線 + 成交量副圖（紅漲綠跌）。
+  **注意**：均線要算得準，抓取範圍必須比顯示範圍更長——一開始只多抓150天，
+  結果顯示區間左側 18 根 K 棒的 MA60 是空的（要顯示 N 個交易日的 MA60 需要 N+59 個交易日資料），
+  改成抓 `顯示天數 + 150 天` 後才完整
+- `src/stock_analysis.py`：提示詞新增【技術指標】區塊，並多要求一項「技術面分析」
+  （明確要求「直接引用這些數值，不要自己重新估算」），變成技術面/籌碼面/未來展望/總結四項。
+  價格資料改成抓一次共用給價格表與指標計算，不重複打 FinMind
+- 順手修掉一個雜訊問題：Google News RSS 的 `summary` 欄位是 HTML（含 `<a href=...>` 標籤），
+  沒做過 AI 摘要的新聞會把整串 HTML 塞進提示詞，改用 BeautifulSoup 去標籤只留純文字
 
 #### 大盤整體籌碼分析（2026-07-28）
 
@@ -299,7 +322,8 @@ TWStockAnalytics/
 │   ├── stock_analysis.py      # 個股籌碼分析提示詞產生 + 複製貼上結果儲存
 │   ├── market_analysis.py     # 大盤整體籌碼分析提示詞產生 + 複製貼上結果儲存
 │   ├── report_pdf.py          # 報告Markdown轉PDF (複用Playwright/Chromium)
-│   ├── charting.py            # 個股K線圖 (plotly + FinMind 即時歷史)
+│   ├── indicators.py          # 技術指標計算 (MA/RSI/MACD/KD/布林/量能，純pandas)
+│   ├── charting.py            # 個股K線圖+均線+成交量副圖 (plotly + FinMind 即時歷史)
 │   ├── collect_all.py         # 每日收集流程整合
 │   ├── collectors/
 │   │   ├── twse_official.py   # TWSE/TPEx 官方 OpenAPI + rwd介面

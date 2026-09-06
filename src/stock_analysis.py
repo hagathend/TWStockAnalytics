@@ -7,14 +7,24 @@
 
 from datetime import date as _date, timedelta
 
+from bs4 import BeautifulSoup
+
 from src.collectors import finmind
+from src.indicators import (
+    RECOMMENDED_HISTORY_DAYS,
+    add_indicators,
+    summarize_for_prompt,
+    to_dataframe,
+)
 from src.storage import db
 
-_PRICE_HISTORY_DAYS = 30
 _PRICE_ROWS_SHOWN = 15
 _NEWS_LIMIT = 8
 
 _STOCK_ANALYSIS_PROMPT = """你是台股個股分析助手。以下是 {code} {name} 的近期資料（資料日期：{date}）。
+
+【技術指標】（由程式依收盤價量計算，非估算值）
+{indicator_block}
 
 【近期股價】（最近 {price_rows} 個交易日，資料來源 FinMind）
 {price_block}
@@ -29,23 +39,29 @@ _STOCK_ANALYSIS_PROMPT = """你是台股個股分析助手。以下是 {code} {n
 {news_block}
 
 請根據以上資料，用簡潔的條列式回答，「每一項都必須嚴格限制在800字以內」，
-不要長篇大論、不要有開場白，直接條列以下三項結果：
+不要長篇大論、不要有開場白，直接條列以下四項結果：
 
+技術面分析：（依據上面已算好的均線、RSI、KD、MACD、布林通道與量能判讀目前技術面，
+　　　　　　　請直接引用這些數值，不要自己重新估算，800字以內）
 籌碼面分析：（目前籌碼是偏多方掌控還是空方？依據是什麼，800字以內）
 未來1~2週展望：（800字以內）
 總結：（800字以內）
 
-請直接用繁體中文條列輸出這三項，不需要輸出 JSON 格式，也不要輸出這三項以外的內容。
+請直接用繁體中文條列輸出這四項，不需要輸出 JSON 格式，也不要輸出這四項以外的內容。
 """
 
 
-def _format_price_history(code: str) -> str:
+def _fetch_price_rows(code: str) -> list[dict]:
+    """抓一次就好，價格表與技術指標共用同一份資料（技術指標需要較長歷史才算得出 MA60）"""
     end_date = _date.today().isoformat()
-    start_date = (_date.today() - timedelta(days=_PRICE_HISTORY_DAYS)).isoformat()
+    start_date = (_date.today() - timedelta(days=RECOMMENDED_HISTORY_DAYS)).isoformat()
     try:
-        rows = finmind.fetch_stock_price(code, start_date, end_date)
+        return finmind.fetch_stock_price(code, start_date, end_date)
     except Exception:  # noqa: BLE001 - 抓不到歷史股價不應該擋住整份提示詞產生
-        rows = []
+        return []
+
+
+def _format_price_history(rows: list[dict]) -> str:
     if not rows:
         return "（無法取得股價歷史）"
     lines = []
@@ -54,6 +70,12 @@ def _format_price_history(code: str) -> str:
             f"{r['date']} 開{r['open']} 高{r['max']} 低{r['min']} 收{r['close']} 量{r['Trading_Volume']}"
         )
     return "\n".join(lines)
+
+
+def _format_indicators(rows: list[dict]) -> str:
+    if not rows:
+        return "（無法取得股價歷史，無法計算技術指標）"
+    return summarize_for_prompt(add_indicators(to_dataframe(rows)))
 
 
 def _format_institutional_history(code: str) -> str:
@@ -79,6 +101,15 @@ def _format_margin_history(code: str) -> str:
     return "\n".join(lines)
 
 
+def _strip_html(text: str) -> str:
+    """Google News RSS 的 summary 欄位是 HTML（含 <a href=...> 連結標籤），
+    直接塞進提示詞會變成一堆雜訊，要先去掉標籤只留純文字。
+    （已經做過 AI 逐篇摘要的新聞會優先用 excerpt 欄位，走不到這裡）"""
+    if not text:
+        return ""
+    return BeautifulSoup(text, "html.parser").get_text(separator=" ", strip=True)
+
+
 def _format_related_news(code: str, name: str) -> str:
     by_code = db.query_news_by_keyword(code, days=7, limit=_NEWS_LIMIT)
     by_name = db.query_news_by_keyword(name, days=7, limit=_NEWS_LIMIT)
@@ -96,20 +127,22 @@ def _format_related_news(code: str, name: str) -> str:
         return "（近期無相關新聞）"
     lines = []
     for row in merged:
-        text = row.get("excerpt") or row.get("summary") or ""
+        text = row.get("excerpt") or _strip_html(row.get("summary") or "")
         lines.append(f"- {row['title']}：{text[:100]}")
     return "\n".join(lines)
 
 
 def build_stock_analysis_prompt(code: str) -> str:
-    """回傳這檔股票的分析提示詞（含籌碼歷史、股價、相關新聞）"""
+    """回傳這檔股票的分析提示詞（含技術指標、籌碼歷史、股價、相關新聞）"""
     name = db.lookup_stock_name(code) or code
+    price_rows = _fetch_price_rows(code)
     return _STOCK_ANALYSIS_PROMPT.format(
         code=code,
         name=name,
         date=_date.today().isoformat(),
         price_rows=_PRICE_ROWS_SHOWN,
-        price_block=_format_price_history(code),
+        indicator_block=_format_indicators(price_rows),
+        price_block=_format_price_history(price_rows),
         institutional_block=_format_institutional_history(code),
         margin_block=_format_margin_history(code),
         news_block=_format_related_news(code, name),

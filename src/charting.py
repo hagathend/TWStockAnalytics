@@ -1,47 +1,108 @@
-"""個股 K 線圖：即時向 FinMind 補抓近期歷史繪製蠟燭圖。
+"""個股 K 線圖：即時向 FinMind 補抓近期歷史繪製蠟燭圖 + 均線 + 成交量。
 
 我們自己資料庫是每天收集才累積一筆，剛起步時歷史很短，
-所以看個股詳情時改用 FinMind 現抓一段歷史（預設 90 天）來畫圖。
+所以看個股詳情時改用 FinMind 現抓一段歷史來畫圖。
+
+注意：均線要算得準，抓取的資料必須比「畫出來的天數」更長
+（例如要畫近90天又要有 MA60，就得抓約150個日曆天再把前面的裁掉），
+否則畫面左側的均線會因為前面沒有足夠資料而斷掉或算錯。
 """
 
 from datetime import date as _date, timedelta
 
-import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 from src.collectors import finmind
+from src.indicators import RECOMMENDED_HISTORY_DAYS, add_indicators, to_dataframe
+
+_UP_COLOR = "red"  # 台股慣例：紅漲綠跌
+_DOWN_COLOR = "green"
+_MA_LINES = [("MA5", "#f5c542"), ("MA20", "#42a5f5"), ("MA60", "#ab47bc")]
 
 
 def build_candlestick(code: str, name: str, days: int = 90) -> go.Figure | None:
+    """畫出 K 線 + 均線 + 成交量副圖。days 是「顯示」的天數，
+    實際抓取會多抓一段以便算出 MA60。"""
+    # 顯示區間之外還要再往前多抓一段，MA60 才不會在畫面左側缺一大截
+    # （要顯示 N 個交易日的 MA60，需要 N+59 個交易日的資料）
     end_date = _date.today().isoformat()
-    start_date = (_date.today() - timedelta(days=days)).isoformat()
+    fetch_start = (_date.today() - timedelta(days=days + RECOMMENDED_HISTORY_DAYS)).isoformat()
 
-    rows = finmind.fetch_stock_price(code, start_date, end_date)
+    rows = finmind.fetch_stock_price(code, fetch_start, end_date)
     if not rows:
         return None
 
-    df = pd.DataFrame(rows).sort_values("date")
+    df = add_indicators(to_dataframe(rows))
 
-    fig = go.Figure(
-        data=[
-            go.Candlestick(
-                x=df["date"],
-                open=df["open"],
-                high=df["max"],
-                low=df["min"],
-                close=df["close"],
-                increasing_line_color="red",
-                decreasing_line_color="green",
-                name=code,
-            )
-        ]
+    # 均線算完之後才裁切成要顯示的區間，這樣畫面左側的均線也是正確的
+    display_start = (_date.today() - timedelta(days=days)).isoformat()
+    display_df = df[df["date"] >= display_start]
+    if display_df.empty:
+        display_df = df
+
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.04,
+        row_heights=[0.72, 0.28],
+        subplot_titles=("", "成交量"),
     )
+
+    fig.add_trace(
+        go.Candlestick(
+            x=display_df["date"],
+            open=display_df["open"],
+            high=display_df["max"],
+            low=display_df["min"],
+            close=display_df["close"],
+            increasing_line_color=_UP_COLOR,
+            decreasing_line_color=_DOWN_COLOR,
+            name="K線",
+        ),
+        row=1,
+        col=1,
+    )
+
+    for column, color in _MA_LINES:
+        fig.add_trace(
+            go.Scatter(
+                x=display_df["date"],
+                y=display_df[column],
+                mode="lines",
+                line={"width": 1.2, "color": color},
+                name=column,
+            ),
+            row=1,
+            col=1,
+        )
+
+    volume_colors = [
+        _UP_COLOR if close >= open_ else _DOWN_COLOR
+        for close, open_ in zip(display_df["close"], display_df["open"])
+    ]
+    fig.add_trace(
+        go.Bar(
+            x=display_df["date"],
+            y=display_df["Trading_Volume"],
+            marker_color=volume_colors,
+            name="成交量",
+            showlegend=False,
+        ),
+        row=2,
+        col=1,
+    )
+
     fig.update_layout(
         title=f"{code} {name} 近 {days} 天走勢（資料來源: FinMind）",
-        xaxis_title="日期",
-        yaxis_title="價格",
         xaxis_rangeslider_visible=False,
         template="plotly_dark",
-        height=450,
+        height=600,
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0},
+        margin={"t": 60, "b": 40},
     )
+    fig.update_yaxes(title_text="價格", row=1, col=1)
+    fig.update_yaxes(title_text="張數(股)", row=2, col=1)
+    fig.update_xaxes(title_text="日期", row=2, col=1)
     return fig
