@@ -88,6 +88,9 @@ _LOG_COLUMNS = {
 
 _PICK_COLUMNS = {"rank": "排名", "code": "代號", "name": "名稱", "reason": "原因"}
 
+# collect_log 的 status 存英文識別字，顯示時轉成中文
+_LOG_STATUS_LABELS = {"success": "✅ 成功", "no_data": "⚠ 無資料", "failed": "❌ 失敗"}
+
 
 def _display_df(rows: list[dict], column_labels: dict[str, str]) -> pd.DataFrame:
     df = pd.DataFrame(rows)
@@ -260,6 +263,10 @@ def home_page():
     with tab_log:
         logs = db.query_recent_logs()
         if logs:
+            logs = [
+                {**row, "status": _LOG_STATUS_LABELS.get(row["status"], row["status"])}
+                for row in logs
+            ]
             st.dataframe(
                 _display_df(logs, _LOG_COLUMNS), width="stretch", hide_index=True
             )

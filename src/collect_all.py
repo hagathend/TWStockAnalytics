@@ -8,11 +8,19 @@ from src.storage import db
 
 
 def _run_step(step_name: str, func, save_func=None):
+    """執行單一收集步驟並記錄結果。
+
+    狀態分三種，不要把「查無資料」混進 success——否則週末/假日或來源尚未公布時，
+    log 看起來一切正常，實際上什麼都沒收到，很容易誤判（曾經就這樣看漏過）。
+    """
     try:
         rows = func()
         if save_func:
             save_func(rows)
-        db.log_step(step_name, "success", f"{len(rows)} 筆")
+        if not rows:
+            db.log_step(step_name, "no_data", "查無資料（可能非交易日，或資料來源尚未公布）")
+        else:
+            db.log_step(step_name, "success", f"{len(rows)} 筆")
         return rows
     except Exception as exc:  # noqa: BLE001 - 收集流程需要各步驟獨立容錯，不能因單一來源失敗中斷整體
         db.log_step(step_name, "failed", str(exc))
@@ -51,7 +59,10 @@ def collect_finmind_watchlist(days_back: int = 7) -> int:
         try:
             rows = finmind.fetch_stock_price(code, start_date, end_date)
             total += len(rows)
-            db.log_step(f"FinMind 價量 {code}", "success", f"{len(rows)} 筆")
+            if not rows:
+                db.log_step(f"FinMind 價量 {code}", "no_data", "查無資料")
+            else:
+                db.log_step(f"FinMind 價量 {code}", "success", f"{len(rows)} 筆")
         except Exception as exc:  # noqa: BLE001
             db.log_step(f"FinMind 價量 {code}", "failed", str(exc))
     return total
