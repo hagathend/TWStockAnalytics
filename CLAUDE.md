@@ -187,6 +187,9 @@ Schema 變更走 `db.init_db()` 裡的 `ALTER TABLE ... ADD COLUMN` + `try/excep
 - `src/collectors/fundamentals.py` + `src/fundamentals.py` 本益比／殖利率／淨值比（`valuation` 表）與
   月營收（`month_revenue` 表，千元）。月營收來源只給「最新公布月份」，每天覆寫、歷史靠累積；
   虧損公司本益比存 NULL 不是 0（0 會被「本益比 ≤ N」篩選誤判成超便宜）。
+- `src/portfolio.py` 我的持股（`holdings` 表，每筆買進一列、股數以「股」計）：加權平均成本、以本地最新收盤價算損益。
+  持有的股票在個股分析提示詞會多【我的持股】與「持股應對」一項——**只給續抱／減碼／停損的條件式觀察點，
+  不直接下買賣指令**，決策留給使用者。持股是個人財務資料，只存本機資料庫，測試 UI 時用資料庫副本，不要寫進真實資料庫。
 - TPEx OpenAPI 只有「最新一天」無法回補，上櫃股的歷史指標天數會比較少。
 
 第一次設定要多跑 `playwright install chromium`（`pip install` 不會自動下載瀏覽器核心）。

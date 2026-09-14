@@ -13,6 +13,7 @@ from src.chip_metrics import metrics_for_code
 from src.chip_metrics import summarize_for_prompt as summarize_chip_metrics
 from src.collectors import finmind
 from src.fundamentals import summarize_for_prompt as summarize_fundamentals
+from src.portfolio import summarize_for_prompt as summarize_holding
 from src.indicators import (
     RECOMMENDED_HISTORY_DAYS,
     add_indicators,
@@ -46,9 +47,9 @@ _STOCK_ANALYSIS_PROMPT = """你是台股個股分析助手。以下是 {code} {n
 
 【相關新聞】
 {news_block}
-
+{holding_block}
 請根據以上資料，用簡潔的條列式回答，「每一項都必須嚴格限制在800字以內」，
-不要長篇大論、不要有開場白，直接條列以下四項結果：
+不要長篇大論、不要有開場白，直接條列以下{item_count}項結果：
 
 技術面分析：（依據上面已算好的均線、RSI、KD、MACD、布林通道與量能判讀目前技術面，
 　　　　　　　請直接引用這些數值，不要自己重新估算，800字以內）
@@ -56,8 +57,8 @@ _STOCK_ANALYSIS_PROMPT = """你是台股個股分析助手。以下是 {code} {n
 　　　　　　　判斷目前籌碼偏多方還是空方掌控，請直接引用這些數值，800字以內）
 未來1~2週展望：（綜合技術、籌碼與基本面（營收成長、本益比）判斷，800字以內）
 總結：（800字以內）
-
-請直接用繁體中文條列輸出這四項，不需要輸出 JSON 格式，也不要輸出這四項以外的內容。
+{holding_instruction}
+請直接用繁體中文條列輸出這{item_count}項，不需要輸出 JSON 格式，也不要輸出這{item_count}項以外的內容。
 """
 
 
@@ -142,10 +143,24 @@ def _format_related_news(code: str, name: str) -> str:
     return "\n".join(lines)
 
 
+_HOLDING_BLOCK = """
+【我的持股】（使用者實際持有這檔，以下為本地紀錄計算的事實）
+{holding}
+"""
+
+# 只有持有這檔時才加這一項。刻意要求「條件式觀察點」而不是直接下買賣指令：
+# 價格與籌碼之後還會變，給出「跌破什麼、出現什麼訊號時要重新評估」比單一結論更有用，決策留給使用者。
+_HOLDING_INSTRUCTION = """持股應對：（對照我的平均成本與目前損益，結合上面的技術面支撐壓力、籌碼變化與基本面，
+　　　　　　　分別列出「續抱」「分批減碼」「停損或重新評估」各自的觀察條件，例如跌破哪個價位或均線、
+　　　　　　　法人出現什麼變化時要注意；用條件式描述，不要直接下買賣指令，最後由我自己決定，800字以內）
+"""
+
+
 def build_stock_analysis_prompt(code: str) -> str:
     """回傳這檔股票的分析提示詞（含技術指標、籌碼歷史、股價、相關新聞）"""
     name = db.lookup_stock_name(code) or code
     price_rows = _fetch_price_rows(code)
+    holding = summarize_holding(code)
     return _STOCK_ANALYSIS_PROMPT.format(
         code=code,
         name=name,
@@ -158,6 +173,9 @@ def build_stock_analysis_prompt(code: str) -> str:
         institutional_block=_format_institutional_history(code),
         margin_block=_format_margin_history(code),
         news_block=_format_related_news(code, name),
+        holding_block=_HOLDING_BLOCK.format(holding=holding) if holding else "",
+        holding_instruction=_HOLDING_INSTRUCTION if holding else "",
+        item_count="五" if holding else "四",
     )
 
 

@@ -37,7 +37,7 @@ from src.config_ai import (
 from src.config_watchlist import add_stock, load_watchlist, remove_stock
 from src.market_analysis import build_market_analysis_prompt, save_market_analysis
 from src.report_pdf import markdown_to_pdf
-from src import backtest, fundamentals, signals, ui
+from src import backtest, fundamentals, portfolio, signals, ui
 from src.stock_analysis import build_stock_analysis_prompt, save_stock_analysis
 from src.storage import db
 
@@ -475,6 +475,7 @@ def detail_page():
 
     name = db.lookup_stock_name(code) or code
     _render_quote(code, name)
+    _render_position_panel(code)
 
     with ui.panel("K 線走勢", "近 90 天・均線 MA5／MA20／MA60・資料來源 FinMind"):
         with st.spinner("讀取 K 線資料中..."):
@@ -502,6 +503,187 @@ def detail_page():
             st.caption("此日期尚無相關新聞（目前只有標題含代號的新聞會被標記關聯）")
 
     _render_stock_ai_panel(code)
+
+
+# ─────────────────────────────── 我的持股 ───────────────────────────────
+
+_POSITION_COLUMNS = {
+    "code": "代號", "name": "名稱", "holding": "持有", "avg_cost": "平均成本", "close": "收盤",
+    "price_date": "價格日期", "market_value": "市值", "pnl": "未實現損益", "pnl_pct": "報酬率%",
+    "weight": "佔比%", "holding_days": "持有天數", "signals": "今日訊號",
+}
+
+
+def _render_position_panel(code: str):
+    """個股詳情頁：有持有這檔才顯示"""
+    records = db.query_holdings(code)
+    if not records:
+        return
+    p = portfolio.summarize_position(records, db.query_latest_close(code))
+    with ui.panel("我的持股", "損益以本地最新收盤價計算，未扣手續費與證交稅"):
+        items = [
+            {"label": "持有", "value": portfolio.lots_text(p["shares"]), "sub": f"{p['records']} 筆買進"},
+            {"label": "平均成本", "value": f"{p['avg_cost']:,.2f}",
+             "sub": f"最早買進 {p['first_buy_date']}" if p["first_buy_date"] else None},
+        ]
+        if p["pnl"] is not None:
+            items += [
+                {"label": "未實現損益", "value": f"{p['pnl']:+,.0f}", "tone": ui.tone_of(p["pnl"]),
+                 "sub": f"市值 {p['market_value']:,.0f}"},
+                {"label": "報酬率", "value": f"{p['pnl_pct']:+.2f}%", "tone": ui.tone_of(p["pnl_pct"]),
+                 "sub": f"持有 {p['holding_days']} 天" if p["holding_days"] is not None else None},
+            ]
+        ui.cards(items)
+
+
+def _render_add_holding_form():
+    with st.form("add_holding_form", clear_on_submit=True, border=False):
+        c1, c2, c3, c4, c5 = st.columns([1.2, 1, 1, 1.2, 1.4])
+        code = c1.text_input("股票代號", placeholder="例如 2330")
+        lots = c2.number_input("張數", min_value=0, value=1, step=1)
+        odd = c3.number_input("零股（股）", min_value=0, max_value=999, value=0, step=100)
+        price = c4.number_input("成交均價", min_value=0.0, value=None, step=0.5, format="%.2f")
+        buy_date = c5.date_input("買進日期", value=_date.today(), max_value=_date.today())
+        note = st.text_input("備註（選填）", placeholder="例如：拉回月線分批買進")
+        if st.form_submit_button("新增紀錄", type="primary"):
+            shares = int(lots) * portfolio.SHARES_PER_LOT + int(odd)
+            code = code.strip()
+            if not code or not shares or not price:
+                st.warning("請填入股票代號、股數與成交均價")
+            else:
+                name = db.lookup_stock_name(code) or code
+                db.add_holding(code, name, shares, float(price), buy_date.isoformat(), note)
+                st.rerun()
+
+
+def _render_holding_records():
+    records = db.query_holdings()
+    if not records:
+        st.caption("尚無買進紀錄")
+        return
+    df = pd.DataFrame(records)
+    df["buy_date"] = pd.to_datetime(df["buy_date"], errors="coerce").dt.date
+    df["delete"] = False
+    edited = st.data_editor(
+        df[["id", "code", "name", "shares", "cost_price", "buy_date", "note", "delete"]],
+        hide_index=True, width="stretch", key="holding_editor",
+        disabled=["id", "code", "name"],
+        column_config={
+            "id": None,
+            "code": st.column_config.TextColumn("代號"),
+            "name": st.column_config.TextColumn("名稱"),
+            "shares": st.column_config.NumberColumn("股數", min_value=1, step=1, format="%d",
+                                                    help="1 張 = 1000 股；賣出部分時直接改股數"),
+            "cost_price": st.column_config.NumberColumn("成交均價", min_value=0.0, format="%.2f"),
+            "buy_date": st.column_config.DateColumn("買進日期", format="YYYY-MM-DD"),
+            "note": st.column_config.TextColumn("備註"),
+            "delete": st.column_config.CheckboxColumn("刪除", help="勾選後按「儲存變更」刪除這筆（例如已全部賣出）"),
+        },
+    )
+    if st.button("儲存變更", key="save_holdings"):
+        original = df.set_index("id")
+        changed = 0
+        for row in edited.to_dict("records"):
+            if row["delete"]:
+                db.delete_holding(int(row["id"]))
+                changed += 1
+                continue
+            before = original.loc[row["id"]]
+            buy_date = row["buy_date"].isoformat() if pd.notna(row["buy_date"]) else None
+            before_date = before["buy_date"].isoformat() if pd.notna(before["buy_date"]) else None
+            if (int(row["shares"]) != int(before["shares"]) or float(row["cost_price"]) != float(before["cost_price"])
+                    or buy_date != before_date or (row["note"] or "") != (before["note"] or "")):
+                db.update_holding(int(row["id"]), int(row["shares"]), float(row["cost_price"]), buy_date,
+                                  row["note"] or "")
+                changed += 1
+        if changed:
+            st.rerun()
+        st.info("沒有變更")
+
+
+def _analyze_all_positions(positions: list[dict]):
+    progress = st.progress(0.0, text="準備中...")
+    failures = []
+    for index, p in enumerate(positions, start=1):
+        progress.progress((index - 1) / len(positions),
+                          text=f"分析 {p['code']} {p['name']}（{index}/{len(positions)}）")
+        ok, text = generate_codex_text(build_stock_analysis_prompt(p["code"]))
+        if ok:
+            save_stock_analysis(p["code"], text)
+        else:
+            failures.append(f"{p['code']}：{text}")
+    progress.empty()
+    if failures:
+        st.error("部分分析失敗：\n" + "\n".join(failures))
+    else:
+        st.success(f"已完成 {len(positions)} 檔持股分析，並收錄到每日報告")
+
+
+def portfolio_page():
+    _render_sidebar()
+    ui.page_header("我的持股", "持倉成本與損益以本地最新收盤價計算，未扣手續費與證交稅；資料只存在本機資料庫")
+
+    positions = portfolio.load_positions()
+    if positions:
+        totals = portfolio.portfolio_totals(positions)
+        ui.cards([
+            {"label": "持股檔數", "value": f"{totals['positions']}"},
+            {"label": "總成本", "value": f"{totals['cost']:,.0f}"},
+            {"label": "總市值", "value": f"{totals['market_value']:,.0f}",
+             "sub": f"{totals['unpriced']} 檔查無收盤價未計入" if totals["unpriced"] else None},
+            {"label": "未實現損益", "value": f"{totals['pnl']:+,.0f}", "tone": ui.tone_of(totals["pnl"])},
+            {"label": "報酬率", "value": "-" if totals["pnl_pct"] is None else f"{totals['pnl_pct']:+.2f}%",
+             "tone": ui.tone_of(totals["pnl_pct"])},
+        ])
+
+        signal_df = _cached_signal_history()
+        latest = signals.latest_rows(signal_df)
+        codes = [p["code"] for p in positions]
+        active_by_code = {}
+        if not latest.empty:
+            held = latest[latest["code"].isin(codes)]
+            active_by_code = {r["code"]: "、".join(signals.SIGNALS[k] for k in signals.active_signals(r))
+                              for _, r in held.iterrows()}
+
+        with ui.panel("持倉明細", "點選任一列開啟個股詳情"):
+            rows = [{
+                **p,
+                "holding": portfolio.lots_text(p["shares"]),
+                "weight": p["market_value"] / totals["market_value"] * 100
+                if p["market_value"] is not None and totals["market_value"] else None,
+                "signals": active_by_code.get(p["code"], ""),
+            } for p in positions]
+            view = pd.DataFrame(rows)[list(_POSITION_COLUMNS)].rename(columns=_POSITION_COLUMNS)
+            event = st.dataframe(
+                _styled_table(view, signed=["未實現損益", "報酬率%"], thousands=["市值", "未實現損益", "持有天數"],
+                              decimals=["平均成本", "收盤", "報酬率%", "佔比%"]),
+                width="stretch", hide_index=True, on_select="rerun", selection_mode="single-row",
+                key="position_table",
+                column_config={"今日訊號": st.column_config.TextColumn("今日訊號", width="large")},
+            )
+            if event.selection.rows:
+                _go_to_detail(positions[event.selection.rows[0]]["code"])
+
+        with ui.panel("持股訊號", "僅上市股・區分今日新出現與持續中的訊號"):
+            _render_signal_alerts(signals.watchlist_alerts(signal_df, codes), "持股今天沒有觸發任何訊號")
+
+        with ui.panel("AI 持股分析", "逐檔用 Codex 分析，提示詞附上你的成本與損益，列出續抱／減碼／停損的觀察條件"):
+            if st.button("用 Codex 逐檔分析持股並儲存", type="primary"):
+                _analyze_all_positions(positions)
+            today = _date.today().isoformat()
+            for p in positions:
+                saved = db.query_stock_analysis(today, p["code"])
+                if saved:
+                    with st.expander(f"{p['code']} {p['name']}・今天的分析（{saved[0]['created_at']}）"):
+                        st.markdown(_md_linebreaks(saved[0]["analysis"]))
+    else:
+        st.info("還沒有持股紀錄，請在下方新增第一筆買進紀錄")
+
+    with ui.panel("新增買進紀錄", "同一檔分批買進請分開記錄，會自動計算加權平均成本"):
+        _render_add_holding_form()
+
+    with ui.panel("買進紀錄", "可直接修改股數、成交均價、日期與備註；部分賣出請改股數，全部賣出請勾選刪除"):
+        _render_holding_records()
 
 
 # ─────────────────────────────── AI 分析 ───────────────────────────────
@@ -798,26 +980,30 @@ def _render_screen_tab(signal_df: pd.DataFrame):
             _go_to_detail(result.iloc[event.selection.rows[0]]["code"])
 
 
+def _render_signal_alerts(alerts: list[dict], empty_text: str):
+    if not alerts:
+        st.caption(empty_text)
+        return
+    for index, alert in enumerate(alerts):
+        if index:
+            st.divider()
+        change = alert["change_pct"]
+        ui.quote_header(alert["code"], alert["name"], alert["close"],
+                        None if change is None else alert["close"] - alert["close"] / (1 + change / 100),
+                        change, alert["date"])
+        tone = lambda k: "down" if k in signals.BEARISH_SIGNALS else "up"  # noqa: E731
+        if alert["new"]:
+            st.caption("今日新訊號")
+            ui.chips([(signals.SIGNALS[k], tone(k)) for k in alert["new"]])
+        if alert["continuing"]:
+            st.caption("持續中")
+            ui.chips([(signals.SIGNALS[k], "") for k in alert["continuing"]])
+
+
 def _render_alert_tab(signal_df: pd.DataFrame):
     alerts = signals.watchlist_alerts(signal_df, load_watchlist().keys())
     with ui.panel("觀察名單訊號", "僅上市股（上櫃資料源無法回補歷史，暫不計算）"):
-        if not alerts:
-            st.caption("觀察名單今天沒有觸發任何訊號")
-            return
-        for index, alert in enumerate(alerts):
-            if index:
-                st.divider()
-            change = alert["change_pct"]
-            ui.quote_header(alert["code"], alert["name"], alert["close"],
-                            None if change is None else alert["close"] - alert["close"] / (1 + change / 100),
-                            change, alert["date"])
-            tone = lambda k: "down" if k in signals.BEARISH_SIGNALS else "up"  # noqa: E731
-            if alert["new"]:
-                st.caption("今日新訊號")
-                ui.chips([(signals.SIGNALS[k], tone(k)) for k in alert["new"]])
-            if alert["continuing"]:
-                st.caption("持續中")
-                ui.chips([(signals.SIGNALS[k], "") for k in alert["continuing"]])
+        _render_signal_alerts(alerts, "觀察名單今天沒有觸發任何訊號")
 
 
 def screener_page():
@@ -897,6 +1083,28 @@ def _build_report_text(date: str) -> str:
         lines.append(signals.format_alerts_markdown(alerts))
     lines.append("")
 
+    positions = portfolio.load_positions(as_of=date)
+    if positions:
+        totals = portfolio.portfolio_totals(positions)
+        lines.append("## 我的持股")
+        lines.append(f"*以 {date} 以前最新收盤價計算，未扣手續費與證交稅*\n")
+        pct = f"（{totals['pnl_pct']:+.2f}%）" if totals["pnl_pct"] is not None else ""
+        lines.append(f"總成本 {totals['cost']:,.0f}｜總市值 {totals['market_value']:,.0f}｜"
+                     f"未實現損益 {totals['pnl']:+,.0f}{pct}\n")
+        lines.append("| 代號 | 名稱 | 持有 | 平均成本 | 收盤 | 未實現損益 | 報酬率 |")
+        lines.append("|---|---|---|---|---|---|---|")
+        for p in positions:
+            close = "-" if p["close"] is None else f"{p['close']:,.2f}"
+            pnl = "-" if p["pnl"] is None else f"{p['pnl']:+,.0f}"
+            pnl_pct = "-" if p["pnl_pct"] is None else f"{p['pnl_pct']:+.2f}%"
+            lines.append(f"| {p['code']} | {p['name']} | {portfolio.lots_text(p['shares'])} | "
+                         f"{p['avg_cost']:,.2f} | {close} | {pnl} | {pnl_pct} |")
+        if not signal_df.empty:
+            lines.append("\n**持股訊號**\n")
+            lines.append(signals.format_alerts_markdown(
+                signals.watchlist_alerts(signal_df, [p["code"] for p in positions])))
+        lines.append("")
+
     lines.append("## 個股深度分析")
     stock_analyses = db.query_stock_analysis(date)
     if stock_analyses:
@@ -937,6 +1145,7 @@ def report_page():
 
 
 HOME_PAGE = st.Page(home_page, title="市場總覽", default=True)
+PORTFOLIO_PAGE = st.Page(portfolio_page, title="我的持股")
 DETAIL_PAGE = st.Page(detail_page, title="個股詳情")
 SCREENER_PAGE = st.Page(screener_page, title="選股工具")
 AI_ANALYSIS_PAGE = st.Page(ai_analysis_page, title="AI 分析")
@@ -944,5 +1153,5 @@ REPORT_PAGE = st.Page(report_page, title="每日報告")
 AI_SETTINGS_PAGE = st.Page(ai_settings_page, title="AI 設定")
 
 if __name__ == "__main__":
-    nav = st.navigation([HOME_PAGE, DETAIL_PAGE, SCREENER_PAGE, AI_ANALYSIS_PAGE, REPORT_PAGE, AI_SETTINGS_PAGE])
+    nav = st.navigation([HOME_PAGE, PORTFOLIO_PAGE, DETAIL_PAGE, SCREENER_PAGE, AI_ANALYSIS_PAGE, REPORT_PAGE, AI_SETTINGS_PAGE])
     nav.run()

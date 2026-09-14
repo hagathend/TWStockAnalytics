@@ -137,6 +137,19 @@ CREATE TABLE IF NOT EXISTS month_revenue (
     cum_yoy_pct REAL,
     PRIMARY KEY (year_month, market, code)
 );
+
+-- 我的持股：每一筆買進一列（分批買進就多列），股數以「股」為單位（1 張 = 1000 股，零股也能記）。
+-- 賣出時直接修改股數或刪除該筆。屬於個人財務資料，資料庫檔案不進版控。
+CREATE TABLE IF NOT EXISTS holdings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code TEXT NOT NULL,
+    name TEXT,
+    shares INTEGER NOT NULL,
+    cost_price REAL NOT NULL,
+    buy_date TEXT,
+    note TEXT,
+    created_at TEXT
+);
 """
 
 
@@ -621,3 +634,48 @@ def query_code_fundamentals(code: str, revenue_months: int = 12) -> dict:
             (code, revenue_months),
         ).fetchall()
     return {"valuation": dict(valuation) if valuation else None, "revenue": [dict(r) for r in revenue]}
+
+
+def add_holding(code: str, name: str, shares: int, cost_price: float, buy_date: str | None = None,
+                note: str = "") -> int:
+    with get_conn() as conn:
+        cur = conn.execute(
+            """INSERT INTO holdings (code, name, shares, cost_price, buy_date, note, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (code, name, shares, cost_price, buy_date, note, datetime.now().isoformat(timespec="seconds")),
+        )
+        return cur.lastrowid
+
+
+def update_holding(holding_id: int, shares: int, cost_price: float, buy_date: str | None, note: str = ""):
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE holdings SET shares = ?, cost_price = ?, buy_date = ?, note = ? WHERE id = ?",
+            (shares, cost_price, buy_date, note, holding_id),
+        )
+
+
+def delete_holding(holding_id: int):
+    with get_conn() as conn:
+        conn.execute("DELETE FROM holdings WHERE id = ?", (holding_id,))
+
+
+def query_holdings(code: str | None = None) -> list[dict]:
+    with get_conn() as conn:
+        if code:
+            cur = conn.execute("SELECT * FROM holdings WHERE code = ? ORDER BY buy_date, id", (code,))
+        else:
+            cur = conn.execute("SELECT * FROM holdings ORDER BY code, buy_date, id")
+        return [dict(r) for r in cur.fetchall()]
+
+
+def query_latest_close(code: str, as_of: str | None = None) -> dict | None:
+    """最近一個交易日（不晚於 as_of）的收盤價，上市上櫃都查"""
+    as_of = as_of or "9999-12-31"
+    with get_conn() as conn:
+        row = conn.execute(
+            """SELECT date, market, name, close, change FROM stock_price
+               WHERE code = ? AND date <= ? AND close IS NOT NULL ORDER BY date DESC LIMIT 1""",
+            (code, as_of),
+        ).fetchone()
+        return dict(row) if row else None
