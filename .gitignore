@@ -10,6 +10,8 @@ data/ollama_settings.json
 data/scraping_settings.json
 data/watchlist.json
 data/*.log
-.streamlit/
+# 主題設定要進版控；secrets 等其他本機設定不提交
+.streamlit/*
+!.streamlit/config.toml
 
 data/codex_settings.json

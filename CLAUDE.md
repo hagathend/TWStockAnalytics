@@ -161,6 +161,17 @@ Schema 變更走 `db.init_db()` 裡的 `ALTER TABLE ... ADD COLUMN` + `try/excep
 .venv\Scripts\python.exe scripts\backfill_history.py --days 180
 ```
 
+## 介面規則（`src/ui.py` + `.streamlit/config.toml`）
+
+使用者對介面美感很在意，明確提過的問題不要再犯：
+- **字級要統一**：頁面標題一律 `ui.page_header()`、區塊標題一律 `ui.panel()`／`ui.section()`，
+  不要直接用 `st.title` / `st.header` / `st.subheader` 或「**粗體**」當標題。側邊欄層級是
+  導覽列（主要功能，字最大）> `ui.sidebar_label()` 小灰字 > 清單項目。
+- **區塊要有區隔**：K 線、籌碼、基本面、新聞、AI 分析這類獨立主題，各自用 `with ui.panel(...)` 包成有邊框的面板。
+- **不要放圖示**：emoji 和 Material 圖示使用者都覺得醜，導覽列與按鈕一律純文字。
+- **紅漲綠跌**：顏色只從 `ui.UP_COLOR` / `ui.DOWN_COLOR` 取；表格用 `_styled_table()`、圖表用 `ui.style_chart()`。
+- plotly 圖不要放圖內標題（會跟圖例黏在一起），標題交給外面的 panel。
+
 ## 分析模組（程式先算、AI 只判讀）
 
 - `src/indicators.py` 技術指標；`src/chip_metrics.py` 籌碼延伸指標（法人連買賣天數、N日累計、

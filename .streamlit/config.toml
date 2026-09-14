@@ -1,0 +1,35 @@
+# 介面主題：深色看盤風。台股慣例紅漲綠跌，所以 redColor／greenColor 維持紅＝漲、綠＝跌的語意，
+# 其餘強調色用藍色，避免跟漲跌色混淆。自訂 CSS 在 src/ui.py。
+[theme]
+base = "dark"
+primaryColor = "#4C8DF6"
+backgroundColor = "#0B0F17"
+secondaryBackgroundColor = "#151B26"
+textColor = "#E3E7EE"
+borderColor = "#232B39"
+dataframeBorderColor = "#232B39"
+dataframeHeaderBackgroundColor = "#151B26"
+showWidgetBorder = true
+redColor = "#F0524F"
+greenColor = "#22B573"
+blueColor = "#4C8DF6"
+linkColor = "#7AAEFF"
+linkUnderline = false
+font = "'Noto Sans TC', 'Microsoft JhengHei', 'PingFang TC', sans-serif"
+headingFont = "'Noto Sans TC', 'Microsoft JhengHei', 'PingFang TC', sans-serif"
+codeFont = "'JetBrains Mono', Consolas, monospace"
+baseFontSize = 14
+headingFontSizes = ["1.6rem", "1.15rem", "1rem", "0.95rem", "0.9rem", "0.85rem"]
+headingFontWeights = [700, 600, 600, 600, 600, 600]
+metricValueFontSize = "1.35rem"
+baseRadius = "0.6rem"
+buttonRadius = "0.5rem"
+chartCategoricalColors = ["#4C8DF6", "#F5B942", "#A78BFA", "#22B573", "#F0524F", "#38BDF8"]
+
+[theme.sidebar]
+backgroundColor = "#0F141D"
+secondaryBackgroundColor = "#151B26"
+borderColor = "#1E2633"
+
+[client]
+toolbarMode = "minimal"

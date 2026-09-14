@@ -13,12 +13,13 @@ from datetime import date as _date, timedelta
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
+from src import ui
 from src.collectors import finmind
 from src.indicators import RECOMMENDED_HISTORY_DAYS, add_indicators, to_dataframe
 
-_UP_COLOR = "red"  # 台股慣例：紅漲綠跌
-_DOWN_COLOR = "green"
-_MA_LINES = [("MA5", "#f5c542"), ("MA20", "#42a5f5"), ("MA60", "#ab47bc")]
+_UP_COLOR = ui.UP_COLOR  # 台股慣例：紅漲綠跌
+_DOWN_COLOR = ui.DOWN_COLOR
+_MA_LINES = [("MA5", "#F5B942"), ("MA20", "#4C8DF6"), ("MA60", "#A78BFA")]
 
 
 def build_candlestick(code: str, name: str, days: int = 90) -> go.Figure | None:
@@ -45,9 +46,8 @@ def build_candlestick(code: str, name: str, days: int = 90) -> go.Figure | None:
         rows=2,
         cols=1,
         shared_xaxes=True,
-        vertical_spacing=0.04,
-        row_heights=[0.72, 0.28],
-        subplot_titles=("", "成交量"),
+        vertical_spacing=0.06,
+        row_heights=[0.74, 0.26],
     )
 
     fig.add_trace(
@@ -58,7 +58,9 @@ def build_candlestick(code: str, name: str, days: int = 90) -> go.Figure | None:
             low=display_df["min"],
             close=display_df["close"],
             increasing_line_color=_UP_COLOR,
+            increasing_fillcolor=_UP_COLOR,
             decreasing_line_color=_DOWN_COLOR,
+            decreasing_fillcolor=_DOWN_COLOR,
             name="K線",
         ),
         row=1,
@@ -94,15 +96,16 @@ def build_candlestick(code: str, name: str, days: int = 90) -> go.Figure | None:
         col=1,
     )
 
+    # 標題由頁面上的區塊標題負責，圖內不再放標題——圖內標題會跟上方圖例擠在同一行黏在一起
+    ui.style_chart(fig, height=560)
     fig.update_layout(
-        title=f"{code} {name} 近 {days} 天走勢（資料來源: FinMind）",
         xaxis_rangeslider_visible=False,
-        template="plotly_dark",
-        height=600,
-        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0},
-        margin={"t": 60, "b": 40},
+        margin={"l": 10, "r": 10, "t": 44, "b": 10},
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.03, "x": 0, "font": {"size": 12}},
     )
-    fig.update_yaxes(title_text="價格", row=1, col=1)
-    fig.update_yaxes(title_text="張數(股)", row=2, col=1)
-    fig.update_xaxes(title_text="日期", row=2, col=1)
+    # 休市日（週末、假日）不留空白，K 棒才會連續
+    fig.update_xaxes(type="category", nticks=10, row=1, col=1)
+    fig.update_xaxes(type="category", nticks=10, row=2, col=1)
+    fig.update_yaxes(title_text="價格", title_font={"size": 11}, row=1, col=1)
+    fig.update_yaxes(title_text="成交量(股)", title_font={"size": 11}, row=2, col=1)
     return fig
