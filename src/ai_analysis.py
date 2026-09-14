@@ -515,3 +515,35 @@ def analyze_deep_with_provider(
     result = _save_result(date, f"{provider}-deep", summary, raw_picks)
     result["article_excerpts"] = article_excerpts
     return result
+
+
+def analyze_with_codex_deep(date: str, progress_callback=None) -> dict:
+    """Codex CLI 摘要與挑股，失敗時保留既有總結及觀察名單。"""
+    from src.codex_cli import generate_codex_text
+
+    def summarize(title, content):
+        ok, text = generate_codex_text(_ARTICLE_SUMMARY_PROMPT.format(title=title, content=content))
+        if not ok:
+            raise RuntimeError(text)
+        return text
+
+    def call_llm(prompt, schema):
+        ok, text = generate_codex_text(prompt, schema=schema)
+        if not ok:
+            raise RuntimeError(text)
+        return ok, text
+
+    try:
+        error, summaries, excerpts = _gather_and_summarize(date, summarize, progress_callback)
+        if error:
+            return {"ok": False, "message": error, "summary": "", "picks": []}
+        if progress_callback:
+            progress_callback(0, 1, "Codex 正在彙整摘要並挑選焦點個股")
+        error, summary, picks = _select_top_picks(date, summaries, call_llm)
+        if error:
+            return {"ok": False, "message": error, "summary": "", "picks": [], "article_excerpts": excerpts}
+        result = _save_result(date, "codex-cli", summary, picks)
+        result["article_excerpts"] = excerpts
+        return result
+    except RuntimeError as exc:
+        return {"ok": False, "message": str(exc), "summary": "", "picks": []}

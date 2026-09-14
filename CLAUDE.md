@@ -177,3 +177,12 @@ done
 - 外部服務（Firecrawl/Ollama/各家 API）呼叫一律回傳 `(ok: bool, 結果或錯誤訊息: str)`，
   把底層例外轉成使用者看得懂的訊息，不要讓例外往上竄
 - 新增 API Key 類設定 → 存 `data/*.json` 並**記得加進 `.gitignore`**
+
+
+## developCodexCLI 分支更新
+
+目前預設分析引擎改為 Codex CLI，不再由 UI 呼叫 Ollama。
+`src/codex_cli.py` 封裝非互動呼叫、登入檢查、JSON Schema、逾時與錯誤處理。
+新聞沿用擷取內文→逐篇摘要→挑選焦點個股；UI 收集與排程腳本都依 Codex 設定自動觸發。
+個股／大盤提供直接分析並儲存按鈕，沿用原本提示詞、資料表與報告。
+設定存在 `data/codex_settings.json`（不提交），使用 Codex 已登入帳號及其額度。

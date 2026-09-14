@@ -255,7 +255,13 @@ def query_news_excerpts(date: str):
 def query_available_dates():
     with get_conn() as conn:
         cur = conn.execute(
-            "SELECT DISTINCT date FROM stock_price ORDER BY date DESC LIMIT 30"
+            """SELECT date FROM stock_price
+            UNION SELECT date FROM news
+            UNION SELECT date FROM ai_picks
+            UNION SELECT date FROM ai_analysis_summary
+            UNION SELECT date FROM stock_analysis
+            UNION SELECT date FROM market_analysis
+            ORDER BY date DESC LIMIT 30"""
         )
         return [r["date"] for r in cur.fetchall()]
 

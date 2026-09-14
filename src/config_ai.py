@@ -67,3 +67,19 @@ def load_scraping_settings() -> dict:
 def save_scraping_settings(settings: dict):
     with open(_SCRAPING_CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(settings, f, ensure_ascii=False, indent=2)
+
+
+_CODEX_CONFIG_PATH = DATA_DIR / "codex_settings.json"
+_CODEX_DEFAULT = {"executable": "codex", "model": "", "timeout_seconds": 300,
+                  "auto_analyze_after_collect": True}
+
+
+def load_codex_settings() -> dict:
+    if not _CODEX_CONFIG_PATH.exists():
+        return dict(_CODEX_DEFAULT)
+    return {**_CODEX_DEFAULT, **json.loads(_CODEX_CONFIG_PATH.read_text(encoding="utf-8"))}
+
+
+def save_codex_settings(settings: dict):
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    _CODEX_CONFIG_PATH.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")

@@ -16,18 +16,15 @@ from datetime import date as _date  # noqa: E402
 import pandas as pd  # noqa: E402
 import streamlit as st  # noqa: E402
 
-from src.ai_analysis import analyze_deep_with_provider, analyze_with_ollama_deep, build_prompt, parse_and_save  # noqa: E402
-from src.ai_providers import PROVIDER_LABELS, list_ollama_models, test_connection
+from src.ai_analysis import analyze_with_codex_deep, build_prompt, parse_and_save  # noqa: E402
+from src.codex_cli import generate_codex_text, check_codex_login, list_codex_models
 from src.charting import build_candlestick
 from src.collect_all import run_daily_collect
 from src.collectors.firecrawl_fetcher import test_connection as firecrawl_test_connection
 from src.config_ai import (
-    PROVIDERS,
-    load_ai_settings,
-    load_ollama_settings,
+    load_codex_settings,
     load_scraping_settings,
-    save_ai_settings,
-    save_ollama_settings,
+    save_codex_settings,
     save_scraping_settings,
 )
 from src.config_watchlist import add_stock, load_watchlist, remove_stock
@@ -121,17 +118,15 @@ def _render_sidebar() -> str:
             st.json(result)
 
             today = _date.today().isoformat()
-            ollama_settings = load_ollama_settings()
-            if ollama_settings.get("auto_analyze_after_collect"):
+            codex_settings = load_codex_settings()
+            if codex_settings.get("auto_analyze_after_collect"):
                 progress_bar = st.progress(0.0, text="準備深度分析（先抓內文再逐篇摘要，可能要幾分鐘）...")
 
                 def _update_progress(cur, total, msg):
                     progress_bar.progress(cur / total if total else 0.0, text=f"{msg} ({cur}/{total})")
 
-                ai_result = analyze_with_ollama_deep(
+                ai_result = analyze_with_codex_deep(
                     today,
-                    ollama_settings["host"],
-                    ollama_settings["model"],
                     progress_callback=_update_progress,
                 )
                 progress_bar.empty()
@@ -326,11 +321,18 @@ def detail_page():
         st.caption("此日期尚無相關新聞（新聞的關聯代號目前只有標題內含代號時才會標記）")
 
     st.divider()
-    st.subheader("AI 個股分析（複製貼上流程）")
-    st.caption(
-        "產生包含籌碼歷史、股價與相關新聞的提示詞，複製貼到你平常用的網頁版 Claude / ChatGPT / "
-        "Gemini，請它分析籌碼面與未來展望，再把結果貼回來儲存，之後會收錄進「報表」頁。"
-    )
+    st.subheader("AI 個股分析（Codex CLI）")
+    st.caption("Codex 依籌碼、線型及新聞產生分析，完成後自動儲存並收錄報告。也可展開提示詞手動使用。")
+    if st.button("用 Codex 分析個股並儲存", key="codex_stock"):
+        with st.spinner("Codex 正在分析個股..."):
+            prompt = build_stock_analysis_prompt(code)
+            ok, text = generate_codex_text(prompt)
+            if ok:
+                result = save_stock_analysis(code, text)
+                (st.success if result["ok"] else st.error)(result["message"])
+            else:
+                st.error(text)
+
     if st.button("產生個股分析提示詞", key="gen_stock_prompt"):
         st.session_state["stock_prompt_code"] = code
         st.session_state["stock_prompt"] = build_stock_analysis_prompt(code)
@@ -384,33 +386,22 @@ def _render_article_excerpts(selected_date: str):
 
 def ai_analysis_page():
     st.title("AI 分析")
-    st.caption(
-        "推薦用本機 Ollama 自動分析：免費、不需要 API Key，收集資料後也可以自動觸發。"
-        "沒有裝 Ollama 的話，可以用「複製貼上」流程，貼到你平常用的網頁版 Claude / ChatGPT / Gemini。"
-        "若你已經有付費 API Key，也可以用最下方「進階」選項直接呼叫。"
-    )
+    st.caption("使用已登入的 Codex CLI 摘要新聞、彙整焦點個股，結果直接儲存並收錄報告。")
 
     today = _date.today().isoformat()
     available_dates = db.query_available_dates() or [today]
     selected_date = st.selectbox("要分析哪一天收集到的新聞", available_dates)
 
-    st.subheader("0. 用本機 Ollama 深度分析（推薦）")
-    ollama_settings = load_ollama_settings()
-    st.caption(
-        f"目前設定：{ollama_settings['host']} ｜ 模型: {ollama_settings['model']}（可到「AI 設定」頁修改）。"
-        "會先幫每則新聞抓內文（鉅亨網已內建、Google News 用 headless 瀏覽器解析）再逐篇摘要，"
-        "比只看標題準確很多，但也比較慢（視新聞則數可能要幾分鐘）。"
-    )
-    if st.button("用 Ollama 深度分析這天的新聞", type="primary"):
+    st.subheader("Codex 新聞深度分析")
+    st.caption("先取得新聞內文，再逐篇摘要與挑選最多 20 檔有新聞依據的焦點個股。")
+    if st.button("用 Codex 分析這天的新聞", type="primary"):
         progress_bar = st.progress(0.0, text="準備中...")
 
         def _update_progress(cur, total, msg):
             progress_bar.progress(cur / total if total else 0.0, text=f"{msg} ({cur}/{total})")
 
-        result = analyze_with_ollama_deep(
+        result = analyze_with_codex_deep(
             selected_date,
-            ollama_settings["host"],
-            ollama_settings["model"],
             progress_callback=_update_progress,
         )
         progress_bar.empty()
@@ -422,38 +413,6 @@ def ai_analysis_page():
             st.error(result["message"])
 
     _render_article_excerpts(selected_date)
-
-    st.divider()
-    st.subheader("0b. 用雲端 API 深度分析（Gemini 免費額度 / Claude·GPT 需付費）")
-    ai_settings = load_ai_settings()
-    cloud_provider = st.radio(
-        "選擇雲端供應商",
-        PROVIDERS,
-        format_func=lambda p: PROVIDER_LABELS[p],
-        horizontal=True,
-        key="cloud_provider_deep",
-    )
-    cloud_api_key = ai_settings["keys"].get(cloud_provider, "")
-    if cloud_provider == "gemini":
-        st.caption("Gemini 有真正免費的額度（不用綁信用卡），到 Google AI Studio 申請 Key 後在「AI 設定」頁填入即可。")
-    else:
-        st.caption(f"{PROVIDER_LABELS[cloud_provider]} 是另外計費的付費 API，此按鈕會實際產生費用。")
-    if not cloud_api_key:
-        st.info(f"尚未在「AI 設定」頁填入 {PROVIDER_LABELS[cloud_provider]} 的 API Key")
-    elif st.button(f"用 {PROVIDER_LABELS[cloud_provider]} 深度分析這天的新聞"):
-        progress_bar = st.progress(0.0, text="準備中...")
-
-        def _update_cloud_progress(cur, total, msg):
-            progress_bar.progress(cur / total if total else 0.0, text=f"{msg} ({cur}/{total})")
-
-        result = analyze_deep_with_provider(
-            selected_date, cloud_provider, cloud_api_key, progress_callback=_update_cloud_progress
-        )
-        progress_bar.empty()
-        if result["ok"]:
-            st.success(result["message"])
-        else:
-            st.error(result["message"])
 
     st.divider()
     st.subheader("1. 產生提示詞（複製貼上流程，不想接任何 API 時用）")
@@ -496,12 +455,19 @@ def ai_analysis_page():
         st.caption("尚無分析結果")
 
     st.divider()
-    st.subheader("大盤整體籌碼分析（複製貼上流程）")
-    st.caption(
-        "彙整大盤三大法人買賣超合計、漲跌家數、當日新聞摘要與焦點個股，產生提示詞，"
-        "複製貼到你平常用的網頁版 AI，回覆控制在500字內，包含短期/中期展望、籌碼分析、"
-        "目前熱門產業與個股消息。結果會收錄進「每日報告」頁。"
-    )
+    st.subheader("大盤整體籌碼分析（Codex CLI）")
+    st.caption("整合籌碼、短中期展望、熱門產業與個股消息，總計 1000 字內，儲存後收錄每日報告。")
+    if st.button("用 Codex 分析大盤並儲存", key="codex_market"):
+        with st.spinner("Codex 正在分析大盤..."):
+            ok, text = build_market_analysis_prompt(selected_date)
+            if ok:
+                ok, text = generate_codex_text(text)
+                if ok:
+                    result = save_market_analysis(text, selected_date)
+                    (st.success if result["ok"] else st.error)(result["message"])
+            if not ok:
+                st.error(text)
+
     if st.button("產生大盤分析提示詞"):
         ok, prompt_or_msg = build_market_analysis_prompt(selected_date)
         if ok:
@@ -532,36 +498,42 @@ def ai_analysis_page():
 def ai_settings_page():
     st.title("AI 設定")
 
-    st.subheader("本機 Ollama（推薦，免費）")
-    st.caption("需要先在本機安裝並啟動 Ollama（https://ollama.com/），不需要任何 API Key。")
+    st.subheader("Codex CLI")
+    st.caption("使用這台電腦的 Codex 登入。會使用帳號的 Codex 額度，不需在本程式填 API Key。")
+    settings = load_codex_settings()
+    executable = st.text_input("Codex 執行檔（通常填 codex 即可）", value=settings["executable"])
+    catalog = list_codex_models()
+    models = {m["slug"]: m for m in catalog}
+    options = [""] + list(models)
+    current = settings.get("model", "")
+    if current and current not in options:
+        options.append(current)
+    labels = {"": "使用 CLI 預設模型"}
+    labels.update({slug: entry.get("display_name", slug) for slug, entry in models.items()})
+    model = st.selectbox("分析模型", options, index=options.index(current),
+                         format_func=lambda value: labels.get(value, value))
+    if model in models:
+        st.caption(models[model].get("description", ""))
+    st.caption("清單來自這台電腦的 Codex 模型目錄；可按下方測試確認帳號目前能否使用。")
+    if not catalog:
+        st.info("尚未取得模型清單，請先登入並開啟 Codex CLI，再重新整理本頁。")
+    if st.checkbox("手動指定其他模型"):
+        model = st.text_input("模型代號", value=current)
 
-    ollama_settings = load_ollama_settings()
-    host = st.text_input("Ollama 位址", value=ollama_settings["host"])
-
-    ok, models_or_msg = list_ollama_models(host)
-    if ok:
-        models = models_or_msg
-        if not models:
-            st.warning("Ollama 已連線，但目前沒有任何模型，請先用 `ollama pull qwen2.5:7b` 下載")
-            model = ollama_settings["model"]
-        else:
-            current = ollama_settings["model"]
-            index = models.index(current) if current in models else 0
-            model = st.selectbox("要使用的模型", models, index=index)
-            st.caption("推薦 qwen2.5:7b：實測在這個新聞分析任務上速度快、JSON 格式遵循度最高、繁體中文推理清楚。")
-    else:
-        st.error(models_or_msg)
-        model = ollama_settings["model"]
-
-    auto_analyze = st.checkbox(
-        "收集資料後自動用 Ollama 分析新聞",
-        value=ollama_settings.get("auto_analyze_after_collect", True),
-    )
-
-    if st.button("儲存 Ollama 設定", type="primary"):
-        save_ollama_settings(
-            {"host": host, "model": model, "auto_analyze_after_collect": auto_analyze}
-        )
+    timeout = st.number_input("每次分析最長等待秒數", min_value=30, max_value=1800,
+                              value=int(settings["timeout_seconds"]))
+    auto = st.checkbox("收集後自動用 Codex 分析新聞", value=settings["auto_analyze_after_collect"])
+    edited = {"executable": executable, "model": model, "timeout_seconds": int(timeout),
+              "auto_analyze_after_collect": auto}
+    if st.button("測試所選模型"):
+        with st.spinner("測試模型中..."):
+            ok, message = generate_codex_text("請只回覆：連線成功", settings=edited)
+        (st.success if ok else st.error)(message)
+    if st.button("檢查 Codex 登入"):
+        ok, message = check_codex_login(edited)
+        (st.success if ok else st.error)(message)
+    if st.button("儲存 Codex 設定", type="primary"):
+        save_codex_settings(edited)
         st.success("已儲存")
 
     st.divider()
@@ -592,51 +564,6 @@ def ai_settings_page():
             else:
                 st.error(message)
 
-    st.divider()
-
-    st.subheader("付費 API（進階，沒有裝 Ollama 或想用更強模型時使用）")
-    st.caption(
-        "選擇之後新聞分析要用哪家付費 AI，並填入對應 API Key（供「AI 分析」頁的進階直接呼叫選項使用）。"
-        "Key 僅存在本機 data/ai_settings.json，不會上傳、不會加入 git。"
-    )
-
-    ai_settings = load_ai_settings()
-
-    active_provider = st.radio(
-        "目前使用的 AI 供應商",
-        PROVIDERS,
-        format_func=lambda p: PROVIDER_LABELS[p],
-        index=PROVIDERS.index(ai_settings["active_provider"]),
-        horizontal=True,
-    )
-
-    st.divider()
-
-    updated_keys = dict(ai_settings["keys"])
-    for provider in PROVIDERS:
-        st.subheader(PROVIDER_LABELS[provider])
-        col_key, col_test = st.columns([4, 1])
-        with col_key:
-            updated_keys[provider] = st.text_input(
-                "API Key",
-                value=ai_settings["keys"].get(provider, ""),
-                type="password",
-                key=f"key_{provider}",
-                label_visibility="collapsed",
-                placeholder=f"輸入 {PROVIDER_LABELS[provider]} API Key",
-            )
-        with col_test:
-            if st.button("測試連線", key=f"test_{provider}", width="stretch"):
-                ok, message = test_connection(provider, updated_keys[provider])
-                if ok:
-                    st.success(message)
-                else:
-                    st.error(message)
-
-    st.divider()
-    if st.button("儲存設定", type="primary"):
-        save_ai_settings({"active_provider": active_provider, "keys": updated_keys})
-        st.success(f"已儲存，目前使用的 AI 供應商: {PROVIDER_LABELS[active_provider]}")
 
 
 def _format_net(value) -> str:

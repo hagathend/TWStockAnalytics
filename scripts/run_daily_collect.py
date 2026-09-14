@@ -14,3 +14,12 @@ from src.collect_all import run_daily_collect  # noqa: E402
 if __name__ == "__main__":
     result = run_daily_collect()
     print(result)
+    from datetime import date
+    from src.config_ai import load_codex_settings
+    from src.ai_analysis import analyze_with_codex_deep
+
+    if load_codex_settings().get("auto_analyze_after_collect", True):
+        analysis = analyze_with_codex_deep(date.today().isoformat())
+        print(analysis["message"])
+        if not analysis["ok"]:
+            sys.exit(1)

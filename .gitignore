@@ -11,3 +11,5 @@ data/scraping_settings.json
 data/watchlist.json
 data/*.log
 .streamlit/
+
+data/codex_settings.json
