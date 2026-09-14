@@ -32,6 +32,7 @@ from src.config_ai import (
 from src.config_watchlist import add_stock, load_watchlist, remove_stock
 from src.market_analysis import build_market_analysis_prompt, save_market_analysis
 from src.report_pdf import markdown_to_pdf
+from src import signals
 from src.stock_analysis import build_stock_analysis_prompt, save_stock_analysis
 from src.storage import db
 
@@ -294,6 +295,13 @@ def _render_chip_metrics(code: str):
     c4.metric("法人佔成交量（5日）", "資料不足" if ratio is None else f"{ratio:+.1f}%")
     with st.expander("完整籌碼指標（給 AI 的同一份文字）"):
         st.text(summarize_chip_metrics(metrics))
+
+    latest = signals.latest_rows(_cached_signal_history())
+    row = latest[latest["code"] == code] if not latest.empty else latest
+    if not row.empty:
+        active = signals.active_signals(row.iloc[0])
+        tags = [("🔻" if k in signals.BEARISH_SIGNALS else "🔺") + signals.SIGNALS[k] for k in active]
+        st.markdown(f"**今日訊號（{row.iloc[0]['date']}）**：" + ("　".join(tags) if tags else "無"))
 
 
 def detail_page():
@@ -595,6 +603,58 @@ def ai_settings_page():
 
 
 
+@st.cache_data(ttl=600, show_spinner="計算全市場訊號中...")
+def _cached_signal_history(as_of: str | None = None) -> pd.DataFrame:
+    """全市場訊號計算約需數秒，快取 10 分鐘；收集完新資料後最多 10 分鐘就會反映"""
+    return signals.load_signal_history(as_of=as_of)
+
+
+_SCREEN_COLUMNS = {
+    "code": "代號", "name": "名稱", "close": "收盤", "change_pct": "漲跌%",
+    "return_20d": "20日報酬%", "rs_rank_pct": "相對強弱(百分位)",
+    "foreign_streak": "外資連買賣(天)", "trust_streak": "投信連買賣(天)",
+    "vol_ma20_lots": "20日均量(張)", "signals": "觸發訊號",
+}
+
+
+def screener_page():
+    st.title("選股工具")
+    _render_sidebar()
+    st.caption("訊號由程式依本地資料庫的上市（TWSE）價量與籌碼歷史計算，只是篩選條件，不構成投資建議。")
+
+    signal_df = _cached_signal_history()
+    if signal_df.empty:
+        st.warning("本地資料庫沒有上市歷史資料，請先執行收集或 scripts/backfill_history.py 補歷史")
+        return
+    trading_days = signal_df["date"].nunique()
+    st.caption(f"資料截至 {signal_df['date'].max()}，共 {trading_days} 個交易日"
+               + ("（未滿 60 天，60日相關訊號暫時不會觸發）" if trading_days < 61 else ""))
+
+    screen_tab, alert_tab = st.tabs(["篩選器", "觀察名單警示"])
+    with screen_tab:
+        labels = {v: k for k, v in signals.SIGNALS.items()}
+        chosen = st.multiselect("訊號條件", list(labels), default=[signals.SIGNALS["breakout_20d"]])
+        col1, col2 = st.columns(2)
+        mode = col1.radio("條件組合", ["全部符合", "符合任一"], horizontal=True)
+        min_lots = col2.number_input("20日均量至少（張）", min_value=0, value=500, step=100)
+        result = signals.screen(signal_df, [labels[c] for c in chosen], min_avg_volume_lots=min_lots,
+                                mode="all" if mode == "全部符合" else "any")
+        st.markdown(f"**符合 {len(result)} 檔**（依相對強弱排序，點選列可看個股詳情）")
+        if not result.empty:
+            result["vol_ma20_lots"] = (result["vol_ma20"] / 1000).round(0)
+            view = result[list(_SCREEN_COLUMNS)].rename(columns=_SCREEN_COLUMNS).round(2)
+            event = st.dataframe(view, width="stretch", hide_index=True,
+                                 on_select="rerun", selection_mode="single-row", key="screen_table")
+            if event.selection.rows:
+                _go_to_detail(result.iloc[event.selection.rows[0]]["code"])
+
+    with alert_tab:
+        watchlist = load_watchlist()
+        alerts = signals.watchlist_alerts(signal_df, watchlist.keys())
+        st.caption("只涵蓋上市股；上櫃（TPEx）資料源無法回補歷史，暫不計算訊號。")
+        st.markdown(signals.format_alerts_markdown(alerts))
+
+
 def _format_net(value) -> str:
     return f"{value:+,}" if value is not None else "-"
 
@@ -636,6 +696,16 @@ def _build_report_text(date: str) -> str:
             )
     else:
         lines.append("_（此日期尚無 AI 分析結果，請到「AI 分析」頁產生）_")
+    lines.append("")
+
+    lines.append("## 觀察名單技術／籌碼訊號")
+    signal_df = _cached_signal_history(as_of=date)
+    if signal_df.empty:
+        lines.append("_（本地資料庫尚無上市歷史資料）_")
+    else:
+        alerts = signals.watchlist_alerts(signal_df, load_watchlist().keys())
+        lines.append(f"*訊號資料日期: {signal_df['date'].max()}（僅上市股，由程式計算）*\n")
+        lines.append(signals.format_alerts_markdown(alerts))
     lines.append("")
 
     lines.append("## 個股深度分析")
@@ -693,9 +763,10 @@ def report_page():
 HOME_PAGE = st.Page(home_page, title="總覽", icon="📊", default=True)
 DETAIL_PAGE = st.Page(detail_page, title="個股詳情", icon="📈")
 AI_ANALYSIS_PAGE = st.Page(ai_analysis_page, title="AI 分析", icon="🤖")
+SCREENER_PAGE = st.Page(screener_page, title="選股工具", icon="🔎")
 REPORT_PAGE = st.Page(report_page, title="每日報告", icon="📝")
 AI_SETTINGS_PAGE = st.Page(ai_settings_page, title="AI 設定", icon="⚙️")
 
 if __name__ == "__main__":
-    nav = st.navigation([HOME_PAGE, DETAIL_PAGE, AI_ANALYSIS_PAGE, REPORT_PAGE, AI_SETTINGS_PAGE])
+    nav = st.navigation([HOME_PAGE, DETAIL_PAGE, SCREENER_PAGE, AI_ANALYSIS_PAGE, REPORT_PAGE, AI_SETTINGS_PAGE])
     nav.run()

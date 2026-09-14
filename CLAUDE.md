@@ -168,6 +168,9 @@ Schema 變更走 `db.init_db()` 裡的 `ALTER TABLE ... ADD COLUMN` + `try/excep
 - `src/backfill.py` TWSE 歷史補收集：`trading_calendar` 表記住非交易日；**今天/未來不標記**
   （可能只是尚未公布）；例外不標記（下次重試）；請求間隔 3 秒（太快會被 TWSE 封鎖）。
   每日收集最後會呼叫 `fill_recent_gaps()` 自動補近兩週缺漏。
+- `src/signals.py` 事件訊號（均線排列、突破、缺口、爆量長紅黑、相對強弱、投信認養…）。
+  **對整段歷史每一列算布林欄位**，選股器取最新一天、回測取過去每天，共用同一套定義。
+  相對強弱是全市場排名，不要只讀部分股票來算。「選股工具」頁與每日報告的觀察名單警示都用它。
 - TPEx OpenAPI 只有「最新一天」無法回補，上櫃股的歷史指標天數會比較少。
 
 第一次設定要多跑 `playwright install chromium`（`pip install` 不會自動下載瀏覽器核心）。
