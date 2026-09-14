@@ -3,7 +3,7 @@
 from datetime import date as _date, timedelta
 
 from src import backfill
-from src.collectors import finmind, news_crawler, news_rss, twse_official
+from src.collectors import finmind, fundamentals, news_crawler, news_rss, twse_official
 from src.config import WATCHLIST
 from src.storage import db
 
@@ -81,6 +81,15 @@ def collect_news() -> dict:
     return {"cnyes": len(cnyes_rows), "rss": len(rss_rows)}
 
 
+def collect_fundamentals() -> dict:
+    """本益比／殖利率／淨值比（每日）與月營收（來源只有最新月份，每天覆寫一次即可）"""
+    twse_val = _run_step("TWSE 本益比/殖利率/淨值比", fundamentals.fetch_twse_valuation, db.save_valuation)
+    tpex_val = _run_step("TPEx 本益比/殖利率/淨值比", fundamentals.fetch_tpex_valuation, db.save_valuation)
+    twse_rev = _run_step("TWSE 月營收", fundamentals.fetch_twse_month_revenue, db.save_month_revenue)
+    tpex_rev = _run_step("TPEx 月營收", fundamentals.fetch_tpex_month_revenue, db.save_month_revenue)
+    return {"valuation": len(twse_val) + len(tpex_val), "month_revenue": len(twse_rev) + len(tpex_rev)}
+
+
 def collect_recent_gaps() -> dict:
     """自動補最近兩週漏掉的上市交易日（例如排程沒觸發、當天來源故障的日子）。
 
@@ -108,6 +117,7 @@ def run_daily_collect() -> dict:
         "margin": collect_margin(),
         "finmind": collect_finmind_watchlist(),
         "news": collect_news(),
+        "fundamentals": collect_fundamentals(),
         "gap_fill": collect_recent_gaps(),
     }
     return result

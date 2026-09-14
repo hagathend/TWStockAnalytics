@@ -107,6 +107,36 @@ CREATE TABLE IF NOT EXISTS trading_calendar (
     checked_at TEXT,
     PRIMARY KEY (date, market)
 );
+
+-- 本益比／殖利率／淨值比：虧損公司本益比為 NULL（不是 0）
+CREATE TABLE IF NOT EXISTS valuation (
+    date TEXT NOT NULL,
+    market TEXT NOT NULL,
+    code TEXT NOT NULL,
+    name TEXT,
+    pe_ratio REAL,
+    dividend_yield REAL,
+    pb_ratio REAL,
+    PRIMARY KEY (date, market, code)
+);
+
+-- 月營收（千元）：來源只提供最新公布月份，每天收一次以 year_month 覆寫，歷史靠累積
+CREATE TABLE IF NOT EXISTS month_revenue (
+    year_month TEXT NOT NULL,
+    market TEXT NOT NULL,
+    code TEXT NOT NULL,
+    name TEXT,
+    industry TEXT,
+    revenue INTEGER,
+    revenue_last_month INTEGER,
+    revenue_last_year INTEGER,
+    mom_pct REAL,
+    yoy_pct REAL,
+    cum_revenue INTEGER,
+    cum_revenue_last_year INTEGER,
+    cum_yoy_pct REAL,
+    PRIMARY KEY (year_month, market, code)
+);
 """
 
 
@@ -529,3 +559,65 @@ def query_market_history(market: str = "TWSE", since: str | None = None,
     with get_conn() as conn:
         cur = conn.execute(sql, [market, market, *params])
         return [dict(r) for r in cur.fetchall()]
+
+
+def save_valuation(rows: list[dict]):
+    if not rows:
+        return
+    with get_conn() as conn:
+        conn.executemany(
+            """INSERT OR REPLACE INTO valuation (date, market, code, name, pe_ratio, dividend_yield, pb_ratio)
+               VALUES (:date, :market, :code, :name, :pe_ratio, :dividend_yield, :pb_ratio)""",
+            rows,
+        )
+
+
+def save_month_revenue(rows: list[dict]):
+    if not rows:
+        return
+    with get_conn() as conn:
+        conn.executemany(
+            """INSERT OR REPLACE INTO month_revenue
+               (year_month, market, code, name, industry, revenue, revenue_last_month, revenue_last_year,
+                mom_pct, yoy_pct, cum_revenue, cum_revenue_last_year, cum_yoy_pct)
+               VALUES (:year_month, :market, :code, :name, :industry, :revenue, :revenue_last_month,
+                       :revenue_last_year, :mom_pct, :yoy_pct, :cum_revenue, :cum_revenue_last_year, :cum_yoy_pct)""",
+            rows,
+        )
+
+
+def query_latest_valuation(as_of: str | None = None) -> list[dict]:
+    """每個市場各自取「最新一天（不晚於 as_of）」的本益比資料；兩市場日期可能不同步，不強制對齊"""
+    as_of = as_of or "9999-12-31"
+    with get_conn() as conn:
+        cur = conn.execute(
+            """SELECT v.* FROM valuation v
+               JOIN (SELECT market, MAX(date) AS date FROM valuation WHERE date <= ? GROUP BY market) latest
+                 ON v.market = latest.market AND v.date = latest.date""",
+            (as_of,),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def query_latest_month_revenue() -> list[dict]:
+    """每檔股票最新一個月的營收（各公司公布進度不同，所以是逐檔取最新月份）"""
+    with get_conn() as conn:
+        cur = conn.execute(
+            """SELECT r.* FROM month_revenue r
+               JOIN (SELECT market, code, MAX(year_month) AS ym FROM month_revenue GROUP BY market, code) latest
+                 ON r.market = latest.market AND r.code = latest.code AND r.year_month = latest.ym"""
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def query_code_fundamentals(code: str, revenue_months: int = 12) -> dict:
+    """單一股票最新的本益比資料與近幾個月營收（由新到舊）"""
+    with get_conn() as conn:
+        valuation = conn.execute(
+            "SELECT * FROM valuation WHERE code = ? ORDER BY date DESC LIMIT 1", (code,)
+        ).fetchone()
+        revenue = conn.execute(
+            "SELECT * FROM month_revenue WHERE code = ? ORDER BY year_month DESC LIMIT ?",
+            (code, revenue_months),
+        ).fetchall()
+    return {"valuation": dict(valuation) if valuation else None, "revenue": [dict(r) for r in revenue]}

@@ -171,6 +171,9 @@ Schema 變更走 `db.init_db()` 裡的 `ALTER TABLE ... ADD COLUMN` + `try/excep
 - `src/signals.py` 事件訊號（均線排列、突破、缺口、爆量長紅黑、相對強弱、投信認養…）。
   **對整段歷史每一列算布林欄位**，選股器取最新一天、回測取過去每天，共用同一套定義。
   相對強弱是全市場排名，不要只讀部分股票來算。「選股工具」頁與每日報告的觀察名單警示都用它。
+- `src/collectors/fundamentals.py` + `src/fundamentals.py` 本益比／殖利率／淨值比（`valuation` 表）與
+  月營收（`month_revenue` 表，千元）。月營收來源只給「最新公布月份」，每天覆寫、歷史靠累積；
+  虧損公司本益比存 NULL 不是 0（0 會被「本益比 ≤ N」篩選誤判成超便宜）。
 - TPEx OpenAPI 只有「最新一天」無法回補，上櫃股的歷史指標天數會比較少。
 
 第一次設定要多跑 `playwright install chromium`（`pip install` 不會自動下載瀏覽器核心）。

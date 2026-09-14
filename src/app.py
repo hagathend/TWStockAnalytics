@@ -32,7 +32,7 @@ from src.config_ai import (
 from src.config_watchlist import add_stock, load_watchlist, remove_stock
 from src.market_analysis import build_market_analysis_prompt, save_market_analysis
 from src.report_pdf import markdown_to_pdf
-from src import signals
+from src import fundamentals, signals
 from src.stock_analysis import build_stock_analysis_prompt, save_stock_analysis
 from src.storage import db
 
@@ -272,6 +272,27 @@ def home_page():
             st.info("尚無收集紀錄")
 
 
+def _render_fundamentals(code: str):
+    data = db.query_code_fundamentals(code)
+    valuation, revenue = data["valuation"], data["revenue"]
+    if not valuation and not revenue:
+        return
+
+    def _fmt(value, spec, suffix=""):
+        return "無資料" if value is None else f"{value:{spec}}{suffix}"
+
+    st.markdown("**基本面**")
+    c1, c2, c3, c4 = st.columns(4)
+    if valuation:
+        c1.metric("本益比", _fmt(valuation["pe_ratio"], ".2f"), help="無資料通常代表近四季虧損")
+        c2.metric("殖利率", _fmt(valuation["dividend_yield"], ".2f", "%"))
+        c3.metric("股價淨值比", _fmt(valuation["pb_ratio"], ".2f"))
+    if revenue:
+        r = revenue[0]
+        c4.metric(f"{r['year_month']} 營收年增", _fmt(r["yoy_pct"], "+.1f", "%"),
+                  f"月增 {_fmt(r['mom_pct'], '+.1f', '%')}", delta_color="off")
+
+
 def _render_chip_metrics(code: str):
     metrics = metrics_for_code(code)
     st.markdown("**籌碼延伸指標**（依本地累積的法人／融資歷史計算）")
@@ -295,6 +316,8 @@ def _render_chip_metrics(code: str):
     c4.metric("法人佔成交量（5日）", "資料不足" if ratio is None else f"{ratio:+.1f}%")
     with st.expander("完整籌碼指標（給 AI 的同一份文字）"):
         st.text(summarize_chip_metrics(metrics))
+
+    _render_fundamentals(code)
 
     latest = signals.latest_rows(_cached_signal_history())
     row = latest[latest["code"] == code] if not latest.empty else latest
@@ -613,7 +636,8 @@ _SCREEN_COLUMNS = {
     "code": "代號", "name": "名稱", "close": "收盤", "change_pct": "漲跌%",
     "return_20d": "20日報酬%", "rs_rank_pct": "相對強弱(百分位)",
     "foreign_streak": "外資連買賣(天)", "trust_streak": "投信連買賣(天)",
-    "vol_ma20_lots": "20日均量(張)", "signals": "觸發訊號",
+    "vol_ma20_lots": "20日均量(張)", "pe_ratio": "本益比", "dividend_yield": "殖利率%",
+    "pb_ratio": "淨值比", "yoy_pct": "營收年增%", "signals": "觸發訊號",
 }
 
 
@@ -637,8 +661,17 @@ def screener_page():
         col1, col2 = st.columns(2)
         mode = col1.radio("條件組合", ["全部符合", "符合任一"], horizontal=True)
         min_lots = col2.number_input("20日均量至少（張）", min_value=0, value=500, step=100)
+        with st.expander("基本面條件（留空＝不限制；設了條件時缺資料的股票會被排除）"):
+            f1, f2, f3, f4 = st.columns(4)
+            pe_max = f1.number_input("本益比 ≤", min_value=0.0, value=None, step=1.0)
+            yield_min = f2.number_input("殖利率% ≥", min_value=0.0, value=None, step=0.5)
+            pb_max = f3.number_input("淨值比 ≤", min_value=0.0, value=None, step=0.5)
+            yoy_min = f4.number_input("營收年增% ≥", value=None, step=5.0)
         result = signals.screen(signal_df, [labels[c] for c in chosen], min_avg_volume_lots=min_lots,
                                 mode="all" if mode == "全部符合" else "any")
+        result = fundamentals.attach_fundamentals(result, fundamentals.latest_fundamentals())
+        result = fundamentals.apply_filters(result, pe_max=pe_max, yield_min=yield_min,
+                                            pb_max=pb_max, yoy_min=yoy_min)
         st.markdown(f"**符合 {len(result)} 檔**（依相對強弱排序，點選列可看個股詳情）")
         if not result.empty:
             result["vol_ma20_lots"] = (result["vol_ma20"] / 1000).round(0)
