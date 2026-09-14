@@ -14,6 +14,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 from datetime import date as _date  # noqa: E402
 
 import pandas as pd  # noqa: E402
+import plotly.express as px  # noqa: E402
 import streamlit as st  # noqa: E402
 
 from src.ai_analysis import analyze_with_codex_deep, build_prompt, parse_and_save  # noqa: E402
@@ -32,7 +33,7 @@ from src.config_ai import (
 from src.config_watchlist import add_stock, load_watchlist, remove_stock
 from src.market_analysis import build_market_analysis_prompt, save_market_analysis
 from src.report_pdf import markdown_to_pdf
-from src import fundamentals, signals
+from src import backtest, fundamentals, signals
 from src.stock_analysis import build_stock_analysis_prompt, save_stock_analysis
 from src.storage import db
 
@@ -632,6 +633,52 @@ def _cached_signal_history(as_of: str | None = None) -> pd.DataFrame:
     return signals.load_signal_history(as_of=as_of)
 
 
+@st.cache_data(ttl=600, show_spinner="計算回測資料中...")
+def _cached_backtest_frame() -> pd.DataFrame:
+    """回測用盡量長的歷史（本地資料庫有多少用多少）"""
+    return backtest.add_forward_returns(signals.load_signal_history(lookback_days=3650))
+
+
+_BACKTEST_COLUMNS = {
+    "label": "訊號", "events": "樣本數", "mean": "平均報酬%", "median": "中位數%", "win_rate": "勝率%",
+    "p25": "P25%", "p75": "P75%", "baseline_mean": "同期大盤平均%", "excess_mean": "平均超額報酬%",
+}
+
+
+def _render_backtest_tab():
+    st.caption(
+        "訊號出現後「隔天開盤買進、第 N 個交易日收盤賣出」的報酬分布，只計新出現的訊號（避免連續多天重複計數）。"
+        "未扣手續費與交易稅、未處理漲停買不到；樣本期間短時結論容易受單一行情影響，僅供檢驗訊號參考。"
+    )
+    frame = _cached_backtest_frame()
+    if frame.empty:
+        st.warning("本地資料庫沒有足夠的上市歷史資料")
+        return
+    col1, col2 = st.columns(2)
+    horizon = col1.radio("持有天數", backtest.DEFAULT_HORIZONS, format_func=lambda n: f"{n} 個交易日",
+                         horizontal=True)
+    min_lots = col2.number_input("20日均量至少（張）", min_value=0, value=500, step=100, key="bt_min_lots")
+    start, end = backtest.sample_period(frame, horizon)
+    st.markdown(f"**樣本期間**：訊號日 {start} ～ {end}")
+
+    table = backtest.backtest_all(frame, horizon, min_avg_volume_lots=min_lots)
+    view = table[list(_BACKTEST_COLUMNS)].rename(columns=_BACKTEST_COLUMNS).round(2)
+    st.dataframe(view, width="stretch", hide_index=True)
+    st.caption(f"樣本數少於 {backtest.MIN_EVENTS_FOR_STATS} 筆的訊號統計參考性很低。"
+               "「平均超額報酬」= 訊號股報酬 − 同一天全市場平均報酬，比單看勝率更能看出訊號本身有沒有用。")
+
+    labels = {v: k for k, v in signals.SIGNALS.items()}
+    chosen = st.selectbox("查看報酬分布", list(labels))
+    stats = backtest.backtest_signal(frame, labels[chosen], horizon, min_avg_volume_lots=min_lots)
+    if stats["events"]:
+        fig = px.histogram(pd.DataFrame({"報酬%": stats["returns"]}), x="報酬%", nbins=50)
+        fig.add_vline(x=0, line_dash="dash")
+        fig.add_vline(x=stats["baseline_mean"], line_color="gray", annotation_text="同期大盤平均")
+        st.plotly_chart(fig, width="stretch")
+    else:
+        st.caption("這個訊號在樣本期間沒有出現")
+
+
 _SCREEN_COLUMNS = {
     "code": "代號", "name": "名稱", "close": "收盤", "change_pct": "漲跌%",
     "return_20d": "20日報酬%", "rs_rank_pct": "相對強弱(百分位)",
@@ -654,7 +701,7 @@ def screener_page():
     st.caption(f"資料截至 {signal_df['date'].max()}，共 {trading_days} 個交易日"
                + ("（未滿 60 天，60日相關訊號暫時不會觸發）" if trading_days < 61 else ""))
 
-    screen_tab, alert_tab = st.tabs(["篩選器", "觀察名單警示"])
+    screen_tab, alert_tab, backtest_tab = st.tabs(["篩選器", "觀察名單警示", "訊號回測"])
     with screen_tab:
         labels = {v: k for k, v in signals.SIGNALS.items()}
         chosen = st.multiselect("訊號條件", list(labels), default=[signals.SIGNALS["breakout_20d"]])
@@ -686,6 +733,9 @@ def screener_page():
         alerts = signals.watchlist_alerts(signal_df, watchlist.keys())
         st.caption("只涵蓋上市股；上櫃（TPEx）資料源無法回補歷史，暫不計算訊號。")
         st.markdown(signals.format_alerts_markdown(alerts))
+
+    with backtest_tab:
+        _render_backtest_tab()
 
 
 def _format_net(value) -> str:
