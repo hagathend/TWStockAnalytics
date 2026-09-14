@@ -2,6 +2,7 @@
 
 from datetime import date as _date, timedelta
 
+from src import backfill
 from src.collectors import finmind, news_crawler, news_rss, twse_official
 from src.config import WATCHLIST
 from src.storage import db
@@ -80,8 +81,26 @@ def collect_news() -> dict:
     return {"cnyes": len(cnyes_rows), "rss": len(rss_rows)}
 
 
+def collect_recent_gaps() -> dict:
+    """自動補最近兩週漏掉的上市交易日（例如排程沒觸發、當天來源故障的日子）。
+
+    已完整的日期與已知非交易日會跳過，正常情況下幾乎不發請求；
+    失敗不影響其他收集步驟，下次執行會自動重試。"""
+    try:
+        stats = backfill.fill_recent_gaps()
+    except Exception as exc:  # noqa: BLE001 - 補缺失敗不能中斷每日收集
+        db.log_step("自動補齊近期缺漏交易日", "failed", str(exc))
+        return {"filled": 0, "failed": 1}
+    # 沒有缺漏是健康狀態，記 success；不要記成 no_data，否則看起來像出問題
+    status = "failed" if stats["failed"] else "success"
+    detail = (f"補齊 {stats['filled']} 天、失敗 {len(stats['failed'])} 天、請求 {stats['requests']} 次"
+              if stats["filled"] or stats["failed"] else "近期無缺漏")
+    db.log_step("自動補齊近期缺漏交易日", status, detail)
+    return {"filled": stats["filled"], "failed": len(stats["failed"])}
+
+
 def run_daily_collect() -> dict:
-    """完整每日收集流程：股價、三大法人、融資融券、新聞"""
+    """完整每日收集流程：股價、三大法人、融資融券、新聞，最後自動補近期缺漏的交易日"""
     db.init_db()
     result = {
         "price": collect_stock_price(),
@@ -89,5 +108,6 @@ def run_daily_collect() -> dict:
         "margin": collect_margin(),
         "finmind": collect_finmind_watchlist(),
         "news": collect_news(),
+        "gap_fill": collect_recent_gaps(),
     }
     return result

@@ -98,6 +98,15 @@ CREATE TABLE IF NOT EXISTS market_analysis (
     analysis TEXT,
     created_at TEXT
 );
+
+-- 補收集歷史時記錄「這天確認過有沒有開盤」，非交易日只需要問一次 TWSE，之後直接跳過
+CREATE TABLE IF NOT EXISTS trading_calendar (
+    date TEXT NOT NULL,
+    market TEXT NOT NULL,
+    is_trading INTEGER NOT NULL,
+    checked_at TEXT,
+    PRIMARY KEY (date, market)
+);
 """
 
 
@@ -437,3 +446,86 @@ def query_market_analysis(date: str) -> dict | None:
         cur = conn.execute("SELECT * FROM market_analysis WHERE date = ?", (date,))
         row = cur.fetchone()
         return dict(row) if row else None
+
+
+# ---------- 歷史補收集 / 交易日曆 ----------
+
+
+def query_dates_with_data(table: str, market: str = "TWSE") -> set[str]:
+    """回傳指定表格在該市場已經有資料的日期集合（補收集時用來跳過已完成的日期）"""
+    if table not in ("stock_price", "institutional", "margin"):
+        raise ValueError(f"不支援的表格: {table}")
+    with get_conn() as conn:
+        cur = conn.execute(f"SELECT DISTINCT date FROM {table} WHERE market = ?", (market,))
+        return {r["date"] for r in cur.fetchall()}
+
+
+def query_non_trading_dates(market: str = "TWSE") -> set[str]:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "SELECT date FROM trading_calendar WHERE market = ? AND is_trading = 0", (market,)
+        )
+        return {r["date"] for r in cur.fetchall()}
+
+
+def mark_trading_day(date: str, is_trading: bool, market: str = "TWSE"):
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT OR REPLACE INTO trading_calendar (date, market, is_trading, checked_at)
+               VALUES (?, ?, ?, ?)""",
+            (date, market, int(is_trading), datetime.now().isoformat(timespec="seconds")),
+        )
+
+
+def query_trading_dates(market: str = "TWSE", since: str | None = None) -> list[str]:
+    """本地資料庫裡有股價資料的交易日（由舊到新），以股價表為準"""
+    with get_conn() as conn:
+        if since:
+            cur = conn.execute(
+                "SELECT DISTINCT date FROM stock_price WHERE market = ? AND date >= ? ORDER BY date",
+                (market, since),
+            )
+        else:
+            cur = conn.execute(
+                "SELECT DISTINCT date FROM stock_price WHERE market = ? ORDER BY date", (market,)
+            )
+        return [r["date"] for r in cur.fetchall()]
+
+
+def query_market_history(market: str = "TWSE", since: str | None = None,
+                         codes: list[str] | None = None) -> list[dict]:
+    """把股價、三大法人、融資融券依 (日期, 代號) 合併成一張寬表，供籌碼指標/選股/回測計算用。
+
+    用 LEFT JOIN 以股價表為主：沒有法人或融資資料的股票（例如不能信用交易的 ETF）欄位會是 NULL，
+    由計算端決定怎麼處理，這裡不偷偷補 0。另外帶出 inst_collected / margin_collected：
+    「這一天整個市場有沒有收集到法人／融資資料」，用來區分「這檔當天真的是 0」與「那天根本沒收集」。
+    """
+    params: list = [market]
+    where = "p.market = ?"
+    if since:
+        where += " AND p.date >= ?"
+        params.append(since)
+    if codes:
+        where += f" AND p.code IN ({','.join('?' * len(codes))})"
+        params.extend(codes)
+
+    sql = f"""
+        SELECT p.date, p.code, p.name, p.open, p.high, p.low, p.close, p.change,
+               p.volume, p.turnover,
+               i.foreign_net, i.trust_net, i.dealer_net, i.total_net,
+               m.margin_balance, m.short_balance,
+               CASE WHEN ic.date IS NULL THEN 0 ELSE 1 END AS inst_collected,
+               CASE WHEN mc.date IS NULL THEN 0 ELSE 1 END AS margin_collected
+        FROM stock_price p
+        LEFT JOIN institutional i
+               ON i.date = p.date AND i.market = p.market AND i.code = p.code
+        LEFT JOIN margin m
+               ON m.date = p.date AND m.market = p.market AND m.code = p.code
+        LEFT JOIN (SELECT DISTINCT date FROM institutional WHERE market = ?) ic ON ic.date = p.date
+        LEFT JOIN (SELECT DISTINCT date FROM margin WHERE market = ?) mc ON mc.date = p.date
+        WHERE {where}
+        ORDER BY p.code, p.date
+    """
+    with get_conn() as conn:
+        cur = conn.execute(sql, [market, market, *params])
+        return [dict(r) for r in cur.fetchall()]

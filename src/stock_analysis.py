@@ -9,6 +9,8 @@ from datetime import date as _date, timedelta
 
 from bs4 import BeautifulSoup
 
+from src.chip_metrics import metrics_for_code
+from src.chip_metrics import summarize_for_prompt as summarize_chip_metrics
 from src.collectors import finmind
 from src.indicators import (
     RECOMMENDED_HISTORY_DAYS,
@@ -25,6 +27,9 @@ _STOCK_ANALYSIS_PROMPT = """你是台股個股分析助手。以下是 {code} {n
 
 【技術指標】（由程式依收盤價量計算，非估算值）
 {indicator_block}
+
+【籌碼延伸指標】（由程式依本地累積的法人／融資歷史計算，非估算值）
+{chip_block}
 
 【近期股價】（最近 {price_rows} 個交易日，資料來源 FinMind）
 {price_block}
@@ -43,7 +48,8 @@ _STOCK_ANALYSIS_PROMPT = """你是台股個股分析助手。以下是 {code} {n
 
 技術面分析：（依據上面已算好的均線、RSI、KD、MACD、布林通道與量能判讀目前技術面，
 　　　　　　　請直接引用這些數值，不要自己重新估算，800字以內）
-籌碼面分析：（目前籌碼是偏多方掌控還是空方？依據是什麼，800字以內）
+籌碼面分析：（依據上面已算好的法人連買連賣天數、累計買賣超、佔成交量比重與融資變化，
+　　　　　　　判斷目前籌碼偏多方還是空方掌控，請直接引用這些數值，800字以內）
 未來1~2週展望：（800字以內）
 總結：（800字以內）
 
@@ -142,6 +148,7 @@ def build_stock_analysis_prompt(code: str) -> str:
         date=_date.today().isoformat(),
         price_rows=_PRICE_ROWS_SHOWN,
         indicator_block=_format_indicators(price_rows),
+        chip_block=summarize_chip_metrics(metrics_for_code(code)),
         price_block=_format_price_history(price_rows),
         institutional_block=_format_institutional_history(code),
         margin_block=_format_margin_history(code),

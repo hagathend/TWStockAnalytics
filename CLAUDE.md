@@ -153,7 +153,22 @@ Schema 變更走 `db.init_db()` 裡的 `ALTER TABLE ... ADD COLUMN` + `try/excep
 
 # 語法檢查
 .venv\Scripts\python.exe -m py_compile src\app.py
+
+# 單元測試（stdlib unittest，每個測試用暫存 SQLite，不碰真實資料庫）
+.venv\Scripts\python.exe -m unittest discover -s tests
+
+# 補收集上市歷史（可中斷續跑；已完整日期與非交易日會跳過）
+.venv\Scripts\python.exe scripts\backfill_history.py --days 180
 ```
+
+## 分析模組（程式先算、AI 只判讀）
+
+- `src/indicators.py` 技術指標；`src/chip_metrics.py` 籌碼延伸指標（法人連買賣天數、N日累計、
+  佔成交量比、融資變化 vs 股價、券資比）。資料不足一律回 `None`，不用部分資料硬算。
+- `src/backfill.py` TWSE 歷史補收集：`trading_calendar` 表記住非交易日；**今天/未來不標記**
+  （可能只是尚未公布）；例外不標記（下次重試）；請求間隔 3 秒（太快會被 TWSE 封鎖）。
+  每日收集最後會呼叫 `fill_recent_gaps()` 自動補近兩週缺漏。
+- TPEx OpenAPI 只有「最新一天」無法回補，上櫃股的歷史指標天數會比較少。
 
 第一次設定要多跑 `playwright install chromium`（`pip install` 不會自動下載瀏覽器核心）。
 

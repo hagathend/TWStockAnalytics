@@ -19,6 +19,8 @@ import streamlit as st  # noqa: E402
 from src.ai_analysis import analyze_with_codex_deep, build_prompt, parse_and_save  # noqa: E402
 from src.codex_cli import generate_codex_text, check_codex_login, list_codex_models
 from src.charting import build_candlestick
+from src.chip_metrics import metrics_for_code
+from src.chip_metrics import summarize_for_prompt as summarize_chip_metrics
 from src.collect_all import run_daily_collect
 from src.collectors.firecrawl_fetcher import test_connection as firecrawl_test_connection
 from src.config_ai import (
@@ -269,6 +271,31 @@ def home_page():
             st.info("尚無收集紀錄")
 
 
+def _render_chip_metrics(code: str):
+    metrics = metrics_for_code(code)
+    st.markdown("**籌碼延伸指標**（依本地累積的法人／融資歷史計算）")
+    if not metrics:
+        st.caption("尚無籌碼歷史資料")
+        return
+
+    def _lots(value):
+        return "資料不足" if value is None else f"{value / 1000:+,.0f} 張"
+
+    def _streak(value):
+        return f"連買 {value} 天" if value > 0 else f"連賣 {-value} 天" if value < 0 else "無連續"
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("外資", _streak(metrics["foreign_streak"]), _lots(metrics["foreign_net_5d"]) + "（5日）",
+              delta_color="off")
+    c2.metric("投信", _streak(metrics["trust_streak"]), _lots(metrics["trust_net_5d"]) + "（5日）",
+              delta_color="off")
+    c3.metric("三大法人 20 日", _lots(metrics["total_net_20d"]))
+    ratio = metrics["inst_volume_ratio_5d"]
+    c4.metric("法人佔成交量（5日）", "資料不足" if ratio is None else f"{ratio:+.1f}%")
+    with st.expander("完整籌碼指標（給 AI 的同一份文字）"):
+        st.text(summarize_chip_metrics(metrics))
+
+
 def detail_page():
     st.title("個股詳情")
     selected_date = _render_sidebar()
@@ -288,6 +315,8 @@ def detail_page():
         st.plotly_chart(fig, width="stretch")
     else:
         st.warning("查無此股票的歷史價量資料（可能代號輸入錯誤，或 FinMind 目前沒有資料）")
+
+    _render_chip_metrics(code)
 
     col1, col2 = st.columns(2)
     with col1:
