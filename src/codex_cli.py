@@ -11,7 +11,25 @@ from src.config_ai import load_codex_settings
 
 
 def _executable(settings):
-    return shutil.which(settings.get("executable") or "codex")
+    requested = settings.get("executable") or "codex"
+    found = shutil.which(requested)
+    if found:
+        return found
+    # 自訂路徑有誤時不改用其他版本；預設名稱才搜尋官方 Windows 安裝位置。
+    if requested.lower() not in ("codex", "codex.exe"):
+        return None
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        root = Path(local) / "OpenAI" / "Codex" / "bin"
+        try:
+            candidates = sorted(root.glob("*/codex.exe"),
+                                key=lambda path: path.stat().st_mtime, reverse=True)
+            for candidate in candidates:
+                if candidate.is_file():
+                    return str(candidate)
+        except OSError:
+            pass
+    return None
 
 
 def check_codex_login(settings=None):
