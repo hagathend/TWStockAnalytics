@@ -1,13 +1,16 @@
+# 直接依賴（範圍寬鬆，開發用）。實際打包與安裝以 requirements.lock 的精確版本為準。
 requests>=2.31
 beautifulsoup4>=4.12
 lxml>=5.0
 feedparser>=6.0
 pandas>=2.2
 python-dotenv>=1.0
-streamlit>=1.38
-anthropic>=0.34
-openai>=1.40
-google-genai>=1.0
+# 介面自訂 CSS 依賴 Streamlit 內部 DOM（data-testid 等），升版前要先確認畫面沒跑掉
+streamlit>=1.60,<1.61
 plotly>=5.22
 playwright>=1.45
 markdown>=3.6
+
+# 舊的雲端 AI 路線（Claude / GPT / Gemini API）已停用，改用 Codex CLI；
+# 程式碼仍保留、在函式內延遲匯入，要用時再手動安裝：
+#   pip install anthropic openai google-genai

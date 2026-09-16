@@ -15,7 +15,9 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from datetime import date as _date  # noqa: E402
+import os  # noqa: E402
+import threading  # noqa: E402
+from datetime import date as _date, timedelta  # noqa: E402
 
 import pandas as pd  # noqa: E402
 import plotly.express as px  # noqa: E402
@@ -39,7 +41,10 @@ from src.config_ai import (
 from src.config_watchlist import add_stock, load_watchlist, remove_stock
 from src.market_analysis import build_market_analysis_prompt, save_market_analysis
 from src.report_pdf import markdown_to_pdf
-from src import backtest, fundamentals, portfolio, signals, ui
+from src import backtest, desktop, fundamentals, portfolio, signals, ui
+from src.codex_cli import _executable as find_codex_executable
+from src.config_app import load_app_settings, save_app_settings
+from src.version import __version__
 from src.stock_analysis import build_stock_analysis_prompt, save_stock_analysis, strip_holding_section
 from src.storage import db
 
@@ -1159,7 +1164,122 @@ def report_page():
         st.markdown(report_text)
 
 
-HOME_PAGE = st.Page(home_page, title="市場總覽", default=True)
+# ─────────────────────────────── 開始使用 ───────────────────────────────
+
+_DISCLAIMER = """本工具整理證交所、櫃買中心與新聞等公開資料，並用 AI 產生分析文字，**僅供資訊整理與研究參考，不構成任何投資建議**。
+
+- 資料可能延遲、缺漏或有誤，AI 分析也可能出錯，請自行查證
+- 回測結果是過去的統計，不代表未來績效
+- 投資有賺有賠，所有買賣決定與盈虧請自行負責"""
+
+_CODEX_INSTALL_URL = "https://github.com/openai/codex"
+
+
+def _history_trading_days() -> int:
+    since = (_date.today() - timedelta(days=desktop.BACKFILL_DAYS)).isoformat()
+    return sum(1 for d in db.query_dates_with_data("stock_price", "TWSE") if d >= since)
+
+
+def _onboarding_needed() -> bool:
+    done = load_app_settings()["onboarding_done"]
+    if done is None:
+        # 升級上來的既有使用者（資料庫已經有歷史）不強迫再走一次引導
+        return _history_trading_days() < 20
+    return not done
+
+
+@st.fragment(run_every=15)
+def _render_backfill_progress():
+    status = desktop.backfill_status()
+    have = _history_trading_days()
+    target = desktop.expected_trading_days()
+    st.progress(min(have / target, 1.0), text=f"已有 {have} 個交易日的資料（目標約 {target} 天，扣掉國定假日會略少）")
+    if status["running"]:
+        st.caption("下載中，每 15 秒自動更新進度。可以先去使用其他頁面，關掉瀏覽器也會繼續下載。")
+    elif have >= target * 0.9:
+        st.caption("歷史資料已足夠。之後每天收集時會自動補上缺漏的日子。")
+
+
+def _render_codex_setup():
+    executable = find_codex_executable(load_codex_settings())
+    if not executable:
+        st.markdown(
+            f"尚未偵測到 Codex。請依照 [Codex 官方說明]({_CODEX_INSTALL_URL}) 安裝 Windows 版，"
+            "安裝完成後回到這裡按「重新檢查」。"
+        )
+        if st.button("重新檢查", key="codex_recheck_install"):
+            st.rerun()
+        return
+    ok, message = check_codex_login()
+    if ok:
+        st.success("Codex 已登入，可以使用 AI 分析")
+        return
+    st.warning("已安裝 Codex，但還沒登入")
+    col1, col2, _ = st.columns([1, 1, 3])
+    if col1.button("登入 Codex", type="primary", width="stretch"):
+        ok, message = desktop.open_codex_login(executable)
+        (st.info if ok else st.error)(message)
+    if col2.button("重新檢查", key="codex_recheck_login", width="stretch"):
+        st.rerun()
+
+
+def _render_schedule_setup():
+    if "daily_task_status" not in st.session_state:
+        st.session_state["daily_task_status"] = desktop.daily_task_status()
+    status = st.session_state["daily_task_status"]
+    enabled = st.toggle(f"每天 {desktop.DEFAULT_TASK_TIME} 自動收集資料並執行 AI 分析", value=status["exists"])
+    if enabled != status["exists"]:
+        ok, message = desktop.register_daily_task() if enabled else desktop.unregister_daily_task()
+        (st.success if ok else st.error)(message)
+        st.session_state["daily_task_status"] = desktop.daily_task_status()
+    st.caption("需要電腦開著並連上網路；如果那個時間電腦沒開，下次開機後會自動補做。")
+
+
+def onboarding_page():
+    ui.page_header("開始使用", "第一次使用請依序完成以下設定，之後隨時可以回到這一頁調整")
+    settings = load_app_settings()
+
+    with ui.panel("1. 使用前請先閱讀"):
+        st.markdown(_DISCLAIMER)
+        accepted = st.checkbox("我了解本工具僅供資訊整理與研究參考，不構成投資建議", value=settings["disclaimer_accepted"])
+        if accepted != settings["disclaimer_accepted"]:
+            settings = save_app_settings({"disclaimer_accepted": accepted})
+
+    with ui.panel("2. 下載歷史資料", "選股、回測與籌碼指標需要約半年的上市股歷史，只需下載一次，約 20–30 分鐘"):
+        _render_backfill_progress()
+        if not desktop.backfill_status()["running"]:
+            if st.button("開始下載歷史資料", type="primary"):
+                ok, message = desktop.start_backfill()
+                (st.success if ok else st.error)(message)
+                st.rerun()
+
+    with ui.panel("3. 設定 AI 分析（Codex）", "需要 ChatGPT 帳號並使用該帳號的額度；沒有也能使用資料收集、選股、回測與持股功能"):
+        _render_codex_setup()
+
+    with ui.panel("4. 每天自動收集"):
+        _render_schedule_setup()
+
+    if st.button("完成，開始使用", type="primary", disabled=not accepted):
+        save_app_settings({"onboarding_done": True})
+        st.switch_page(HOME_PAGE)
+    if not accepted:
+        st.caption("請先勾選第 1 項的說明")
+
+
+def _render_sidebar_footer():
+    """所有頁面共用的側邊欄底部：版本與結束程式"""
+    with st.sidebar:
+        st.divider()
+        st.caption(f"台股分析 v{__version__}")
+        if st.button("結束程式", key="quit_app", type="tertiary"):
+            st.info("程式已結束，可以關閉這個瀏覽器分頁")
+            # 稍等一下讓上面的訊息送到瀏覽器，再結束整個伺服器行程
+            threading.Timer(1.0, os._exit, args=(0,)).start()
+
+
+ONBOARDING_NEEDED = _onboarding_needed()
+HOME_PAGE = st.Page(home_page, title="市場總覽", default=not ONBOARDING_NEEDED)
+ONBOARDING_PAGE = st.Page(onboarding_page, title="開始使用", default=ONBOARDING_NEEDED)
 PORTFOLIO_PAGE = st.Page(portfolio_page, title="我的持股")
 DETAIL_PAGE = st.Page(detail_page, title="個股詳情")
 SCREENER_PAGE = st.Page(screener_page, title="選股工具")
@@ -1168,5 +1288,7 @@ REPORT_PAGE = st.Page(report_page, title="每日報告")
 AI_SETTINGS_PAGE = st.Page(ai_settings_page, title="AI 設定")
 
 if __name__ == "__main__":
-    nav = st.navigation([HOME_PAGE, PORTFOLIO_PAGE, DETAIL_PAGE, SCREENER_PAGE, AI_ANALYSIS_PAGE, REPORT_PAGE, AI_SETTINGS_PAGE])
+    nav = st.navigation([HOME_PAGE, PORTFOLIO_PAGE, DETAIL_PAGE, SCREENER_PAGE, AI_ANALYSIS_PAGE, REPORT_PAGE,
+                         AI_SETTINGS_PAGE, ONBOARDING_PAGE])
     nav.run()
+    _render_sidebar_footer()

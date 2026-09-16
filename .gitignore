@@ -16,3 +16,7 @@ data/*.log
 
 data/codex_settings.json
 data/report_settings.json
+data/app_settings.json
+data/server.json
+data/backfill_job.json
+data/logs/
