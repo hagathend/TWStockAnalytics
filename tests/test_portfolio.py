@@ -83,10 +83,10 @@ class PortfolioDBTests(TempDBTestCase):
             db.add_holding("2330", "台積電", 1000, 100.0, "2026-09-01")
             with_holding = stock_analysis.build_stock_analysis_prompt("2330")
         self.assertNotIn("【我的持股】", without)
-        self.assertIn("以下四項結果", without)
+        self.assertIn("以下五項結果", without)
         self.assertIn("【我的持股】", with_holding)
         self.assertIn("持股應對", with_holding)
-        self.assertIn("以下五項結果", with_holding)
+        self.assertIn("以下六項結果", with_holding)
 
 
 class StripHoldingSectionTests(unittest.TestCase):

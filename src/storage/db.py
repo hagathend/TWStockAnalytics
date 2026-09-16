@@ -138,6 +138,19 @@ CREATE TABLE IF NOT EXISTS month_revenue (
     PRIMARY KEY (year_month, market, code)
 );
 
+-- AI 預測追蹤：從個股分析的「預測摘要」解析出來，結果在需要時用股價即時計算（不存結果，股價補齊後會自動更新）
+CREATE TABLE IF NOT EXISTS predictions (
+    date TEXT NOT NULL,
+    code TEXT NOT NULL,
+    name TEXT,
+    direction TEXT NOT NULL,
+    support REAL,
+    resistance REAL,
+    confidence TEXT,
+    created_at TEXT,
+    PRIMARY KEY (date, code)
+);
+
 -- 我的持股：每一筆買進一列（分批買進就多列），股數以「股」為單位（1 張 = 1000 股，零股也能記）。
 -- 賣出時直接修改股數或刪除該筆。屬於個人財務資料，資料庫檔案不進版控。
 CREATE TABLE IF NOT EXISTS holdings (
@@ -716,3 +729,50 @@ def query_latest_close(code: str, as_of: str | None = None) -> dict | None:
             (code, as_of),
         ).fetchone()
         return dict(row) if row else None
+
+
+def save_prediction(date: str, code: str, name: str, prediction: dict):
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT OR REPLACE INTO predictions (date, code, name, direction, support, resistance, confidence, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (date, code, name, prediction["direction"], prediction.get("support"), prediction.get("resistance"),
+             prediction.get("confidence"), datetime.now().isoformat(timespec="seconds")),
+        )
+
+
+def delete_prediction(date: str, code: str):
+    with get_conn() as conn:
+        conn.execute("DELETE FROM predictions WHERE date = ? AND code = ?", (date, code))
+
+
+def query_predictions(code: str | None = None) -> list[dict]:
+    with get_conn() as conn:
+        if code:
+            cur = conn.execute("SELECT * FROM predictions WHERE code = ? ORDER BY date DESC", (code,))
+        else:
+            cur = conn.execute("SELECT * FROM predictions ORDER BY date DESC, code")
+        return [dict(r) for r in cur.fetchall()]
+
+
+def query_price_range(code: str, start: str, end: str | None = None) -> list[dict]:
+    """某檔股票 start（含）到 end（含，None 表示到最新）的日線"""
+    with get_conn() as conn:
+        cur = conn.execute(
+            "SELECT date, open, high, low, close FROM stock_price WHERE code = ? AND date >= ? AND date <= ? ORDER BY date",
+            (code, start, end or "9999-12-31"),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def query_market_average_return(start_date: str, end_date: str) -> float | None:
+    """上市個股從 start_date 收盤到 end_date 收盤的平均報酬（%），當作「同期大盤」基準"""
+    with get_conn() as conn:
+        row = conn.execute(
+            f"""SELECT AVG(e.close / b.close - 1) * 100 AS avg_return, COUNT(*) AS n
+                FROM stock_price b JOIN stock_price e ON e.code = b.code AND e.market = b.market
+                WHERE b.date = ? AND e.date = ? AND b.market = 'TWSE' AND b.close > 0 AND e.close IS NOT NULL
+                  AND {STOCK_CODE_SQL.replace("code", "b.code")}""",
+            (start_date, end_date),
+        ).fetchone()
+        return row["avg_return"] if row and row["n"] else None

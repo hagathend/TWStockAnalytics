@@ -15,6 +15,7 @@ from src.chip_metrics import summarize_for_prompt as summarize_chip_metrics
 from src.collectors import finmind
 from src.fundamentals import summarize_for_prompt as summarize_fundamentals
 from src.portfolio import summarize_for_prompt as summarize_holding
+from src.predictions import record_from_analysis
 from src.indicators import (
     RECOMMENDED_HISTORY_DAYS,
     add_indicators,
@@ -58,7 +59,9 @@ _STOCK_ANALYSIS_PROMPT = """你是台股個股分析助手。以下是 {code} {n
 　　　　　　　判斷目前籌碼偏多方還是空方掌控，請直接引用這些數值，800字以內）
 未來1~2週展望：（綜合技術、籌碼與基本面（營收成長、本益比）判斷，800字以內）
 總結：（800字以內）
-{holding_instruction}
+{holding_instruction}預測摘要：（只輸出一行、格式固定，程式會自動解析並在兩週後對照實際走勢檢驗：
+　　　　　　　方向=偏多或中性或偏空；支撐=價格數字；壓力=價格數字；信心=高或中或低）
+
 請直接用繁體中文條列輸出這{item_count}項，不需要輸出 JSON 格式，也不要輸出這{item_count}項以外的內容。
 """
 
@@ -159,7 +162,8 @@ _HOLDING_INSTRUCTION = """持股應對：（對照我的平均成本與目前損
 
 
 HOLDING_SECTION_TITLE = "持股應對"
-_OTHER_SECTION_TITLES = ("技術面分析", "籌碼面分析", "未來1~2週展望", "總結")
+# 「預測摘要」也要列入：持股應對若排在它前面，移除持股段落時才會停在這裡、不會連預測一起刪掉
+_OTHER_SECTION_TITLES = ("技術面分析", "籌碼面分析", "未來1~2週展望", "總結", "預測摘要")
 
 
 # 標題行前面可能出現的修飾：-、*、#、>、粗體、「5.」「五、」「(5)」這類編號
@@ -211,7 +215,7 @@ def build_stock_analysis_prompt(code: str) -> str:
         news_block=_format_related_news(code, name),
         holding_block=_HOLDING_BLOCK.format(holding=holding) if holding else "",
         holding_instruction=_HOLDING_INSTRUCTION if holding else "",
-        item_count="五" if holding else "四",
+        item_count="六" if holding else "五",
     )
 
 
@@ -222,4 +226,6 @@ def save_stock_analysis(code: str, analysis_text: str, date: str | None = None) 
     date = date or _date.today().isoformat()
     name = db.lookup_stock_name(code) or code
     db.save_stock_analysis(date, code, name, analysis_text.strip())
-    return {"ok": True, "message": "個股分析已儲存"}
+    prediction = record_from_analysis(date, code, name, analysis_text)
+    tracking = "，已記錄預測摘要供之後檢驗" if prediction else "（回覆裡沒有預測摘要，這次不追蹤）"
+    return {"ok": True, "message": "個股分析已儲存" + tracking}
