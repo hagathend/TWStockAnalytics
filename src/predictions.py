@@ -7,7 +7,8 @@
 
 判定「方向命中」的門檻刻意留一點空間，避免 +0.1% 這種雜訊也算偏多命中：
 偏多：10 日報酬 > +1%；偏空：< -1%；中性：絕對值 ≤ 3%。
-交易日以上市股價資料的日期為準；上櫃股缺資料的日子會導致該筆無法評估（標示出來，不硬算）。
+交易日以上市股價資料的日期為準；第 10 個交易日沒有收盤價才算「資料不足」。
+中間有缺資料的日子（常見於上櫃股）仍判定方向，但不判斷支撐壓力是否被碰到。
 """
 
 import re
@@ -94,17 +95,21 @@ def evaluate(prediction: dict, trading_dates: list[str]) -> dict:
     if len(later) < VERDICT_HORIZON:
         return result  # 還沒滿 10 個交易日
 
-    window = [prices[d] for d in later[:VERDICT_HORIZON] if d in prices]
-    if result[f"return_{VERDICT_HORIZON}"] is None or len(window) < VERDICT_HORIZON:
+    if result[f"return_{VERDICT_HORIZON}"] is None:
         result["status"] = "no_data"
         return result
     result["status"] = "done"
     result["hit"] = is_hit(prediction["direction"], result[f"return_{VERDICT_HORIZON}"])
+
+    # 支撐壓力要看期間每一天的高低點；中間有缺資料的日子（常見於上櫃股）就不判斷，避免漏看而誤判「沒跌破」
+    window = [prices[d] for d in later[:VERDICT_HORIZON] if d in prices]
+    if len(window) < VERDICT_HORIZON:
+        return result
     lows = [float(r["low"]) for r in window if r["low"] is not None]
     highs = [float(r["high"]) for r in window if r["high"] is not None]
-    if prediction.get("support") is not None and lows:
+    if prediction.get("support") is not None and len(lows) == VERDICT_HORIZON:
         result["support_broken"] = min(lows) < prediction["support"]
-    if prediction.get("resistance") is not None and highs:
+    if prediction.get("resistance") is not None and len(highs) == VERDICT_HORIZON:
         result["resistance_reached"] = max(highs) > prediction["resistance"]
     return result
 

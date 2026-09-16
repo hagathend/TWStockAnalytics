@@ -41,7 +41,7 @@ from src.config_ai import (
 from src.config_watchlist import add_stock, add_stocks, load_watchlist, remove_stock
 from src.market_analysis import build_market_analysis_prompt, save_market_analysis
 from src.report_pdf import markdown_to_pdf
-from src import backtest, desktop, fundamentals, portfolio, signals, ui, updater
+from src import backtest, desktop, fundamentals, portfolio, predictions, signals, ui, updater
 from src.config import IS_INSTALLED
 from src.codex_cli import _executable as find_codex_executable
 from src.config_app import load_app_settings, save_app_settings
@@ -464,6 +464,12 @@ def _render_stock_ai_panel(code: str):
                 result = save_stock_analysis(code, raw_stock_analysis)
                 (st.success if result["ok"] else st.warning)(result["message"])
 
+        history = predictions.evaluate_all(code)
+        if history:
+            st.divider()
+            st.caption("這檔過去的 AI 預測與實際結果")
+            _prediction_table(history, show_stock=False)
+
         existing_analysis = db.query_stock_analysis(_date.today().isoformat(), code)
         if existing_analysis:
             st.divider()
@@ -695,6 +701,70 @@ def portfolio_page():
         _render_holding_records()
 
 
+# ─────────────────────────────── AI 預測追蹤 ───────────────────────────────
+
+_PREDICTION_COLUMNS = {
+    "date": "分析日", "code": "代號", "name": "名稱", "direction": "方向", "confidence": "信心",
+    "base_close": "基準價", "return_5": "5日報酬%", "return_10": "10日報酬%", "market_return_10": "同期大盤10日%",
+    "support": "支撐", "support_text": "跌破支撐", "resistance": "壓力", "resistance_text": "突破壓力",
+    "result_text": "結果",
+}
+
+
+def _prediction_result_text(r: dict) -> str:
+    if r["status"] == "done":
+        return "命中" if r["hit"] else "未命中"
+    if r["status"] == "pending":
+        return f"進行中 {r['days_elapsed']}/{predictions.VERDICT_HORIZON} 天"
+    return "資料不足"
+
+
+def _yes_no(value) -> str:
+    return "-" if value is None else ("是" if value else "否")
+
+
+def _prediction_table(results: list[dict], show_stock: bool = True):
+    rows = [{**r, "result_text": _prediction_result_text(r), "support_text": _yes_no(r["support_broken"]),
+             "resistance_text": _yes_no(r["resistance_reached"])} for r in results]
+    columns = [c for c in _PREDICTION_COLUMNS if show_stock or c not in ("code", "name")]
+    view = pd.DataFrame(rows)[columns].rename(columns=_PREDICTION_COLUMNS)
+    styler = _styled_table(view, signed=["5日報酬%", "10日報酬%", "同期大盤10日%"],
+                           decimals=["基準價", "5日報酬%", "10日報酬%", "同期大盤10日%", "支撐", "壓力"])
+    styler = styler.map(lambda v: f"color: {ui.UP_COLOR}" if v == "偏多" else f"color: {ui.DOWN_COLOR}" if v == "偏空" else "",
+                        subset=["方向"])
+    styler = styler.map(lambda v: "font-weight: 600" if v in ("命中", "未命中") else f"color: {ui.MUTED_COLOR}",
+                        subset=["結果"])
+    st.dataframe(styler, width="stretch", hide_index=True)
+
+
+def _render_prediction_tracking():
+    with ui.panel("AI 預測追蹤",
+                  f"個股分析的預測摘要，{predictions.VERDICT_HORIZON} 個交易日後對照實際走勢；"
+                  f"偏多須漲超過 {predictions.BULL_MIN_PCT:g}%、偏空須跌超過 {abs(predictions.BEAR_MAX_PCT):g}%、"
+                  f"中性須在 ±{predictions.NEUTRAL_BAND_PCT:g}% 內才算命中"):
+        results = predictions.evaluate_all()
+        if not results:
+            st.caption("還沒有預測紀錄。之後用 Codex 做個股分析時，會自動記錄 AI 的預測摘要。")
+            return
+        summary = predictions.summarize(results)
+        items = [
+            {"label": "預測筆數", "value": f"{summary['total']}", "sub": f"進行中 {summary['pending']} 筆"},
+            {"label": "已到期", "value": f"{summary['done']}"},
+            {"label": "方向命中率", "value": "-" if summary["hit_rate"] is None else f"{summary['hit_rate']:.0f}%",
+             "sub": "樣本少時參考性低" if summary["done"] < 20 else None},
+        ]
+        for direction, stats in summary["by_direction"].items():
+            excess = stats["avg_excess"]
+            items.append({
+                "label": f"{direction}（{stats['count']} 筆）",
+                "value": f"命中 {stats['hit_rate']:.0f}%",
+                "sub": f"平均 {stats['avg_return']:+.1f}%" + ("" if excess is None else f"・超額 {excess:+.1f}%"),
+                "sub_tone": ui.tone_of(stats["avg_return"]),
+            })
+        ui.cards(items)
+        _prediction_table(results)
+
+
 # ─────────────────────────────── AI 分析 ───────────────────────────────
 
 
@@ -791,6 +861,8 @@ def ai_analysis_page():
             st.divider()
             st.caption(f"已儲存的大盤分析・{existing_market['created_at']}")
             st.markdown(_md_linebreaks(existing_market["analysis"]))
+
+    _render_prediction_tracking()
 
     with ui.panel("手動複製貼上流程", "不使用 Codex 時：產生新聞分析提示詞，貼到網頁版 AI 後把回覆貼回來"):
         if st.button("產生新聞分析提示詞"):

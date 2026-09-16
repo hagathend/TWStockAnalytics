@@ -77,6 +77,15 @@ class EvaluateTests(TempDBTestCase):
         self.assertAlmostEqual(result["return_5"], 5 / 105 * 100)
         self.assertIsNone(result["hit"])
 
+    def test_missing_middle_days_still_judged_but_no_support_check(self):
+        with db.get_conn() as conn:
+            conn.execute("DELETE FROM stock_price WHERE code = '2330' AND date IN (?, ?)", (self.dates[3], self.dates[4]))
+        db.save_prediction(self.dates[0], "2330", "台積電", {"direction": "偏多", "support": 98.0})
+        result = predictions.evaluate_all()[0]
+        self.assertEqual(result["status"], "done")
+        self.assertTrue(result["hit"])
+        self.assertIsNone(result["support_broken"])
+
     def test_no_price_data(self):
         db.save_prediction(self.dates[0], "9999", "不存在", {"direction": "偏多"})
         self.assertEqual(predictions.evaluate_all()[0]["status"], "no_data")
