@@ -96,4 +96,4 @@ Python 3.13 + Streamlit + SQLite + pandas + plotly，AI 分析使用 Codex CLI�
 - [x] 技術／籌碼指標、選股工具、訊號回測、基本面
 - [x] 我的持股
 - [x] Windows 安裝程式與自動更新
-- [ ] LINE Bot 推播
+- [ ] 第三階段：預測追蹤、產業熱力圖、條件提醒、大戶持股、交易日誌等（見 PLAN.md）
