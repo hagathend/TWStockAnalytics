@@ -20,3 +20,7 @@ data/app_settings.json
 data/server.json
 data/backfill_job.json
 data/logs/
+
+# 打包輸出
+build/
+dist/

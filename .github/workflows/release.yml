@@ -1,0 +1,79 @@
+# 發布 Windows 安裝程式
+#
+# 推 v* tag（例如 v0.0.3）時：跑單元測試 → 檢查版本號 → 組安裝版資料夾並冒煙測試 →
+# 包成安裝程式 → 在乾淨環境靜默安裝／解除安裝測試 → 建立 GitHub Release 並附上安裝程式。
+# 也可以在 Actions 頁面手動執行（只產生安裝程式 artifact，不建立 Release）。
+name: Release Windows installer
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # actions/checkout 有時會把 annotated tag 抓成 lightweight，release 說明要用 tag 訊息，所以重抓
+      - name: Fetch tags
+        run: git fetch --force --tags
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Unit tests
+        run: |
+          python -m pip install --disable-pip-version-check -r requirements.lock
+          python -m unittest discover -s tests
+
+      - name: Check version matches tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $version = python -c "from src.version import __version__; print(__version__)"
+          if ("v$version" -ne "${{ github.ref_name }}") {
+            Write-Error "src/version.py 是 $version，但 tag 是 ${{ github.ref_name }}，請先更新版本號"
+            exit 1
+          }
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Build app folder
+        shell: powershell
+        run: packaging\build_app.ps1
+
+      - name: Build installer
+        shell: powershell
+        run: packaging\build_installer.ps1
+
+      - name: Test installer (silent install / smoke test / uninstall)
+        shell: powershell
+        run: packaging\test_installer.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer
+          path: dist/*.exe
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $notes = git for-each-ref "refs/tags/$tag" --format="%(contents)"
+          $guide = Get-Content packaging/RELEASE_NOTES_FOOTER.md -Raw -Encoding utf8
+          Set-Content -Path release_notes.md -Value ("$notes`n`n$guide") -Encoding utf8
+          gh release create $tag (Get-ChildItem dist/*.exe).FullName --title "台股分析 $tag" --notes-file release_notes.md

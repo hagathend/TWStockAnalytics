@@ -8,6 +8,7 @@
 """
 
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -63,11 +64,13 @@ def start_server(port: int) -> subprocess.Popen:
         python = Path(sys.executable)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     log = open(LOG_DIR / "app.log", "a", encoding="utf-8")  # noqa: SIM115 - 交給子行程持有
+    # 英文版 Windows 的預設編碼是 cp1252，程式印出中文會當掉，子行程一律用 UTF-8
+    env = {**os.environ, "PYTHONUTF8": "1"}
     process = subprocess.Popen(
         [str(python), "-m", "streamlit", "run", str(BASE_DIR / "src" / "app.py"),
          "--server.port", str(port), "--server.address", "127.0.0.1", "--server.headless", "true",
          "--browser.gatherUsageStats", "false", "--global.developmentMode", "false"],
-        cwd=str(BASE_DIR), stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+        cwd=str(BASE_DIR), env=env, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     log.close()

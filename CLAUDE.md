@@ -172,6 +172,16 @@ Schema 變更走 `db.init_db()` 裡的 `ALTER TABLE ... ADD COLUMN` + `try/excep
 - **紅漲綠跌**：顏色只從 `ui.UP_COLOR` / `ui.DOWN_COLOR` 取；表格用 `_styled_table()`、圖表用 `ui.style_chart()`。
 - plotly 圖不要放圖內標題（會跟圖例黏在一起），標題交給外面的 panel。
 
+## 安裝版（給不懂電腦的朋友，詳見 `packaging/README.md`）
+
+- 發布：改 `src/version.py` → 合併 main → 打 `v版本號` annotated tag（訊息即 Release 說明）→ CI 自動打包測試發布
+- 程式根目錄有 `.installed` 才是安裝版：資料放 `%LOCALAPPDATA%\TWStockAnalytics\data`；**`.installed` 不可進 git**
+- 套件以 `requirements.lock` 為準；Streamlit 鎖次版本（自訂 CSS 依賴內部 DOM）。重產 lock 要用短路徑的 venv，
+  長路徑下 Streamlit 會因 Windows 260 字元限制裝不完整且不報錯
+- `launcher.pyw`（pythonw，不跳視窗）啟動伺服器；`src/desktop.py` 管背景補資料、工作排程、Codex 登入；
+  `src/updater.py` 查 GitHub Releases 並驗證 SHA-256 後執行新版安裝程式
+- 對使用者電腦有副作用的操作（工作排程、安裝程式測試）不要在開發機上直接跑正式名稱；測試用暫時名稱並清掉
+
 ## 分析模組（程式先算、AI 只判讀）
 
 - `src/indicators.py` 技術指標；`src/chip_metrics.py` 籌碼延伸指標（法人連買賣天數、N日累計、

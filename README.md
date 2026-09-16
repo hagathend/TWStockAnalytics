@@ -20,7 +20,17 @@
 - **Streamlit 網頁 UI**：手動觸發收集、瀏覽已收集資料、AI 供應商設定（Ollama 為主，Claude / GPT / Gemini API Key 作為進階選項）
 - 每日 20:00 排程腳本，可註冊進 Windows 工作排程器自動執行
 
-## 快速開始
+## 安裝（一般使用者）
+
+到 [Releases](https://github.com/hagathend/TWStockAnalytics/releases/latest) 下載 `TWStockAnalytics-Setup-版本號.exe`，
+雙擊安裝即可，不需要自己安裝 Python。出現「Windows 已保護您的電腦」時點「其他資訊 → 仍要執行」。
+第一次開啟會進到「開始使用」頁，依序完成免責聲明、下載歷史資料、Codex 登入與每日自動收集設定。
+
+> 本工具僅供資訊整理與研究參考，不構成投資建議。
+
+打包與發布流程見 [packaging/README.md](packaging/README.md)。
+
+## 快速開始（開發）
 
 ```bash
 git clone git@github.com:hagathend/TWStockAnalytics.git

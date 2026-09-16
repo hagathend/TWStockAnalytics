@@ -77,8 +77,9 @@ def start_backfill(days: int = BACKFILL_DAYS) -> tuple[bool, str]:
     try:
         process = subprocess.Popen(
             [python_executable(), str(BASE_DIR / "scripts" / "backfill_history.py"), "--days", str(days)],
-            cwd=str(BASE_DIR), stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-            creationflags=_NO_WINDOW,
+            # 英文版 Windows 預設編碼 cp1252，子行程印中文會當掉，一律用 UTF-8
+            cwd=str(BASE_DIR), env={**os.environ, "PYTHONUTF8": "1"},
+            stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, creationflags=_NO_WINDOW,
         )
     except OSError as exc:
         return False, f"無法啟動下載：{exc}"

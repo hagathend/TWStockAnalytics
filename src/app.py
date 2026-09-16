@@ -41,7 +41,8 @@ from src.config_ai import (
 from src.config_watchlist import add_stock, load_watchlist, remove_stock
 from src.market_analysis import build_market_analysis_prompt, save_market_analysis
 from src.report_pdf import markdown_to_pdf
-from src import backtest, desktop, fundamentals, portfolio, signals, ui
+from src import backtest, desktop, fundamentals, portfolio, signals, ui, updater
+from src.config import IS_INSTALLED
 from src.codex_cli import _executable as find_codex_executable
 from src.config_app import load_app_settings, save_app_settings
 from src.version import __version__
@@ -1266,10 +1267,34 @@ def onboarding_page():
         st.caption("請先勾選第 1 項的說明")
 
 
+def _render_update_notice():
+    """安裝版才檢查新版本（一天最多一次，網路不通就不顯示）"""
+    if not IS_INSTALLED:
+        return
+    release = updater.check_for_update()
+    if not release:
+        return
+    st.info(f"有新版本 v{release['version']}")
+    if release.get("page_url"):
+        st.markdown(f"[看更新內容]({release['page_url']})")
+    if st.button("下載並安裝更新", key="install_update", type="primary", width="stretch"):
+        bar = st.progress(0.0, text="下載中...")
+
+        def _progress(done, total):
+            bar.progress(done / total if total else 0.0, text=f"下載中 {done / 1_048_576:,.0f} MB")
+
+        ok, result = updater.download_installer(release, progress=_progress)
+        bar.empty()
+        if ok:
+            ok, result = updater.run_installer(result)
+        (st.success if ok else st.error)(result)
+
+
 def _render_sidebar_footer():
-    """所有頁面共用的側邊欄底部：版本與結束程式"""
+    """所有頁面共用的側邊欄底部：新版本提示、版本與結束程式"""
     with st.sidebar:
         st.divider()
+        _render_update_notice()
         st.caption(f"台股分析 v{__version__}")
         if st.button("結束程式", key="quit_app", type="tertiary"):
             st.info("程式已結束，可以關閉這個瀏覽器分頁")
