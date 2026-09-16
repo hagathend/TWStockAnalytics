@@ -237,11 +237,14 @@ def fetch_tpex_margin() -> list[dict]:
     return rows
 
 
-def _find_value(item: dict, *substrings: str):
-    """TPEx 3insti 開放資料欄位名稱常有多餘空白/不一致，改用子字串比對取值"""
+def _find_value(item: dict, field: str):
+    """TPEx 3insti 開放資料欄位名稱常有多餘空白、大小寫不一致，去空白、不分大小寫後「完全相同」才取值。
+
+    不能用子字串比對：曾經用「同時包含 Dealers 與 Difference」找自營商，結果先比對到外資欄位
+    「Foreign Investors ... (Foreign Dealers excluded)-Difference」，上櫃每檔的自營商數字其實都是外資的。"""
+    target = field.replace(" ", "").lower()
     for key, value in item.items():
-        normalized = key.replace(" ", "")
-        if all(s.replace(" ", "") in normalized for s in substrings):
+        if key.replace(" ", "").lower() == target:
             return value
     return None
 
@@ -254,12 +257,10 @@ def fetch_tpex_institutional() -> list[dict]:
     rows = []
     for item in resp.json():
         foreign_net = _to_int(
-            _find_value(item, "ForeignInvestorsIncludeMainlandAreaInvestors", "Difference")
+            _find_value(item, "ForeignInvestorsIncludeMainlandAreaInvestors-Difference")
         ) or 0
-        trust_net = _to_int(
-            _find_value(item, "SecuritiesInvestmentTrustCompanies", "Difference")
-        )
-        dealer_net = _to_int(_find_value(item, "Dealers", "Difference"))
+        trust_net = _to_int(_find_value(item, "SecuritiesInvestmentTrustCompanies-Difference"))
+        dealer_net = _to_int(_find_value(item, "Dealers-Difference"))
         total_net = _to_int(item.get("TotalDifference"))
         rows.append(
             {

@@ -192,6 +192,11 @@ Schema 變更走 `db.init_db()` 裡的 `ALTER TABLE ... ADD COLUMN` + `try/excep
   不直接下買賣指令**，決策留給使用者。持股是個人財務資料，只存本機資料庫，測試 UI 時用資料庫副本，不要寫進真實資料庫。
   每日報告預設**不含**持股（`data/report_settings.json` 的 `include_holdings`，報告頁有開關）：關閉時連個股分析裡的
   「持股應對」一項也要用 `strip_holding_section()` 移除，提示詞因此規定成本損益只能寫在「持股應對」裡。
+- **法人資料混有權證與 ETF**：T86 與上櫃法人表各有上萬筆權證（自營商避險量極大）與 ETF（造市申贖）。
+  全市場加總一律加 `db.STOCK_CODE_SQL`（Python 端 `db.is_stock_code()`）只算個股；查單一股票用
+  `db.query_institutional_for_code()` 精確比對，`query_institutional(date, keyword)` 是模糊搜尋（查 2330 會帶出 062330 權證）。
+- TPEx 法人欄位名稱要**完全比對**（`_find_value`）：子字串比對曾把外資欄位當成自營商。舊資料由 `init_db()` 以
+  「自營商 = 合計 − 外資 − 投信」自動修復。
 - TPEx OpenAPI 只有「最新一天」無法回補，上櫃股的歷史指標天數會比較少。
 
 第一次設定要多跑 `playwright install chromium`（`pip install` 不會自動下載瀏覽器核心）。

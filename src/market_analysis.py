@@ -11,7 +11,7 @@ from src.storage import db
 
 _MARKET_ANALYSIS_PROMPT = """你是台股大盤分析助手。以下是 {date} 的大盤與市場資訊。
 
-【大盤三大法人買賣超合計】（全市場加總，股數）
+【大盤三大法人買賣超合計】（上市櫃個股加總，已排除權證與 ETF，股數）
 外資: {foreign_total}
 投信: {trust_total}
 自營商: {dealer_total}

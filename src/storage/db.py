@@ -153,6 +153,27 @@ CREATE TABLE IF NOT EXISTS holdings (
 """
 
 
+# 「個股」代號：普通股 4 碼、特別股 4 碼加英文字、臺灣存託憑證 91 開頭 6 碼。
+# T86 與上櫃法人資料會混進上萬筆權證／牛熊證（03～08、7 開頭）、ETN（02 開頭）與 ETF（00 開頭）。
+# 權證的自營商避險股數極大，直接加總會讓「全市場法人買賣超」嚴重失真（曾經 +3.2 億股被算成 -9.3 億股），
+# ETF 的造市申贖也一樣，所以大盤加總只算個股。
+STOCK_CODE_SQL = (
+    "(code NOT GLOB '00*' AND (code GLOB '[0-9][0-9][0-9][0-9]' OR code GLOB '[0-9][0-9][0-9][0-9][A-Z]' "
+    "OR code GLOB '91[0-9][0-9][0-9][0-9]'))"
+)
+
+
+def is_stock_code(code: str) -> bool:
+    code = code or ""
+    if code.startswith("00"):  # ETF（0050、00631L…）
+        return False
+    if len(code) == 4 and code.isdigit():
+        return True
+    if len(code) == 5 and code[:4].isdigit() and code[4].isalpha() and code[4].isupper():
+        return True
+    return len(code) == 6 and code.isdigit() and code.startswith("91")
+
+
 @contextmanager
 def get_conn():
     conn = sqlite3.connect(DB_PATH)
@@ -172,6 +193,14 @@ def init_db():
                 conn.execute(f"ALTER TABLE news ADD COLUMN {column} {col_type}")
             except sqlite3.OperationalError:
                 pass  # 欄位已存在（舊資料庫升級用，新建的資料庫已經在 SCHEMA 裡就有這欄）
+        # 修復舊版解析錯誤存下的上櫃自營商欄位（當時存成外資的數字）。
+        # 官方合計欄位是對的，且「合計 = 外資 + 投信 + 自營商」，所以自營商可由另外三欄推回；
+        # 資料正確時條件不成立、不會更新任何列。
+        conn.execute(
+            """UPDATE institutional SET dealer_net = total_net - foreign_net - COALESCE(trust_net, 0)
+               WHERE market = 'TPEx' AND total_net IS NOT NULL AND foreign_net IS NOT NULL
+                 AND dealer_net IS NOT total_net - foreign_net - COALESCE(trust_net, 0)"""
+        )
 
 
 def save_stock_price(rows: list[dict]):
@@ -262,6 +291,14 @@ def query_institutional(date: str, keyword: str | None = None):
         else:
             cur = conn.execute("SELECT * FROM institutional WHERE date = ?", (date,))
         return [dict(r) for r in cur.fetchall()]
+
+
+def query_institutional_for_code(date: str, code: str) -> dict | None:
+    """單一股票當天的法人買賣超。代號必須完全相同——query_institutional 是模糊搜尋，
+    查 2330 會連 062330、082330 這些權證一起回來。"""
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM institutional WHERE date = ? AND code = ?", (date, code)).fetchone()
+        return dict(row) if row else None
 
 
 def query_margin(date: str, keyword: str | None = None):
@@ -446,12 +483,12 @@ def query_news_by_keyword(keyword: str, days: int = 7, limit: int = 10):
 
 
 def query_market_institutional_summary(date: str) -> dict:
-    """全市場三大法人買賣超加總（不分個股），供大盤籌碼分析用"""
+    """上市櫃「個股」三大法人買賣超加總（排除權證、ETN、ETF，見 STOCK_CODE_SQL），供大盤籌碼分析用"""
     with get_conn() as conn:
         cur = conn.execute(
-            """SELECT SUM(foreign_net) AS foreign_total, SUM(trust_net) AS trust_total,
+            f"""SELECT SUM(foreign_net) AS foreign_total, SUM(trust_net) AS trust_total,
                       SUM(dealer_net) AS dealer_total, SUM(total_net) AS total_net
-               FROM institutional WHERE date = ?""",
+               FROM institutional WHERE date = ? AND {STOCK_CODE_SQL}""",
             (date,),
         )
         row = cur.fetchone()

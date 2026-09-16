@@ -224,17 +224,18 @@ def _render_sidebar() -> str:
 
 
 def _market_summary_cards(selected_date: str):
-    price_rows = db.query_stock_price(selected_date)
-    inst_rows = db.query_institutional(selected_date)
+    # 只算個股：價量表混有上萬筆上櫃權證、法人表混有權證與 ETF，直接加總會失真
+    price_rows = [r for r in db.query_stock_price(selected_date) if db.is_stock_code(r["code"])]
+    inst_rows = [r for r in db.query_institutional(selected_date) if db.is_stock_code(r["code"])]
     news_rows = db.query_news(selected_date)
     up = sum(1 for r in price_rows if (r.get("change") or 0) > 0)
     down = sum(1 for r in price_rows if (r.get("change") or 0) < 0)
     total_net = sum(r.get("total_net") or 0 for r in inst_rows)
     ui.cards([
-        {"label": "上漲家數", "value": f"{up:,}", "tone": "up" if up else ""},
+        {"label": "上漲家數（個股）", "value": f"{up:,}", "tone": "up" if up else ""},
         {"label": "下跌家數", "value": f"{down:,}", "tone": "down" if down else ""},
         {"label": "持平／無交易", "value": f"{len(price_rows) - up - down:,}"},
-        {"label": "三大法人合計買賣超", "value": f"{total_net / 1000:+,.0f} 張" if inst_rows else "無資料",
+        {"label": "法人合計（個股）", "value": f"{total_net / 1000:+,.0f} 張" if inst_rows else "無資料",
          "tone": ui.tone_of(total_net) if inst_rows else ""},
         {"label": "新聞則數", "value": f"{len(news_rows):,}"},
     ])
@@ -1064,8 +1065,7 @@ def _build_report_text(date: str, include_holdings: bool = False) -> str:
         lines.append("| 排名 | 代號 | 名稱 | 關注原因 | 外資買賣超(股) | 投信買賣超(股) | 自營商買賣超(股) |")
         lines.append("|---|---|---|---|---|---|---|")
         for p in picks:
-            inst_rows = db.query_institutional(date, p["code"])
-            inst = inst_rows[0] if inst_rows else None
+            inst = db.query_institutional_for_code(date, p["code"])
             foreign = _format_net(inst["foreign_net"]) if inst else "-"
             trust = _format_net(inst["trust_net"]) if inst else "-"
             dealer = _format_net(inst["dealer_net"]) if inst else "-"
