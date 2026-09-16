@@ -1,36 +1,57 @@
 # TWStockAnalytics
 
-每日自動化台股分析系統：收集盤後價量、三大法人買賣超、融資融券與新聞，用本機 AI（Ollama）逐篇分析新聞內文並挑出重點個股，產出報表並推播至 LINE。
+台股每日分析工具：自動收集盤後價量、三大法人、融資融券、基本面與新聞，用 **Codex CLI** 逐篇分析新聞並挑出焦點個股，
+搭配程式計算的技術／籌碼指標、選股與回測，整理成每日報告。
 
-> 完整規劃、階段劃分與踩坑筆記見 [PLAN.md](PLAN.md)。
-
-## 功能
-
-- 每日收集台股盤後資訊：
-  - **TWSE / TPEx 官方 OpenAPI + rwd 介面**：收盤價量、三大法人買賣超、融資融券
-  - **FinMind API**：交叉驗證與補充
-  - **鉅亨網 API + Google News RSS**：當日新聞與個股延伸新聞搜尋
-- 資料存入本地 SQLite，可依日期 / 股票代碼 / 名稱模糊搜尋查詢
-- **AI 新聞深度分析**：先幫每則新聞抓內文（鉅亨網API內建、Google News RSS 優先用 Firecrawl 免費額度擷取、退回本機 Playwright），逐篇摘要後再彙整挑出當日前20檔重點個股。預設用**本機 Ollama**（免費、自動觸發、不需要任何 API Key），也可以改用**雲端 API**（Gemini 免費額度 / Claude·GPT 付費）當替代選項
-- 可編輯觀察名單 + AI 新聞焦點 Top20，點擊可跳轉個股詳情頁（K線圖 + 籌碼歷史 + 相關新聞）
-- **技術指標與線型**：K 線圖疊上 MA5/20/60 均線與成交量副圖；程式端計算 RSI、MACD、KD、布林通道、量能（純數學計算，非 AI 估算）
-- **個股籌碼＋技術面分析（複製貼上流程）**：個股詳情頁可產生包含**算好的技術指標**、籌碼歷史與相關新聞的提示詞，複製貼到網頁版 AI 分析技術面／籌碼面／未來展望，結果會存起來
-- **大盤整體籌碼分析（複製貼上流程）**：AI 分析頁可產生含大盤法人買賣超、漲跌家數、新聞重點的提示詞，回覆限制500字內（短期/中期展望、籌碼分析、熱門產業）
-- **每日報告**：彙整新聞摘要、大盤籌碼分析、新聞焦點個股（含三大法人買賣超）、個股深度分析，可下載成 Markdown 或 PDF
-- **Streamlit 網頁 UI**：手動觸發收集、瀏覽已收集資料、AI 供應商設定（Ollama 為主，Claude / GPT / Gemini API Key 作為進階選項）
-- 每日 20:00 排程腳本，可註冊進 Windows 工作排程器自動執行
+> 本工具僅供資訊整理與研究參考，不構成投資建議。
+> 完整規劃與踩坑筆記見 [PLAN.md](PLAN.md)。
 
 ## 安裝（一般使用者）
 
 到 [Releases](https://github.com/hagathend/TWStockAnalytics/releases/latest) 下載 `TWStockAnalytics-Setup-版本號.exe`，
 雙擊安裝即可，不需要自己安裝 Python。出現「Windows 已保護您的電腦」時點「其他資訊 → 仍要執行」。
-第一次開啟會進到「開始使用」頁，依序完成免責聲明、下載歷史資料、Codex 登入與每日自動收集設定。
 
-> 本工具僅供資訊整理與研究參考，不構成投資建議。
+第一次開啟會進到「開始使用」頁，依序完成：
 
-打包與發布流程見 [packaging/README.md](packaging/README.md)。
+1. 閱讀免責聲明
+2. 下載約半年的上市股歷史資料（背景執行，約 20–30 分鐘）
+3. 安裝並登入 Codex（AI 分析用，需要自己的 ChatGPT 帳號；沒有也能使用其他功能）
+4. 打開每日自動收集
 
-## 快速開始（開發）
+有新版本時側邊欄會提示，一鍵下載並安裝，資料與持股紀錄都會保留。打包與發布流程見 [packaging/README.md](packaging/README.md)。
+
+## 功能
+
+### 資料收集
+- **TWSE / TPEx 官方資料**：收盤價量、三大法人買賣超、融資融券、本益比／殖利率／淨值比、月營收
+- **FinMind API**：K 線歷史與交叉驗證
+- **鉅亨網 API + Google News RSS**：當日新聞與觀察名單個股的延伸新聞
+- 資料存在本機 SQLite；上市股歷史可一次補收集，每日收集時也會自動補上近兩週漏掉的交易日
+- 每日 20:00 自動收集（Windows 工作排程器），錯過時間會在下次開機後補做
+
+### AI 分析（Codex CLI）
+- 使用這台電腦已登入的 Codex CLI 與帳號額度，**不需要填 API Key**
+- **新聞深度分析**：先擷取新聞內文（鉅亨網 API 內建全文；其他來源優先用 Firecrawl、退回本機 Playwright），
+  逐篇摘要後彙整挑出當日最多 20 檔焦點個股；收集完可自動觸發
+- **個股分析**：依程式算好的技術指標、籌碼延伸指標、基本面、新聞分析技術面／籌碼面／1～2 週展望（每項 800 字內）；
+  持有的股票會附上成本與損益，列出續抱／減碼／停損的條件式觀察點，不直接下買賣指令
+- **大盤籌碼分析**：上市櫃個股法人加總、漲跌家數、新聞重點，總計 1000 字內
+- Codex 以唯讀、臨時工作階段執行；也保留「產生提示詞 → 貼到網頁版 AI → 貼回儲存」的手動流程
+
+### 指標、選股與回測（程式計算，非 AI 估算）
+- **技術指標**：MA、RSI、MACD、KD、布林通道、量能；K 線圖疊上均線與成交量
+- **籌碼延伸指標**：法人連買／連賣天數、5／20 日累計、佔成交量比重、融資變化對照股價、券資比
+- **選股工具**：均線排列、突破新高、跳空、爆量長紅黑、相對強弱、投信認養等訊號，可加上本益比、殖利率、
+  營收年增等基本面條件；結果可複選並一次加入觀察名單
+- **觀察名單警示**：區分「今日新出現」與「持續中」的訊號
+- **訊號回測**：訊號出現後 5／20 個交易日的報酬分布、勝率與相對大盤的超額報酬
+
+### 持股與報告
+- **我的持股**：記錄每筆買進的股數與成本，計算加權平均成本、未實現損益與持股訊號，可逐檔用 Codex 分析
+- **每日報告**：新聞摘要、大盤分析、焦點個股（含法人買賣超）、觀察名單訊號、個股分析，可下載 Markdown 或 PDF；
+  可選擇是否包含持股（預設不含，避免分享 PDF 時外流）
+
+## 開發
 
 ```bash
 git clone git@github.com:hagathend/TWStockAnalytics.git
@@ -41,42 +62,38 @@ pip install -r requirements.txt
 playwright install chromium
 ```
 
-日常使用：雙擊專案根目錄的 `start_ui.bat` 即可啟動 UI（自動開啟瀏覽器 http://localhost:8501），不需手動下指令。
-
-也可手動執行：
+另外需要安裝 [Codex CLI](https://github.com/openai/codex) 並執行 `codex login`。
 
 ```bash
-# 手動執行一次資料收集（不開 UI）
+# 啟動 UI（也可以雙擊 start_ui.bat）
+.venv\Scripts\streamlit.exe run src\app.py
+
+# 手動執行一次每日收集（不開 UI）
 .venv\Scripts\python.exe scripts\run_daily_collect.py
 
-# 啟動網頁 UI
-.venv\Scripts\streamlit.exe run src\app.py
+# 補收集上市歷史（可中斷續跑）
+.venv\Scripts\python.exe scripts\backfill_history.py --days 180
+
+# 單元測試
+.venv\Scripts\python.exe -m unittest discover -s tests
+
+# 把開發資料夾的資料搬到安裝版
+.venv\Scripts\python.exe scripts\migrate_to_installed.py
 ```
 
-## 設定每日自動收集（Windows 工作排程器）
+每日自動收集請在 UI 的「開始使用」頁開啟（會建立 Windows 工作排程）。
 
-```powershell
-schtasks /Create /TN "TWStock_DailyCollect" /TR "D:\workspace\TWStockAnalytics\scripts\run_daily_collect.bat" /SC DAILY /ST 20:00
-```
+開發資料夾的資料放在專案內的 `data/`；安裝版放在 `%LOCALAPPDATA%\TWStockAnalytics\data`，兩者互不相通。
 
 ## 技術棧
 
-Python 3.13 + Streamlit + SQLite。詳細架構、資料來源決策與已知問題請見 [PLAN.md](PLAN.md)。
+Python 3.13 + Streamlit + SQLite + pandas + plotly，AI 分析使用 Codex CLI，Windows 安裝程式使用 Inno Setup。
 
 ## 目前進度
 
-- [x] 第一階段：資料收集 + Streamlit UI
-- [x] 第二階段：AI 新聞深度分析（本機 Ollama 自動觸發）+ 可編輯觀察名單 + 個股K線圖詳情頁 + 個股籌碼分析 + 每日報告
-- [ ] LINE Bot 串接推播
-
-
-## Codex CLI 分析（developCodexCLI）
-
-新聞預設改用 Codex CLI：收集後自動逐篇摘要，再彙整焦點個股。
-個股與大盤頁可按「用 Codex 分析…並儲存」，自動產生提示詞、取得回覆並收錄既有 PDF 報告。
-原有複製貼上功能仍可使用。
-
-請先安裝 Codex CLI 並以 `codex login` 登入。AI 設定頁可檢查登入、設定執行檔完整路徑、
-模型及每次呼叫逾時秒數；不需輸入 API Key，但會使用 Codex 帳號額度。
-CLI 使用獨立暫存目錄、唯讀模式及臨時工作階段，不載入使用者的 CLI 工具設定。
-新聞內文由既有收集器提供，分析失敗會顯示錯誤，不以錯誤文字覆蓋既有分析。
+- [x] 資料收集 + Streamlit UI
+- [x] AI 新聞深度分析、個股／大盤分析、每日報告（Codex CLI）
+- [x] 技術／籌碼指標、選股工具、訊號回測、基本面
+- [x] 我的持股
+- [x] Windows 安裝程式與自動更新
+- [ ] LINE Bot 推播
