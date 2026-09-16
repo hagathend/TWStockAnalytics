@@ -33,3 +33,18 @@ def remove_stock(code: str):
     watchlist = load_watchlist()
     watchlist.pop(code, None)
     save_watchlist(watchlist)
+
+
+def add_stocks(stocks: list[tuple[str, str]]) -> tuple[list[str], list[str]]:
+    """一次加入多檔（選股工具複選用），只寫一次檔。回傳 (新加入的代號, 原本就在名單裡的代號)"""
+    watchlist = load_watchlist()
+    added, existing = [], []
+    for code, name in stocks:
+        if code in watchlist:
+            existing.append(code)
+        else:
+            watchlist[code] = name
+            added.append(code)
+    if added:
+        save_watchlist(watchlist)
+    return added, existing

@@ -38,7 +38,7 @@ from src.config_ai import (
     save_report_settings,
     save_scraping_settings,
 )
-from src.config_watchlist import add_stock, load_watchlist, remove_stock
+from src.config_watchlist import add_stock, add_stocks, load_watchlist, remove_stock
 from src.market_analysis import build_market_analysis_prompt, save_market_analysis
 from src.report_pdf import markdown_to_pdf
 from src import backtest, desktop, fundamentals, portfolio, signals, ui, updater
@@ -946,6 +946,25 @@ _SCREEN_COLUMNS = {
 }
 
 
+def _add_selected_to_watchlist(table_key: str, stocks: list[tuple[str, str]]):
+    """「加入觀察名單」按鈕的回呼。
+
+    用回呼而不是 `if st.button(): ... st.rerun()`：回呼只會在按下時執行一次；
+    後者在 st.rerun() 重跑時按鈕仍是按下狀態，會再加一次。
+    加完換一個新的表格 key 讓勾選真的歸零——直接刪 session_state 裡的選取狀態，
+    瀏覽器上的勾勾還會留著，畫面和程式認知的選取會不同步。"""
+    rows = (st.session_state.get(table_key) or {}).get("selection", {}).get("rows", [])
+    chosen = [stocks[i] for i in rows if i < len(stocks)]
+    if not chosen:
+        return
+    added, existing = add_stocks(chosen)
+    message = f"已加入 {len(added)} 檔到觀察名單" if added else "勾選的股票都已經在觀察名單裡"
+    if added and existing:
+        message += f"（{len(existing)} 檔原本就在名單裡）"
+    st.session_state["screen_notice"] = message
+    st.session_state["screen_table_version"] = st.session_state.get("screen_table_version", 0) + 1
+
+
 def _render_screen_tab(signal_df: pd.DataFrame):
     with ui.panel("篩選條件"):
         labels = {v: k for k, v in signals.SIGNALS.items()}
@@ -965,10 +984,14 @@ def _render_screen_tab(signal_df: pd.DataFrame):
     result = fundamentals.attach_fundamentals(result, fundamentals.latest_fundamentals())
     result = fundamentals.apply_filters(result, pe_max=pe_max, yield_min=yield_min, pb_max=pb_max, yoy_min=yoy_min)
 
-    with ui.panel("篩選結果", f"符合 {len(result)} 檔・依相對強弱排序・點選任一列開啟個股詳情"):
+    with ui.panel("篩選結果", f"符合 {len(result)} 檔・依相對強弱排序・勾選後可加入觀察名單"):
+        notice = st.session_state.pop("screen_notice", None)
+        if notice:
+            st.success(notice)
         if result.empty:
             st.caption("沒有符合條件的股票")
             return
+        actions = st.container()
         result["vol_ma20_lots"] = (result["vol_ma20"] / 1000).round(0)
         view = result[list(_SCREEN_COLUMNS)].rename(columns=_SCREEN_COLUMNS)
         styler = _styled_table(
@@ -976,17 +999,29 @@ def _render_screen_tab(signal_df: pd.DataFrame):
             thousands=["20日均量(張)", "外資連買賣", "投信連買賣"],
             decimals=["收盤", "漲跌%", "20日報酬%", "本益比", "殖利率%", "淨值比", "營收年增%"],
         )
+        table_key = f"screen_table_{st.session_state.get('screen_table_version', 0)}"
+        stocks = list(zip(result["code"], result["name"]))
         event = st.dataframe(
             styler, width="stretch", hide_index=True, height=560, on_select="rerun",
-            selection_mode="single-row", key="screen_table",
+            selection_mode="multi-row", key=table_key,
             column_config={
                 "相對強弱": st.column_config.ProgressColumn("相對強弱", min_value=0, max_value=100, format="%.0f",
                                                         help="同一天全市場 20 日報酬的百分位排名"),
                 "觸發訊號": st.column_config.TextColumn("觸發訊號", width="large"),
             },
         )
-        if event.selection.rows:
-            _go_to_detail(result.iloc[event.selection.rows[0]]["code"])
+        # 按鈕放在表格上方（actions 容器），不用捲到表格底部才按得到
+        selected = result.iloc[event.selection.rows]
+        with actions:
+            col_info, col_add, col_detail = st.columns([3, 1.2, 1.2], vertical_alignment="center")
+            col_info.caption(f"已勾選 {len(selected)} 檔：" + "、".join(selected["name"].head(8))
+                             + ("…" if len(selected) > 8 else "") if len(selected) else "勾選股票後可加入觀察名單")
+            col_add.button("加入觀察名單", type="primary", width="stretch", disabled=selected.empty,
+                           key="screen_add_watchlist", on_click=_add_selected_to_watchlist,
+                           args=(table_key, stocks))
+            if col_detail.button("開啟個股詳情", width="stretch", disabled=len(selected) != 1,
+                                 key="screen_open_detail", help="勾選一檔時可用"):
+                _go_to_detail(selected.iloc[0]["code"])
 
 
 def _render_signal_alerts(alerts: list[dict], empty_text: str):
