@@ -27,6 +27,18 @@
 程式根目錄有 `.installed` 才會把資料放到 `%LOCALAPPDATA%`（見 `src/config.py`）。
 **不要把 `.installed` 放進 git**，否則開發資料夾的資料位置會跑掉（`tests/test_desktop.py` 會擋）。
 
+## 把開發資料夾的資料搬到安裝版
+
+開發資料夾（`<專案>\data`）和安裝版（`%LOCALAPPDATA%\TWStockAnalytics\data`）的資料互不相通。
+先在安裝版側邊欄按「結束程式」，再執行：
+
+```powershell
+.venv\Scripts\python.exe scripts\migrate_to_installed.py
+```
+
+會先備份安裝版原本的資料到 `data_backup_<時間>`，用 SQLite 備份 API 複製資料庫（開發版開著也沒關係），
+搬完檢查完整性並逐表比對筆數。只搬資料庫、觀察名單、Codex／報告／Firecrawl 設定。
+
 ## 本機打包
 
 ```powershell
