@@ -776,3 +776,15 @@ def query_market_average_return(start_date: str, end_date: str) -> float | None:
             (start_date, end_date),
         ).fetchone()
         return row["avg_return"] if row and row["n"] else None
+
+
+def query_industry_map() -> dict[str, str]:
+    """代號 → 產業別（取每檔最新一個月營收資料上的產業別）"""
+    with get_conn() as conn:
+        cur = conn.execute(
+            """SELECT r.code, r.industry FROM month_revenue r
+               JOIN (SELECT code, MAX(year_month) AS ym FROM month_revenue GROUP BY code) latest
+                 ON r.code = latest.code AND r.year_month = latest.ym
+               WHERE r.industry IS NOT NULL AND r.industry != ''"""
+        )
+        return {r["code"]: r["industry"] for r in cur.fetchall()}

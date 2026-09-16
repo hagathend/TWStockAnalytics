@@ -41,7 +41,7 @@ from src.config_ai import (
 from src.config_watchlist import add_stock, add_stocks, load_watchlist, remove_stock
 from src.market_analysis import build_market_analysis_prompt, save_market_analysis
 from src.report_pdf import markdown_to_pdf
-from src import backtest, desktop, fundamentals, portfolio, predictions, signals, ui, updater
+from src import backtest, desktop, fundamentals, heatmap, portfolio, predictions, signals, ui, updater
 from src.config import IS_INSTALLED
 from src.codex_cli import _executable as find_codex_executable
 from src.config_app import load_app_settings, save_app_settings
@@ -247,11 +247,36 @@ def _market_summary_cards(selected_date: str):
     ])
 
 
+_INDUSTRY_COLUMNS = {
+    "industry": "產業", "count": "家數", "weighted_change": "成交值加權漲跌%", "avg_change": "平均漲跌%",
+    "up_ratio": "上漲家數比例%", "turnover_share": "成交值占比%",
+}
+
+
+def _render_industry_heatmap(selected_date: str):
+    with ui.panel("產業熱力圖", "方塊大小＝成交值、顏色＝漲跌幅（紅漲綠跌）・點產業可放大，點上方路徑返回"):
+        col_market, _ = st.columns([1, 3])
+        market = col_market.segmented_control("市場", list(heatmap.MARKET_OPTIONS), default="上市",
+                                              key="heatmap_market", label_visibility="collapsed") or "上市"
+        df = heatmap.industry_frame(selected_date, heatmap.MARKET_OPTIONS[market])
+        if df.empty:
+            st.caption("此日期沒有股價資料")
+            return
+        summary = heatmap.industry_summary(df)
+        st.plotly_chart(heatmap.build_treemap(df, summary), width="stretch", key="industry_treemap")
+        with st.expander("產業彙總表"):
+            view = summary[list(_INDUSTRY_COLUMNS)].rename(columns=_INDUSTRY_COLUMNS)
+            pct = ["成交值加權漲跌%", "平均漲跌%", "上漲家數比例%", "成交值占比%"]
+            st.dataframe(_styled_table(view, signed=["成交值加權漲跌%", "平均漲跌%"], decimals=pct),
+                         width="stretch", hide_index=True)
+
+
 def home_page():
     selected_date = _render_sidebar()
     ui.page_header("市場總覽", f"{selected_date} 盤後價量、三大法人、融資融券與新聞")
 
     _market_summary_cards(selected_date)
+    _render_industry_heatmap(selected_date)
 
     with st.container(border=True):
         tab_price, tab_inst, tab_margin, tab_news, tab_log = st.tabs(
