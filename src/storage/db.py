@@ -138,6 +138,30 @@ CREATE TABLE IF NOT EXISTS month_revenue (
     PRIMARY KEY (year_month, market, code)
 );
 
+-- 條件提醒：規則與觸發紀錄。同一規則、同一檔、同一資料日期只記一次（避免重複通知）
+CREATE TABLE IF NOT EXISTS alert_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    code TEXT,
+    name TEXT,
+    threshold REAL,
+    signal_key TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    note TEXT,
+    created_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS alert_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rule_id INTEGER NOT NULL,
+    date TEXT NOT NULL,
+    code TEXT NOT NULL,
+    name TEXT,
+    message TEXT,
+    created_at TEXT,
+    UNIQUE (rule_id, code, date)
+);
+
 -- AI 預測追蹤：從個股分析的「預測摘要」解析出來，結果在需要時用股價即時計算（不存結果，股價補齊後會自動更新）
 CREATE TABLE IF NOT EXISTS predictions (
     date TEXT NOT NULL,
@@ -788,3 +812,47 @@ def query_industry_map() -> dict[str, str]:
                WHERE r.industry IS NOT NULL AND r.industry != ''"""
         )
         return {r["code"]: r["industry"] for r in cur.fetchall()}
+
+
+def add_alert_rule(kind: str, code: str | None = None, name: str | None = None, threshold: float | None = None,
+                   signal_key: str | None = None, note: str = "") -> int:
+    with get_conn() as conn:
+        cur = conn.execute(
+            """INSERT INTO alert_rules (kind, code, name, threshold, signal_key, enabled, note, created_at)
+               VALUES (?, ?, ?, ?, ?, 1, ?, ?)""",
+            (kind, code or None, name, threshold, signal_key or None, note, datetime.now().isoformat(timespec="seconds")),
+        )
+        return cur.lastrowid
+
+
+def set_alert_rule_enabled(rule_id: int, enabled: bool):
+    with get_conn() as conn:
+        conn.execute("UPDATE alert_rules SET enabled = ? WHERE id = ?", (1 if enabled else 0, rule_id))
+
+
+def delete_alert_rule(rule_id: int):
+    with get_conn() as conn:
+        conn.execute("DELETE FROM alert_rules WHERE id = ?", (rule_id,))
+
+
+def query_alert_rules() -> list[dict]:
+    with get_conn() as conn:
+        return [dict(r) for r in conn.execute("SELECT * FROM alert_rules ORDER BY id").fetchall()]
+
+
+def save_alert_event(rule_id: int, event: dict) -> bool:
+    """新觸發才寫入並回傳 True；同一規則同一檔同一天已經記過就回傳 False"""
+    with get_conn() as conn:
+        cur = conn.execute(
+            """INSERT OR IGNORE INTO alert_events (rule_id, date, code, name, message, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (rule_id, event["date"], event["code"], event.get("name"), event["message"],
+             datetime.now().isoformat(timespec="seconds")),
+        )
+        return cur.rowcount == 1
+
+
+def query_alert_events(limit: int = 100) -> list[dict]:
+    with get_conn() as conn:
+        cur = conn.execute("SELECT * FROM alert_events ORDER BY date DESC, id DESC LIMIT ?", (limit,))
+        return [dict(r) for r in cur.fetchall()]

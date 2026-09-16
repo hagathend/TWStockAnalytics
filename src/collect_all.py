@@ -120,4 +120,18 @@ def run_daily_collect() -> dict:
         "fundamentals": collect_fundamentals(),
         "gap_fill": collect_recent_gaps(),
     }
+    result["alerts"] = check_alerts_step()
     return result
+
+
+def check_alerts_step() -> dict:
+    """收集完檢查條件提醒並跳 Windows 通知；失敗只記錄，不影響收集結果"""
+    from src import alerts  # 延遲匯入：alerts 會載入訊號計算，收集器本身不需要
+
+    try:
+        outcome = alerts.check_alerts()
+    except Exception as exc:  # noqa: BLE001
+        db.log_step("條件提醒檢查", "failed", str(exc))
+        return {"new_events": 0}
+    db.log_step("條件提醒檢查", "success", outcome["message"])
+    return {"new_events": len(outcome["new_events"])}

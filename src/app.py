@@ -41,7 +41,7 @@ from src.config_ai import (
 from src.config_watchlist import add_stock, add_stocks, load_watchlist, remove_stock
 from src.market_analysis import build_market_analysis_prompt, save_market_analysis
 from src.report_pdf import markdown_to_pdf
-from src import backtest, desktop, fundamentals, heatmap, portfolio, predictions, signals, ui, updater
+from src import alerts, backtest, desktop, fundamentals, heatmap, notify, portfolio, predictions, signals, ui, updater
 from src.config import IS_INSTALLED
 from src.codex_cli import _executable as find_codex_executable
 from src.config_app import load_app_settings, save_app_settings
@@ -1168,6 +1168,114 @@ def screener_page():
         _render_backtest_tab()
 
 
+# ─────────────────────────────── 條件提醒 ───────────────────────────────
+
+_ANY_SIGNAL = "任何新訊號"
+
+
+def _rule_exists(kind: str, code: str | None = None, threshold: float | None = None, signal_key: str | None = None) -> bool:
+    return any(r["kind"] == kind and (r["code"] or None) == (code or None) and r["threshold"] == threshold
+               and (r["signal_key"] or None) == (signal_key or None) for r in db.query_alert_rules())
+
+
+def _render_add_alert_rule():
+    with ui.panel("新增提醒"):
+        labels = {v: k for k, v in alerts.KINDS.items()}
+        col_kind, col_target, col_value = st.columns([1.3, 1.2, 1.2], vertical_alignment="bottom")
+        kind = labels[col_kind.selectbox("提醒條件", list(labels), key="alert_kind")]
+        code, threshold, signal_key = None, None, None
+        if kind in alerts.PRICE_KINDS:
+            code = col_target.text_input("股票代號", placeholder="例如 2330", key="alert_code").strip() or None
+        elif kind in alerts.HOLDING_KINDS:
+            code = col_target.text_input("股票代號（留空＝所有持股）", key="alert_holding_code").strip() or None
+        if kind in ("price_above", "price_below"):
+            threshold = col_value.number_input("價格", min_value=0.0, value=None, step=1.0, format="%.2f", key="alert_price")
+        elif kind != "watchlist_signal":
+            threshold = col_value.number_input("幅度（%）", min_value=0.1, value=5.0 if kind in alerts.PRICE_KINDS else 8.0,
+                                               step=0.5, key="alert_pct")
+        else:
+            options = [_ANY_SIGNAL] + list(signals.SIGNALS.values())
+            chosen = col_target.selectbox("訊號", options, key="alert_signal")
+            signal_key = None if chosen == _ANY_SIGNAL else {v: k for k, v in signals.SIGNALS.items()}[chosen]
+
+        if st.button("新增提醒", type="primary", key="alert_add"):
+            if kind in alerts.PRICE_KINDS and not code:
+                st.warning("請輸入股票代號")
+            elif kind != "watchlist_signal" and not threshold:
+                st.warning("請輸入門檻")
+            elif _rule_exists(kind, code, threshold, signal_key):
+                st.info("已經有一樣的提醒了")
+            else:
+                name = db.lookup_stock_name(code) if code else None
+                db.add_alert_rule(kind, code, name, threshold, signal_key)
+                st.success("已新增提醒")
+                st.rerun()
+
+
+def _render_quick_alert_setup():
+    with ui.panel("快速設定"):
+        col1, col2, col3 = st.columns([1, 1.6, 2], vertical_alignment="bottom")
+        loss = col1.number_input("停損幅度（%）", min_value=1.0, value=8.0, step=1.0, key="quick_loss")
+        if col2.button(f"所有持股虧損超過 {loss:g}% 時提醒", width="stretch", key="quick_loss_btn"):
+            if _rule_exists("holding_loss", None, loss):
+                st.info("已經有一樣的提醒了")
+            else:
+                db.add_alert_rule("holding_loss", threshold=loss)
+                st.success("已新增")
+                st.rerun()
+        if col3.button("觀察名單出現任何新訊號時提醒", width="stretch", key="quick_signal_btn"):
+            if _rule_exists("watchlist_signal"):
+                st.info("已經有一樣的提醒了")
+            else:
+                db.add_alert_rule("watchlist_signal")
+                st.success("已新增")
+                st.rerun()
+
+
+def _render_alert_rules():
+    with ui.panel("提醒規則"):
+        rules = db.query_alert_rules()
+        if not rules:
+            st.caption("還沒有提醒規則")
+            return
+        for rule in rules:
+            col_desc, col_toggle, col_delete = st.columns([6, 1, 1], vertical_alignment="center")
+            col_desc.markdown(alerts.describe_rule(rule))
+            enabled = col_toggle.toggle("啟用", value=bool(rule["enabled"]), key=f"alert_enabled_{rule['id']}")
+            if enabled != bool(rule["enabled"]):
+                db.set_alert_rule_enabled(rule["id"], enabled)
+            if col_delete.button("刪除", key=f"alert_delete_{rule['id']}", type="tertiary"):
+                db.delete_alert_rule(rule["id"])
+                st.rerun()
+
+
+def alerts_page():
+    _render_sidebar()
+    ui.page_header("條件提醒", "每日收集完自動檢查，符合條件時跳出 Windows 通知；同一檔同一天只提醒一次")
+
+    _render_add_alert_rule()
+    _render_quick_alert_setup()
+    _render_alert_rules()
+
+    with ui.panel("最近觸發"):
+        col_check, col_test, _ = st.columns([1, 1, 3])
+        if col_check.button("立即檢查", width="stretch", key="alert_check_now"):
+            with st.spinner("檢查中..."):
+                outcome = alerts.check_alerts()
+            st.info(outcome["message"])
+        if col_test.button("送出測試通知", width="stretch", key="alert_test_toast"):
+            ok, message = notify.show_toast("台股分析 測試通知", ["看到這則通知，代表提醒功能可以正常跳出"])
+            (st.success if ok else st.error)(message)
+        events = db.query_alert_events()
+        if events:
+            view = pd.DataFrame(events)[["date", "code", "name", "message"]].rename(
+                columns={"date": "日期", "code": "代號", "name": "名稱", "message": "內容"})
+            st.dataframe(view, width="stretch", hide_index=True,
+                         column_config={"內容": st.column_config.TextColumn("內容", width="large")})
+        else:
+            st.caption("還沒有觸發紀錄")
+
+
 # ─────────────────────────────── 每日報告 ───────────────────────────────
 
 
@@ -1440,12 +1548,13 @@ ONBOARDING_PAGE = st.Page(onboarding_page, title="開始使用", default=ONBOARD
 PORTFOLIO_PAGE = st.Page(portfolio_page, title="我的持股")
 DETAIL_PAGE = st.Page(detail_page, title="個股詳情")
 SCREENER_PAGE = st.Page(screener_page, title="選股工具")
+ALERTS_PAGE = st.Page(alerts_page, title="條件提醒")
 AI_ANALYSIS_PAGE = st.Page(ai_analysis_page, title="AI 分析")
 REPORT_PAGE = st.Page(report_page, title="每日報告")
 AI_SETTINGS_PAGE = st.Page(ai_settings_page, title="AI 設定")
 
 if __name__ == "__main__":
-    nav = st.navigation([HOME_PAGE, PORTFOLIO_PAGE, DETAIL_PAGE, SCREENER_PAGE, AI_ANALYSIS_PAGE, REPORT_PAGE,
+    nav = st.navigation([HOME_PAGE, PORTFOLIO_PAGE, DETAIL_PAGE, SCREENER_PAGE, ALERTS_PAGE, AI_ANALYSIS_PAGE, REPORT_PAGE,
                          AI_SETTINGS_PAGE, ONBOARDING_PAGE])
     nav.run()
     _render_sidebar_footer()
