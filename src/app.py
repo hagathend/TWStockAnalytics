@@ -30,15 +30,17 @@ from src.collect_all import run_daily_collect
 from src.collectors.firecrawl_fetcher import test_connection as firecrawl_test_connection
 from src.config_ai import (
     load_codex_settings,
+    load_report_settings,
     load_scraping_settings,
     save_codex_settings,
+    save_report_settings,
     save_scraping_settings,
 )
 from src.config_watchlist import add_stock, load_watchlist, remove_stock
 from src.market_analysis import build_market_analysis_prompt, save_market_analysis
 from src.report_pdf import markdown_to_pdf
 from src import backtest, fundamentals, portfolio, signals, ui
-from src.stock_analysis import build_stock_analysis_prompt, save_stock_analysis
+from src.stock_analysis import build_stock_analysis_prompt, save_stock_analysis, strip_holding_section
 from src.storage import db
 
 st.set_page_config(page_title="台股每日資訊收集", layout="wide")
@@ -1034,7 +1036,8 @@ def _format_net(value) -> str:
     return f"{value:+,}" if value is not None else "-"
 
 
-def _build_report_text(date: str) -> str:
+def _build_report_text(date: str, include_holdings: bool = False) -> str:
+    """include_holdings=False 時不放「我的持股」段落，並移除個股分析裡的「持股應對」一項"""
     lines = [f"# 台股每日報告 - {date}", ""]
 
     lines.append("## 新聞摘要")
@@ -1083,7 +1086,7 @@ def _build_report_text(date: str) -> str:
         lines.append(signals.format_alerts_markdown(alerts))
     lines.append("")
 
-    positions = portfolio.load_positions(as_of=date)
+    positions = portfolio.load_positions(as_of=date) if include_holdings else []
     if positions:
         totals = portfolio.portfolio_totals(positions)
         lines.append("## 我的持股")
@@ -1110,7 +1113,8 @@ def _build_report_text(date: str) -> str:
     if stock_analyses:
         for sa in stock_analyses:
             lines.append(f"### {sa['code']} {sa['name']}")
-            lines.append(_md_linebreaks(sa["analysis"]))
+            analysis = sa["analysis"] if include_holdings else strip_holding_section(sa["analysis"])
+            lines.append(_md_linebreaks(analysis))
             lines.append(f"\n*儲存時間: {sa['created_at']}*")
             lines.append("")
     else:
@@ -1126,16 +1130,27 @@ def report_page():
     available_dates = db.query_available_dates() or [today]
     report_text = None
 
+    report_settings = load_report_settings()
+    include_holdings = st.toggle(
+        "報告包含我的持股", value=report_settings["include_holdings"],
+        help="關閉時，畫面、Markdown 與 PDF 都不會有「我的持股」段落，個股分析裡的「持股應對」也會一併移除",
+    )
+    if include_holdings != report_settings["include_holdings"]:
+        save_report_settings({**report_settings, "include_holdings": include_holdings})
+        st.session_state.pop("report_pdf_bytes", None)  # 設定改了，舊的 PDF 內容不再對應
+
     col_date, col_md, col_pdf, col_pdf_dl = st.columns([1.2, 1, 1, 1], vertical_alignment="bottom")
     selected_date = col_date.selectbox("報告日期", available_dates, key="report_date")
-    report_text = _build_report_text(selected_date)
+    report_text = _build_report_text(selected_date, include_holdings)
     col_md.download_button("下載 Markdown", report_text, file_name=f"twstock_report_{selected_date}.md",
                            mime="text/markdown", width="stretch")
     if col_pdf.button("產生 PDF", width="stretch"):
         with st.spinner("產生 PDF 中..."):
             st.session_state["report_pdf_bytes"] = markdown_to_pdf(report_text)
             st.session_state["report_pdf_date"] = selected_date
-    if st.session_state.get("report_pdf_date") == selected_date and st.session_state.get("report_pdf_bytes"):
+            st.session_state["report_pdf_holdings"] = include_holdings
+    if (st.session_state.get("report_pdf_date") == selected_date and st.session_state.get("report_pdf_bytes")
+            and st.session_state.get("report_pdf_holdings") == include_holdings):
         col_pdf_dl.download_button("下載 PDF", st.session_state["report_pdf_bytes"],
                                    file_name=f"twstock_report_{selected_date}.pdf", mime="application/pdf", width="stretch")
 

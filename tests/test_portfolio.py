@@ -1,5 +1,7 @@
+import tempfile
 import unittest
 from datetime import date
+from pathlib import Path
 from unittest.mock import patch
 
 from _db_fixture import TempDBTestCase, price_row
@@ -85,6 +87,39 @@ class PortfolioDBTests(TempDBTestCase):
         self.assertIn("【我的持股】", with_holding)
         self.assertIn("持股應對", with_holding)
         self.assertIn("以下五項結果", with_holding)
+
+
+class StripHoldingSectionTests(unittest.TestCase):
+    def test_removes_last_section_in_various_heading_styles(self):
+        for heading in ("持股應對：", "5. 持股應對：", "**持股應對**：", "- 持股應對：", "## 持股應對", "五、持股應對："):
+            text = "\n".join([
+                "技術面分析：均線偏多", "籌碼面分析：外資連買", "總結：留意量能",
+                heading, "- 成本 2350，跌破 2300 重新評估", "- 未實現損益 +45,000",
+            ])
+            result = stock_analysis.strip_holding_section(text)
+            self.assertNotIn("持股應對", result, heading)
+            self.assertNotIn("2350", result, heading)
+            self.assertIn("總結：留意量能", result, heading)
+
+    def test_section_in_middle_keeps_following_sections(self):
+        text = "\n".join(["技術面分析：A", "持股應對：成本 100", "細節 B", "總結：C"])
+        self.assertEqual(stock_analysis.strip_holding_section(text), "技術面分析：A\n總結：C")
+
+    def test_text_without_holding_section_unchanged(self):
+        text = "技術面分析：A\n\n總結：C"
+        self.assertEqual(stock_analysis.strip_holding_section(text), text)
+        self.assertEqual(stock_analysis.strip_holding_section(None), "")
+
+
+class ReportSettingsTests(unittest.TestCase):
+    def test_default_excludes_holdings_and_persists(self):
+        from src import config_ai
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(config_ai, "_REPORT_CONFIG_PATH", Path(tmp) / "report_settings.json"), \
+                patch.object(config_ai, "DATA_DIR", Path(tmp)):
+            self.assertFalse(config_ai.load_report_settings()["include_holdings"])
+            config_ai.save_report_settings({"include_holdings": True})
+            self.assertTrue(config_ai.load_report_settings()["include_holdings"])
 
 
 if __name__ == "__main__":

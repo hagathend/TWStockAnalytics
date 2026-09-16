@@ -190,6 +190,8 @@ Schema 變更走 `db.init_db()` 裡的 `ALTER TABLE ... ADD COLUMN` + `try/excep
 - `src/portfolio.py` 我的持股（`holdings` 表，每筆買進一列、股數以「股」計）：加權平均成本、以本地最新收盤價算損益。
   持有的股票在個股分析提示詞會多【我的持股】與「持股應對」一項——**只給續抱／減碼／停損的條件式觀察點，
   不直接下買賣指令**，決策留給使用者。持股是個人財務資料，只存本機資料庫，測試 UI 時用資料庫副本，不要寫進真實資料庫。
+  每日報告預設**不含**持股（`data/report_settings.json` 的 `include_holdings`，報告頁有開關）：關閉時連個股分析裡的
+  「持股應對」一項也要用 `strip_holding_section()` 移除，提示詞因此規定成本損益只能寫在「持股應對」裡。
 - TPEx OpenAPI 只有「最新一天」無法回補，上櫃股的歷史指標天數會比較少。
 
 第一次設定要多跑 `playwright install chromium`（`pip install` 不會自動下載瀏覽器核心）。

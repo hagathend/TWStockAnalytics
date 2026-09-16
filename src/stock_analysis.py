@@ -5,6 +5,7 @@
 不需要另外接 API，個股分析這種需要判斷力的任務用網頁版大模型效果通常比本機小模型好。
 """
 
+import re
 from datetime import date as _date, timedelta
 
 from bs4 import BeautifulSoup
@@ -153,7 +154,42 @@ _HOLDING_BLOCK = """
 _HOLDING_INSTRUCTION = """持股應對：（對照我的平均成本與目前損益，結合上面的技術面支撐壓力、籌碼變化與基本面，
 　　　　　　　分別列出「續抱」「分批減碼」「停損或重新評估」各自的觀察條件，例如跌破哪個價位或均線、
 　　　　　　　法人出現什麼變化時要注意；用條件式描述，不要直接下買賣指令，最後由我自己決定，800字以內）
+　　　　　　　注意：我的持股數量、成本、損益只能出現在「持股應對」這一項，其他四項請完全不要提到。
 """
+
+
+HOLDING_SECTION_TITLE = "持股應對"
+_OTHER_SECTION_TITLES = ("技術面分析", "籌碼面分析", "未來1~2週展望", "總結")
+
+
+# 標題行前面可能出現的修飾：-、*、#、>、粗體、「5.」「五、」「(5)」這類編號
+_HEADING_PREFIX = re.compile(r"^[\s\-*#>]*(?:[(（]?[0-9一二三四五六七八九十]+[.、)）]\s*)?[*\s]*")
+
+
+def _section_title_of(line: str) -> str | None:
+    """判斷這一行是不是四／五大項的標題行（AI 可能加上 -、*、#、數字或中文編號、粗體）"""
+    stripped = _HEADING_PREFIX.sub("", line, count=1)
+    for title in (HOLDING_SECTION_TITLE, *_OTHER_SECTION_TITLES):
+        if stripped.startswith(title):
+            return title
+    return None
+
+
+def strip_holding_section(analysis_text: str) -> str:
+    """移除個股分析裡的「持股應對」一項（從該標題行到下一個大項標題或結尾）。
+    報告設定為不包含持股時使用，避免成本與損益透過個股分析外流到 PDF。"""
+    kept = []
+    skipping = False
+    for line in (analysis_text or "").split("\n"):
+        title = _section_title_of(line)
+        if title == HOLDING_SECTION_TITLE:
+            skipping = True
+            continue
+        if title is not None:
+            skipping = False
+        if not skipping:
+            kept.append(line)
+    return "\n".join(kept).rstrip()
 
 
 def build_stock_analysis_prompt(code: str) -> str:

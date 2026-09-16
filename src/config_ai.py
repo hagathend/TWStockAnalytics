@@ -83,3 +83,20 @@ def load_codex_settings() -> dict:
 def save_codex_settings(settings: dict):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     _CODEX_CONFIG_PATH.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+# 每日報告要不要包含「我的持股」。預設不包含：報告會被下載成 PDF／Markdown 分享出去，
+# 持股成本與損益屬於個人財務資料，要使用者主動打開才放進去。
+_REPORT_CONFIG_PATH = DATA_DIR / "report_settings.json"
+_REPORT_DEFAULT = {"include_holdings": False}
+
+
+def load_report_settings() -> dict:
+    if not _REPORT_CONFIG_PATH.exists():
+        return dict(_REPORT_DEFAULT)
+    return {**_REPORT_DEFAULT, **json.loads(_REPORT_CONFIG_PATH.read_text(encoding="utf-8"))}
+
+
+def save_report_settings(settings: dict):
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    _REPORT_CONFIG_PATH.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
