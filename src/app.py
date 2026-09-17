@@ -43,7 +43,7 @@ from src.config_watchlist import add_stock, add_stocks, load_watchlist, remove_s
 from src.market_analysis import build_market_analysis_prompt, save_market_analysis
 from src.report_pdf import markdown_to_pdf
 from src import (alerts, backtest, desktop, fundamentals, heatmap, market_breadth, notify, portfolio, predictions,
-                 shareholding, signals, ui, updater)
+                 revenue, shareholding, signals, ui, updater)
 from src.config import IS_INSTALLED
 from src.codex_cli import _executable as find_codex_executable
 from src.config_app import load_app_settings, save_app_settings
@@ -516,6 +516,28 @@ def _render_fundamentals_panel(code: str):
         ui.cards(items)
 
 
+def _render_revenue_panel(code: str):
+    history = revenue.code_history(code)
+    if len(history) < 2:
+        return
+    signal = revenue.compute_signals(history.assign(code=code)).iloc[0]
+    notes = [f"{len(history)} 個月"]
+    if signal["revenue_high_12m"]:
+        notes.append("最新月營收創 12 個月新高")
+    if signal["yoy_growth_streak"]:
+        notes.append(f"年增率連續成長 {int(signal['yoy_growth_streak'])} 個月")
+    with ui.panel("月營收趨勢", "・".join(notes)):
+        fig = go.Figure()
+        fig.add_bar(x=history["year_month"], y=history["revenue"] / 100_000, name="營收（億元）",
+                    marker_color=ui.ACCENT_COLOR, hovertemplate="%{x}<br>營收 %{y:,.2f} 億<extra></extra>")
+        fig.add_scatter(x=history["year_month"], y=history["yoy_pct"], name="年增率%", yaxis="y2", mode="lines+markers",
+                        line={"color": "#F5B942", "width": 2}, hovertemplate="%{x}<br>年增 %{y:+.1f}%<extra></extra>")
+        fig.update_layout(yaxis={"title": "億元"}, yaxis2={"title": "年增率%", "overlaying": "y", "side": "right",
+                                                           "showgrid": False, "zeroline": True, "zerolinecolor": "#3A4356"})
+        fig.update_xaxes(type="category")
+        st.plotly_chart(ui.style_chart(fig, height=300), width="stretch", key=f"revenue_chart_{code}")
+
+
 def _render_history_panel(code: str):
     with ui.panel("法人與融資歷史", "本地資料庫累積，每個交易日一筆"):
         tab_inst, tab_margin = st.tabs(["三大法人買賣超", "融資融券"])
@@ -606,6 +628,7 @@ def detail_page():
     with col_fund:
         _render_fundamentals_panel(code)
 
+    _render_revenue_panel(code)
     _render_shareholding_panel(code)
 
     _render_history_panel(code)
@@ -1222,7 +1245,8 @@ _SCREEN_COLUMNS = {
     "return_20d": "20日報酬%", "rs_rank_pct": "相對強弱",
     "foreign_streak": "外資連買賣", "trust_streak": "投信連買賣",
     "vol_ma20_lots": "20日均量(張)", "pe_ratio": "本益比", "dividend_yield": "殖利率%",
-    "pb_ratio": "淨值比", "yoy_pct": "營收年增%", "big1000_pct": "千張大戶%", "big1000_pct_change": "大戶週增(百分點)",
+    "pb_ratio": "淨值比", "yoy_pct": "營收年增%", "revenue_high_text": "營收創高", "yoy_growth_streak": "年增連續月",
+    "big1000_pct": "千張大戶%", "big1000_pct_change": "大戶週增(百分點)",
     "signals": "觸發訊號",
 }
 
@@ -1259,6 +1283,10 @@ def _render_screen_tab(signal_df: pd.DataFrame):
             yield_min = f2.number_input("殖利率% ≥", min_value=0.0, value=None, step=0.5)
             pb_max = f3.number_input("淨值比 ≤", min_value=0.0, value=None, step=0.5)
             yoy_min = f4.number_input("營收年增% ≥", value=None, step=5.0)
+        with st.expander("營收條件（月營收，需累積歷史資料）"):
+            r1, r2, _ = st.columns([1, 1, 2], vertical_alignment="bottom")
+            revenue_high_only = r1.checkbox("營收創 12 個月新高")
+            yoy_streak_min = r2.number_input("年增率連續成長 ≥（月）", min_value=0, value=0, step=1)
         with st.expander("籌碼集中條件（集保股權分散，每週資料）"):
             s1, s2, _ = st.columns([1, 1, 2])
             big_min = s1.number_input("千張大戶持股% ≥", min_value=0.0, max_value=100.0, value=None, step=5.0)
@@ -1269,6 +1297,12 @@ def _render_screen_tab(signal_df: pd.DataFrame):
     result = fundamentals.attach_fundamentals(result, fundamentals.latest_fundamentals())
     result = fundamentals.apply_filters(result, pe_max=pe_max, yield_min=yield_min, pb_max=pb_max, yoy_min=yoy_min)
     if not result.empty:
+        result = result.merge(revenue.latest_signals()[["code", "revenue_high_12m", "yoy_growth_streak"]], on="code", how="left")
+        if revenue_high_only:
+            result = result[result["revenue_high_12m"] == True]  # noqa: E712 - 欄位含 None，不能用 truthy 判斷
+        if yoy_streak_min:
+            result = result[result["yoy_growth_streak"].fillna(0) >= yoy_streak_min]
+        result["revenue_high_text"] = result["revenue_high_12m"].map({True: "是", False: ""}).fillna("")
         result = result.merge(shareholding.latest_table()[["code", "big1000_pct", "big1000_pct_change"]], on="code", how="left")
         if big_min is not None:
             result = result[result["big1000_pct"].notna() & (result["big1000_pct"] >= big_min)]
@@ -1288,7 +1322,7 @@ def _render_screen_tab(signal_df: pd.DataFrame):
         view = result[list(_SCREEN_COLUMNS)].rename(columns=_SCREEN_COLUMNS)
         styler = _styled_table(
             view, signed=["漲跌%", "20日報酬%", "外資連買賣", "投信連買賣", "營收年增%", "大戶週增(百分點)"],
-            thousands=["20日均量(張)", "外資連買賣", "投信連買賣"],
+            thousands=["20日均量(張)", "外資連買賣", "投信連買賣", "年增連續月"],
             decimals=["收盤", "漲跌%", "20日報酬%", "本益比", "殖利率%", "淨值比", "營收年增%", "千張大戶%",
                       "大戶週增(百分點)"],
         )

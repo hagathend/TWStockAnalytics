@@ -1014,3 +1014,19 @@ def query_price_history(market: str = "TWSE", since: str | None = None) -> list[
             (market, since or "0000-00-00"),
         )
         return [dict(r) for r in cur.fetchall()]
+
+
+def query_month_revenue_counts() -> dict[tuple[str, str], int]:
+    """(year_month, market) → 公司數，回補時判斷哪些月份已經有資料"""
+    with get_conn() as conn:
+        cur = conn.execute("SELECT year_month, market, COUNT(*) AS n FROM month_revenue GROUP BY year_month, market")
+        return {(r["year_month"], r["market"]): r["n"] for r in cur.fetchall()}
+
+
+def query_month_revenue_history(since_year_month: str = "0000-00") -> list[dict]:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "SELECT code, year_month, revenue, yoy_pct FROM month_revenue WHERE year_month >= ? ORDER BY code, year_month",
+            (since_year_month,),
+        )
+        return [dict(r) for r in cur.fetchall()]

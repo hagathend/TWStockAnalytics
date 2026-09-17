@@ -83,6 +83,11 @@ def summarize_for_prompt(code: str) -> str:
                 f"月增 {_num(r['mom_pct'], '+.1f', '%')}、年增 {_num(r['yoy_pct'], '+.1f', '%')}、"
                 f"累計年增 {_num(r['cum_yoy_pct'], '+.1f', '%')}"
             )
+        from src.revenue import summarize_for_prompt as summarize_revenue  # 避免循環匯入
+
+        revenue_note = summarize_revenue(code)
+        if revenue_note:
+            lines.append(f"營收趨勢：{revenue_note}")
     else:
         lines.append("月營收: 無資料")
     return "\n".join(lines)
