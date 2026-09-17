@@ -15,6 +15,7 @@ from src.chip_metrics import summarize_for_prompt as summarize_chip_metrics
 from src.collectors import finmind
 from src.fundamentals import summarize_for_prompt as summarize_fundamentals
 from src.portfolio import summarize_for_prompt as summarize_holding
+from src.market_index import stock_prompt_block as summarize_relative_strength
 from src.predictions import record_from_analysis
 from src.shareholding import summarize_for_prompt as summarize_shareholding
 from src.indicators import (
@@ -32,6 +33,9 @@ _STOCK_ANALYSIS_PROMPT = """你是台股個股分析助手。以下是 {code} {n
 
 【技術指標】（由程式依收盤價量計算，非估算值）
 {indicator_block}
+
+【相對大盤】（個股報酬與加權指數報酬比較，超額為正代表跑贏大盤）
+{relative_block}
 
 【籌碼延伸指標】（由程式依本地累積的法人／融資歷史計算，非估算值）
 {chip_block}
@@ -212,6 +216,7 @@ def build_stock_analysis_prompt(code: str) -> str:
         price_rows=_PRICE_ROWS_SHOWN,
         indicator_block=_format_indicators(price_rows),
         chip_block=summarize_chip_metrics(metrics_for_code(code)),
+        relative_block=summarize_relative_strength(code),
         fundamental_block=summarize_fundamentals(code),
         shareholding_block=summarize_shareholding(code),
         price_block=_format_price_history(price_rows),

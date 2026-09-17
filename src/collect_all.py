@@ -3,7 +3,7 @@
 from datetime import date as _date, timedelta
 
 from src import backfill
-from src.collectors import finmind, fundamentals, news_crawler, news_rss, tdcc, twse_official
+from src.collectors import finmind, fundamentals, news_crawler, news_rss, tdcc, twse_market, twse_official
 from src.config import WATCHLIST
 from src.storage import db
 
@@ -90,6 +90,11 @@ def collect_fundamentals() -> dict:
     return {"valuation": len(twse_val) + len(tpex_val), "month_revenue": len(twse_rev) + len(tpex_rev)}
 
 
+def collect_market_index() -> int:
+    """加權指數：抓本月（含今天）的每日資料覆寫"""
+    return len(_run_step("TWSE 加權指數", twse_market.fetch_current_month, db.save_market_index))
+
+
 def collect_shareholding() -> int:
     """集保股權分散表：每週更新一次，每天抓最新一週覆寫即可（同一週重複抓不會多存）"""
     return len(_run_step("集保股權分散表", tdcc.fetch_shareholding, db.save_shareholding))
@@ -118,6 +123,7 @@ def run_daily_collect() -> dict:
     db.init_db()
     result = {
         "price": collect_stock_price(),
+        "market_index": collect_market_index(),
         "institutional": collect_institutional(),
         "margin": collect_margin(),
         "finmind": collect_finmind_watchlist(),

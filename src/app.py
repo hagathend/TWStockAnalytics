@@ -42,7 +42,8 @@ from src.config_ai import (
 from src.config_watchlist import add_stock, add_stocks, load_watchlist, remove_stock
 from src.market_analysis import build_market_analysis_prompt, save_market_analysis
 from src.report_pdf import markdown_to_pdf
-from src import (alerts, backtest, desktop, fundamentals, heatmap, market_breadth, notify, portfolio, predictions,
+from src import (alerts, backtest, desktop, fundamentals, heatmap, market_breadth, market_index, notify, portfolio,
+                 predictions,
                  revenue, shareholding, signals, ui, updater)
 from src.config import IS_INSTALLED
 from src.codex_cli import _executable as find_codex_executable
@@ -273,7 +274,12 @@ def _render_market_thermometer(selected_date: str):
 
         ad = last["ad_ratio"]
         heat = last["turnover_ma20_ratio"]
-        ui.cards([
+        index = market_index.index_summary(selected_date)
+        index_card = [] if not index else [{
+            "label": f"加權指數（{index['date'][5:]}）", "value": f"{index['taiex']:,.0f}",
+            "sub": f"{index['change']:+,.0f} 點（{index['change_pct']:+.2f}%）", "sub_tone": ui.tone_of(index["change"]),
+        }]
+        ui.cards(index_card + [
             {"label": "漲跌家數比", "value": "-" if pd.isna(ad) else f"{ad:.2f}",
              "tone": "" if pd.isna(ad) else ("up" if ad > 1 else "down" if ad < 1 else ""),
              "sub": f"上漲 {int(last['up'])}／下跌 {int(last['down'])}"},
@@ -538,6 +544,27 @@ def _render_revenue_panel(code: str):
         st.plotly_chart(ui.style_chart(fig, height=300), width="stretch", key=f"revenue_chart_{code}")
 
 
+def _render_relative_strength_panel(code: str):
+    frame = market_index.relative_strength(code)
+    if len(frame) < 2:
+        return
+    excess = market_index.excess_returns(frame)
+    notes = []
+    for n, item in excess.items():
+        if item:
+            notes.append(f"近 {n} 日超額 {item['excess']:+.1f} 個百分點")
+    with ui.panel("相對大盤", "・".join(notes) or "個股與加權指數以期初為 100 比較"):
+        fig = go.Figure()
+        fig.add_scatter(x=frame["date"], y=frame["stock_index"], name="個股", mode="lines",
+                        line={"color": ui.ACCENT_COLOR, "width": 2})
+        fig.add_scatter(x=frame["date"], y=frame["taiex_index"], name="加權指數", mode="lines",
+                        line={"color": "#8792A6", "width": 1.5, "dash": "dot"})
+        fig.add_hline(y=100, line_color="#3A4356", line_width=1)
+        fig.update_layout(yaxis_title="期初＝100")
+        fig.update_xaxes(type="category", nticks=8)
+        st.plotly_chart(ui.style_chart(fig, height=260), width="stretch", key=f"rs_chart_{code}")
+
+
 def _render_history_panel(code: str):
     with ui.panel("法人與融資歷史", "本地資料庫累積，每個交易日一筆"):
         tab_inst, tab_margin = st.tabs(["三大法人買賣超", "融資融券"])
@@ -628,6 +655,7 @@ def detail_page():
     with col_fund:
         _render_fundamentals_panel(code)
 
+    _render_relative_strength_panel(code)
     _render_revenue_panel(code)
     _render_shareholding_panel(code)
 

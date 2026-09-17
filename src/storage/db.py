@@ -138,6 +138,16 @@ CREATE TABLE IF NOT EXISTS month_revenue (
     PRIMARY KEY (year_month, market, code)
 );
 
+-- 加權指數與整體市場成交（證交所 FMTQIK，每日一列）
+CREATE TABLE IF NOT EXISTS market_index (
+    date TEXT PRIMARY KEY,
+    taiex REAL,
+    change REAL,
+    volume INTEGER,
+    turnover INTEGER,
+    transactions INTEGER
+);
+
 -- 交易紀錄（取代 holdings）：持倉與已實現損益都由這張表以平均成本法推算。股數以「股」計，金額單位元
 CREATE TABLE IF NOT EXISTS trades (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1030,3 +1040,27 @@ def query_month_revenue_history(since_year_month: str = "0000-00") -> list[dict]
             (since_year_month,),
         )
         return [dict(r) for r in cur.fetchall()]
+
+
+def save_market_index(rows: list[dict]):
+    if not rows:
+        return
+    with get_conn() as conn:
+        conn.executemany(
+            """INSERT OR REPLACE INTO market_index (date, taiex, change, volume, turnover, transactions)
+               VALUES (:date, :taiex, :change, :volume, :turnover, :transactions)""",
+            rows,
+        )
+
+
+def query_market_index(start: str, end: str | None = None) -> list[dict]:
+    with get_conn() as conn:
+        cur = conn.execute("SELECT * FROM market_index WHERE date >= ? AND date <= ? ORDER BY date",
+                           (start, end or "9999-12-31"))
+        return [dict(r) for r in cur.fetchall()]
+
+
+def query_market_index_month_counts() -> dict[str, int]:
+    with get_conn() as conn:
+        cur = conn.execute("SELECT substr(date, 1, 7) AS ym, COUNT(*) AS n FROM market_index GROUP BY ym")
+        return {r["ym"]: r["n"] for r in cur.fetchall()}

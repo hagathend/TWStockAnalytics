@@ -7,7 +7,7 @@
 
 from datetime import date as _date
 
-from src import market_breadth
+from src import market_breadth, market_index
 from src.storage import db
 
 _MARKET_ANALYSIS_PROMPT = """你是台股大盤分析助手。以下是 {date} 的大盤與市場資訊。
@@ -17,6 +17,9 @@ _MARKET_ANALYSIS_PROMPT = """你是台股大盤分析助手。以下是 {date} �
 投信: {trust_total}
 自營商: {dealer_total}
 合計: {total_net}
+
+【加權指數】
+{index_block}
 
 【當日漲跌家數】（上市，不含權證）
 上漲 {up_count} 檔／下跌 {down_count} 檔／平盤 {flat_count} 檔
@@ -75,6 +78,7 @@ def build_market_analysis_prompt(date: str | None = None) -> tuple[bool, str]:
         down_count=breadth.get("down") or 0,
         flat_count=breadth.get("flat") or 0,
         breadth_block=market_breadth.summarize_for_prompt(market_breadth.breadth_until(date)),
+        index_block=market_index.market_prompt_block(date),
         news_summary=(ai_summary["summary"] if ai_summary else "（尚無新聞分析摘要）"),
         picks_block=_format_picks_block(picks),
     )
