@@ -92,6 +92,7 @@ src/
 ├── collectors/            twse_official（TWSE rwd + TPEx）、fundamentals、finmind、news_crawler、news_rss、
 │                          firecrawl_fetcher、article_fetcher、twse_market（加權指數）、twse_ownership（外資持股／借券）、
 │                          dividends、tdcc（集保股權分散）、mops_revenue／mops_financials（公開資訊觀測站舊站）、taifex
+├── config_watchlist.py    觀察名單（可多個名單組合，存 data/watchlist.json；收集、提醒、報告用所有名單的聯集）
 └── storage/db.py          SQLite 全部讀寫
 scripts/                   run_daily_collect.py（排程呼叫）、backfill_history.py、migrate_to_installed.py
 launcher.pyw               安裝版啟動器；packaging/ 安裝程式打包；start_ui.bat 開發用啟動
@@ -105,7 +106,7 @@ launcher.pyw               安裝版啟動器；packaging/ 安裝程式打包；
         ↓
 AI 新聞分析（Codex CLI，收集後自動觸發）：
      缺內文的用 Firecrawl→Playwright 補 → 逐篇摘要存 news.excerpt
-     → 分批找候選 → 去重+代號校正 → 彙整挑 Top20 → ai_picks / ai_analysis_summary
+     → 分批找候選 → 去重+代號校正 → 彙整挑 Top50 → ai_picks / ai_analysis_summary
         ↓
 個股/大盤分析（Codex CLI 按鈕，或產生提示詞手動貼到網頁版 AI 再貼回）→ stock_analysis / market_analysis
         ↓
@@ -120,7 +121,7 @@ AI 新聞分析（Codex CLI，收集後自動觸發）：
 | `institutional` | date+market+code | 三大法人買賣超 |
 | `margin` | date+market+code | 融資融券 |
 | `news` | id | `content`=全文、`excerpt`=AI逐篇摘要 |
-| `ai_picks` | date+rank | AI 挑的當日焦點個股 Top20 |
+| `ai_picks` | date+rank | AI 挑的當日焦點個股 Top50（`ai_analysis.MAX_PICKS`） |
 | `ai_analysis_summary` | date | 當日新聞總結 |
 | `stock_analysis` | date+code | 個股分析（Codex 或手動貼回） |
 | `market_analysis` | date | 大盤籌碼分析（Codex 或手動貼回） |

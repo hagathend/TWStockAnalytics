@@ -5,7 +5,7 @@ from datetime import date as _date, timedelta
 from src import backfill
 from src.collectors import (dividends, finmind, fundamentals, news_crawler, news_rss, tdcc, twse_market,
                             twse_official, twse_ownership)
-from src.config import WATCHLIST
+from src.config_watchlist import load_watchlist
 from src.storage import db
 
 
@@ -57,7 +57,7 @@ def collect_finmind_watchlist(days_back: int = 7) -> int:
     start_date = (_date.today() - timedelta(days=days_back)).isoformat()
 
     total = 0
-    for code in WATCHLIST:
+    for code in load_watchlist():  # 所有觀察名單的聯集
         try:
             rows = finmind.fetch_stock_price(code, start_date, end_date)
             total += len(rows)
@@ -76,7 +76,7 @@ def collect_news() -> dict:
     )
     rss_rows = _run_step(
         "Google News RSS (watchlist)",
-        lambda: news_rss.fetch_watchlist_news(WATCHLIST),
+        lambda: news_rss.fetch_watchlist_news(load_watchlist()),
         db.save_news,
     )
     return {"cnyes": len(cnyes_rows), "rss": len(rss_rows)}

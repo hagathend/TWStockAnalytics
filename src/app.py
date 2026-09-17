@@ -24,7 +24,7 @@ import plotly.express as px  # noqa: E402
 import plotly.graph_objects as go  # noqa: E402
 import streamlit as st  # noqa: E402
 
-from src.ai_analysis import analyze_with_codex_deep, build_prompt, parse_and_save  # noqa: E402
+from src.ai_analysis import MAX_PICKS, analyze_with_codex_deep, build_prompt, parse_and_save  # noqa: E402
 from src.codex_cli import generate_codex_text, check_codex_login, list_codex_models
 from src.charting import build_candlestick
 from src.chip_metrics import metrics_for_code
@@ -39,7 +39,8 @@ from src.config_ai import (
     save_report_settings,
     save_scraping_settings,
 )
-from src.config_watchlist import add_stock, add_stocks, load_watchlist, remove_stock
+from src import config_watchlist
+from src.config_watchlist import add_stocks, load_watchlist
 from src.market_analysis import build_market_analysis_prompt, save_market_analysis
 from src.report_pdf import markdown_to_pdf
 from src import (alerts, backtest, calendar_events, desktop, financials, futures, pe_river, fundamentals, heatmap, market_breadth, market_index, notify, portfolio,
@@ -175,7 +176,7 @@ def _run_collect_from_sidebar():
 
 
 def _render_sidebar() -> str:
-    """畫出各頁共用的側邊欄（收集按鈕、查詢日期、觀察名單），回傳目前選擇的查詢日期。
+    """畫出各頁共用的側邊欄（收集按鈕、查詢日期、新聞焦點），回傳目前選擇的查詢日期。
     區塊標題一律用 ui.sidebar_label（比導覽列小一級的灰字），不要用 st.header。"""
     with st.sidebar:
         ui.sidebar_label("資料收集")
@@ -191,31 +192,7 @@ def _render_sidebar() -> str:
                 "查詢日期", value=_date.today().isoformat(), label_visibility="collapsed"
             )
 
-        ui.sidebar_label("觀察名單")
-        watchlist = load_watchlist()
-        if not watchlist:
-            st.caption("尚未新增任何股票")
-        for code, name in list(watchlist.items()):
-            col_btn, col_del = st.columns([5, 1], vertical_alignment="center")
-            with col_btn:
-                if st.button(f"{code}　{name}", key=f"watch_{code}", type="tertiary", width="stretch"):
-                    _go_to_detail(code)
-            with col_del:
-                if st.button("×", key=f"del_{code}", type="tertiary", help="從觀察名單移除"):
-                    remove_stock(code)
-                    st.rerun()
-
-        with st.form("add_watch_form", clear_on_submit=True, border=False):
-            col_input, col_add = st.columns([5, 2], vertical_alignment="bottom")
-            new_code = col_input.text_input("新增股票", placeholder="輸入代號", label_visibility="collapsed",
-                                            key="new_watch_code")
-            submitted = col_add.form_submit_button("新增", width="stretch")
-            if submitted and new_code:
-                name = db.lookup_stock_name(new_code) or new_code
-                add_stock(new_code, name)
-                st.rerun()
-
-        ui.sidebar_label("新聞焦點 Top 20")
+        ui.sidebar_label(f"新聞焦點 Top {MAX_PICKS}")
         ai_picks = db.query_ai_picks(selected_date)
         if ai_picks:
             for pick in ai_picks:
@@ -767,7 +744,7 @@ def detail_page():
     code = col_input.text_input("股票代號", value=st.session_state.get("selected_code", ""),
                                 placeholder="輸入股票代號，例如 2330", label_visibility="collapsed")
     if not code:
-        st.info("請輸入股票代號，或從左側觀察名單／新聞焦點點選")
+        st.info("請輸入股票代號，或從左側新聞焦點、「選股工具 › 觀察名單」點選")
         return
     st.session_state["selected_code"] = code  # 切換分頁或頁面後回來仍停在這檔
 
@@ -1205,7 +1182,7 @@ def ai_analysis_page():
     tab, body = ui.page_tabs("ai", NAV_TABS["ai"])
     with body:
         if tab == "新聞深度分析":
-            with ui.panel("新聞深度分析", "先取得新聞內文，逐篇摘要後挑出最多 20 檔有新聞依據的焦點個股"):
+            with ui.panel("新聞深度分析", f"先取得新聞內文，逐篇摘要後挑出最多 {MAX_PICKS} 檔有新聞依據的焦點個股"):
                 if st.button("用 Codex 分析這天的新聞", type="primary"):
                     progress_bar = st.progress(0.0, text="準備中...")
 
@@ -1441,8 +1418,9 @@ def _add_selected_to_watchlist(table_key: str, stocks: list[tuple[str, str]]):
     chosen = [stocks[i] for i in rows if i < len(stocks)]
     if not chosen:
         return
-    added, existing = add_stocks(chosen)
-    message = f"已加入 {len(added)} 檔到觀察名單" if added else "勾選的股票都已經在觀察名單裡"
+    group = st.session_state.get("screen_watch_group")
+    added, existing = add_stocks(chosen, group)
+    message = f"已加入 {len(added)} 檔到「{group}」" if added else f"勾選的股票都已經在「{group}」裡"
     if added and existing:
         message += f"（{len(existing)} 檔原本就在名單裡）"
     st.session_state["screen_notice"] = message
@@ -1537,9 +1515,11 @@ def _render_screen_tab(signal_df: pd.DataFrame):
         # 按鈕放在表格上方（actions 容器），不用捲到表格底部才按得到
         selected = result.iloc[event.selection.rows]
         with actions:
-            col_info, col_add, col_detail = st.columns([3, 1.2, 1.2], vertical_alignment="center")
+            col_info, col_group, col_add, col_detail = st.columns([2.2, 1.3, 1.2, 1.2], vertical_alignment="bottom")
             col_info.caption(f"已勾選 {len(selected)} 檔：" + "、".join(selected["name"].head(8))
                              + ("…" if len(selected) > 8 else "") if len(selected) else "勾選股票後可加入觀察名單")
+            with col_group:
+                _watch_group_selector("screen_watch_group", "加入到")
             col_add.button("加入觀察名單", type="primary", width="stretch", disabled=selected.empty,
                            key="screen_add_watchlist", on_click=_add_selected_to_watchlist,
                            args=(table_key, stocks))
@@ -1568,10 +1548,125 @@ def _render_signal_alerts(alerts: list[dict], empty_text: str):
             ui.chips([(signals.SIGNALS[k], "") for k in alert["continuing"]])
 
 
-def _render_alert_tab(signal_df: pd.DataFrame):
-    alerts = signals.watchlist_alerts(signal_df, load_watchlist().keys())
-    with ui.panel("觀察名單訊號", "僅上市股（上櫃資料源無法回補歷史，暫不計算）"):
-        _render_signal_alerts(alerts, "觀察名單今天沒有觸發任何訊號")
+_WATCH_COLUMNS = {"code": "代號", "name": "名稱", "date": "價格日期", "close": "收盤", "change_pct": "漲跌%",
+                  "new": "今日新訊號", "continuing": "持續中訊號"}
+
+
+def _watch_group_selector(key: str, label: str = "觀察名單") -> str:
+    groups = list(config_watchlist.load_groups())
+    # 建立／改名／刪除名單後要切換選取，但 selectbox 畫出來之後不能再改它的值，所以先記在 _pending，下次畫之前套用
+    pending = st.session_state.pop(f"{key}_pending", None)
+    if pending in groups:
+        st.session_state[key] = pending
+    if st.session_state.get(key) not in groups:
+        st.session_state[key] = groups[0]
+    return st.selectbox(label, groups, key=key)
+
+
+def _set_watch_group(name: str | None):
+    st.session_state["watch_group_pending"] = name
+
+
+def _remove_selected_from_group(table_key: str, group: str, codes: list[str]):
+    rows = (st.session_state.get(table_key) or {}).get("selection", {}).get("rows", [])
+    chosen = [codes[i] for i in rows if i < len(codes)]
+    for code in chosen:
+        config_watchlist.remove_stock(code, group)
+    if chosen:
+        st.session_state["watch_notice"] = f"已從「{group}」移除 {len(chosen)} 檔"
+        st.session_state["watch_table_version"] = st.session_state.get("watch_table_version", 0) + 1
+
+
+def _render_watch_group_manager(group: str):
+    with st.popover("管理名單", width="stretch"):
+        with st.form("watch_new_group", clear_on_submit=True, border=False):
+            new_name = st.text_input("新增名單", placeholder="例如：半導體、高殖利率")
+            if st.form_submit_button("建立", width="stretch") and new_name.strip():
+                try:
+                    _set_watch_group(config_watchlist.create_group(new_name))
+                    st.rerun()
+                except config_watchlist.WatchlistError as exc:
+                    st.error(str(exc))
+        st.divider()
+        with st.form("watch_rename_group", border=False):
+            renamed = st.text_input(f"重新命名「{group}」", value=group)
+            if st.form_submit_button("改名", width="stretch") and renamed.strip() != group:
+                try:
+                    _set_watch_group(config_watchlist.rename_group(group, renamed))
+                    st.rerun()
+                except config_watchlist.WatchlistError as exc:
+                    st.error(str(exc))
+        st.divider()
+        if st.button(f"刪除「{group}」", width="stretch", key="watch_delete_group"):
+            try:
+                config_watchlist.delete_group(group)
+                _set_watch_group(next(iter(config_watchlist.load_groups())))
+                st.rerun()
+            except config_watchlist.WatchlistError as exc:
+                st.error(str(exc))
+
+
+def _render_watchlist_tab(signal_df: pd.DataFrame):
+    col_group, col_manage, col_add, _ = st.columns([1.4, 0.8, 1.6, 1.2], vertical_alignment="bottom")
+    with col_group:
+        group = _watch_group_selector("watch_group")
+    with col_manage:
+        _render_watch_group_manager(group)
+    with col_add, st.form("watch_add_stock", clear_on_submit=True, border=False):
+        c_input, c_btn = st.columns([2, 1], vertical_alignment="bottom")
+        new_code = c_input.text_input("加入股票", placeholder="輸入代號，例如 2330")
+        if c_btn.form_submit_button("加入", width="stretch") and new_code.strip():
+            code = new_code.strip()
+            name = db.lookup_stock_name(code)
+            if name:
+                config_watchlist.add_stock(code, name, group)
+                st.session_state["watch_notice"] = f"已加入 {code} {name}"
+                st.rerun()
+            else:
+                st.warning(f"本地資料庫查不到 {code}，請確認代號")
+
+    stocks = config_watchlist.load_groups().get(group, {})
+    alerts_by_code = {a["code"]: a for a in signals.watchlist_alerts(signal_df, stocks.keys())}
+    with ui.panel(group, f"共 {len(stocks)} 檔・勾選後可移除或開啟個股詳情"):
+        notice = st.session_state.pop("watch_notice", None)
+        if notice:
+            st.success(notice)
+        if not stocks:
+            st.caption("這個名單還沒有股票。可以在上方輸入代號，或在「篩選器」勾選後加入。")
+            return
+        rows = []
+        for code, name in stocks.items():
+            quote = db.query_latest_close(code) or {}
+            close, change = quote.get("close"), quote.get("change")
+            alert = alerts_by_code.get(code, {})
+            rows.append({
+                "code": code, "name": name, "date": quote.get("date"), "close": close,
+                "change_pct": change / (close - change) * 100 if close is not None and change is not None and close - change else None,
+                "new": "、".join(signals.SIGNALS[k] for k in alert.get("new", [])),
+                "continuing": "、".join(signals.SIGNALS[k] for k in alert.get("continuing", [])),
+            })
+        view = pd.DataFrame(rows)[list(_WATCH_COLUMNS)].rename(columns=_WATCH_COLUMNS)
+        actions = st.container()
+        table_key = f"watch_table_{group}_{st.session_state.get('watch_table_version', 0)}"
+        codes = list(stocks)
+        event = st.dataframe(
+            _styled_table(view, signed=["漲跌%"], decimals=["收盤", "漲跌%"]),
+            width="stretch", hide_index=True, on_select="rerun", selection_mode="multi-row", key=table_key,
+            column_config={"今日新訊號": st.column_config.TextColumn("今日新訊號", width="medium"),
+                           "持續中訊號": st.column_config.TextColumn("持續中訊號", width="large")},
+        )
+        selected = [codes[i] for i in event.selection.rows if i < len(codes)]
+        with actions:
+            col_info, col_remove, col_detail = st.columns([3, 1.2, 1.2], vertical_alignment="center")
+            col_info.caption(f"已勾選 {len(selected)} 檔" if selected else "訊號只計算上市股（上櫃資料源無法回補歷史）")
+            col_remove.button("從名單移除", width="stretch", disabled=not selected, key="watch_remove",
+                              on_click=_remove_selected_from_group, args=(table_key, group, codes))
+            if col_detail.button("開啟個股詳情", width="stretch", disabled=len(selected) != 1, key="watch_open_detail",
+                                 help="勾選一檔時可用"):
+                _go_to_detail(selected[0])
+
+    with ui.panel("名單訊號", "僅上市股・區分今日新出現與持續中的訊號"):
+        _render_signal_alerts(list(alerts_by_code.values()), "這個名單今天沒有觸發任何訊號")
 
 
 def screener_page():
@@ -1590,8 +1685,8 @@ def screener_page():
     with body:
         if tab == "篩選器":
             _render_screen_tab(signal_df)
-        elif tab == "觀察名單警示":
-            _render_alert_tab(signal_df)
+        elif tab == "觀察名單":
+            _render_watchlist_tab(signal_df)
         elif tab == "訊號回測":
             _render_backtest_tab()
 
@@ -2024,15 +2119,11 @@ def _render_update_notice():
 
 
 def _render_sidebar_footer():
-    """所有頁面共用的側邊欄底部：新版本提示、版本與結束程式"""
+    """所有頁面共用的側邊欄底部：新版本提示與版本"""
     with st.sidebar:
         st.divider()
         _render_update_notice()
         st.caption(f"台股分析 v{__version__}")
-        if st.button("結束程式", key="quit_app", type="tertiary"):
-            st.info("程式已結束，可以關閉這個瀏覽器分頁")
-            # 稍等一下讓上面的訊息送到瀏覽器，再結束整個伺服器行程
-            threading.Timer(1.0, os._exit, args=(0,)).start()
 
 
 # 側邊欄導覽：大項目＝頁面，子項目＝頁內分頁（目前所在的大項目才展開子項目）
@@ -2040,7 +2131,7 @@ NAV_TABS = {
     "home": ["市場溫度計", "期貨法人", "產業熱力圖", "股價", "三大法人", "融資融券", "新聞", "收集紀錄"],
     "portfolio": ["持倉明細", "持股訊號", "AI 持股分析", "新增交易", "交易紀錄", "已實現損益"],
     "detail": ["技術面", "籌碼面", "基本面", "新聞", "AI 分析"],
-    "screener": ["篩選器", "觀察名單警示", "訊號回測"],
+    "screener": ["篩選器", "觀察名單", "訊號回測"],
     "alerts": ["最近觸發", "提醒規則", "新增提醒"],
     "calendar": ["持股與觀察名單", "其他提醒", "全市場除權息"],
     "ai": ["新聞深度分析", "大盤籌碼分析", "預測追蹤", "手動貼上"],
@@ -2097,6 +2188,10 @@ def _render_nav(current_id: str):
                 # 用 on_click 在重跑前切換分頁；不要在腳本中途 st.rerun()，那會讓頁面上還沒畫到的輸入框狀態被清掉
                 st.button(label, key=f"navs_{'on_' if on else ''}{page_id}_{index}", width="stretch",
                           on_click=ui.remember_tab, args=(page_id, label))
+        if st.button("結束程式", key="navg_quit", width="stretch"):
+            st.info("程式已結束，可以關閉這個瀏覽器分頁")
+            # 稍等一下讓上面的訊息送到瀏覽器，再結束整個伺服器行程
+            threading.Timer(1.0, os._exit, args=(0,)).start()
         st.divider()
 
 

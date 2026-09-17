@@ -41,7 +41,7 @@ class CalendarTests(TempDBTestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self._watch = patch.object(config_watchlist, "_WATCHLIST_PATH", Path(self._tmp.name) / "w.json")
         self._watch.start()
-        config_watchlist.save_watchlist({"4549": "桓達"})
+        config_watchlist.save_groups({"A": {"4549": "桓達"}})
         db.save_dividend_events(dividends.parse_twse(TWSE_PAYLOAD) + dividends.parse_tpex(TPEX_ITEMS))
         db.save_stock_price([price_row("2026-09-16", close=100.0)])
         db.add_trade("2026-09-01", "2330", "台積電", "buy", 2000, 100.0)
