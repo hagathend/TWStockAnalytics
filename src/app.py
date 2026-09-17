@@ -53,7 +53,7 @@ from src.version import __version__
 from src.stock_analysis import build_stock_analysis_prompt, save_stock_analysis, strip_holding_section
 from src.storage import db
 
-st.set_page_config(page_title="台股每日資訊收集", layout="wide")
+st.set_page_config(page_title="TWStockAnalytics", page_icon=str(_PROJECT_ROOT / "src/assets/brand.svg"), layout="wide")
 ui.inject_css()
 
 db.init_db()
@@ -2170,6 +2170,7 @@ def _render_nav(current_id: str):
         st.session_state["tw_nav_collapsed"] = False
     collapsed = st.session_state.get("tw_nav_collapsed", False)
     with st.sidebar, st.container(key="tw_nav"):
+        ui.brand()
         for page_id, page in NAV_PAGES.items():
             active = page_id == current_id
             has_tabs = page_id in NAV_TABS
