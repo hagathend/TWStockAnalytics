@@ -90,4 +90,8 @@ def summarize_for_prompt(code: str) -> str:
             lines.append(f"營收趨勢：{revenue_note}")
     else:
         lines.append("月營收: 無資料")
+    from src.financials import summarize_for_prompt as summarize_quarterly
+
+    quarterly = summarize_quarterly(code)
+    lines.append("季度財報（毛利率、營益率為單季；金融業無毛利率）：\n" + quarterly if quarterly else "季度財報: 無資料")
     return "\n".join(lines)

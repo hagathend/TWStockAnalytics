@@ -42,7 +42,7 @@ from src.config_ai import (
 from src.config_watchlist import add_stock, add_stocks, load_watchlist, remove_stock
 from src.market_analysis import build_market_analysis_prompt, save_market_analysis
 from src.report_pdf import markdown_to_pdf
-from src import (alerts, backtest, calendar_events, desktop, fundamentals, heatmap, market_breadth, market_index, notify, portfolio,
+from src import (alerts, backtest, calendar_events, desktop, financials, fundamentals, heatmap, market_breadth, market_index, notify, portfolio,
                  ownership, predictions,
                  revenue, shareholding, signals, ui, updater)
 from src.config import IS_INSTALLED
@@ -604,6 +604,41 @@ def _render_ownership_panel(code: str):
             st.plotly_chart(ui.style_chart(fig, height=260), width="stretch", key=f"ownership_chart_{code}")
 
 
+def _render_financials_panel(code: str):
+    frame = financials.code_frame(code)
+    if frame.empty:
+        return
+    last = frame.iloc[-1]
+
+    def num(v, spec, suffix=""):
+        return "-" if v is None or pd.isna(v) else f"{v:{spec}}{suffix}"
+
+    with ui.panel("季度財報", f"最新 {last['label']}・毛利率與營益率為單季・ROE 以累計淨利年化"):
+        ui.cards([
+            {"label": f"{last['label']} 單季 EPS", "value": num(last["eps_q"], ".2f", " 元"),
+             "sub": f"累計 {num(last['eps_cum'], '.2f', ' 元')}", "tone": ui.tone_of(last["eps_q"])},
+            {"label": "近四季 EPS", "value": num(last["eps_ttm"], ".2f", " 元")},
+            {"label": "毛利率", "value": num(last["gross_margin"], ".1f", "%"),
+             "sub": f"營益率 {num(last['operating_margin'], '.1f', '%')}"},
+            {"label": "ROE（年化）", "value": num(last["roe_annualized"], ".1f", "%")},
+        ])
+        if len(frame) >= 2:
+            fig = go.Figure()
+            fig.add_bar(x=frame["label"], y=frame["eps_q"], name="單季 EPS（元）",
+                        marker_color=[ui.UP_COLOR if (v or 0) >= 0 else ui.DOWN_COLOR for v in frame["eps_q"].fillna(0)],
+                        hovertemplate="%{x}<br>單季 EPS %{y:.2f} 元<extra></extra>")
+            if frame["gross_margin"].notna().any():
+                fig.add_scatter(x=frame["label"], y=frame["gross_margin"], name="毛利率%", yaxis="y2",
+                                mode="lines+markers", line={"color": "#F5B942", "width": 2})
+            if frame["operating_margin"].notna().any():
+                fig.add_scatter(x=frame["label"], y=frame["operating_margin"], name="營益率%", yaxis="y2",
+                                mode="lines+markers", line={"color": "#A78BFA", "width": 2})
+            fig.update_layout(yaxis={"title": "元"}, yaxis2={"title": "%", "overlaying": "y", "side": "right",
+                                                            "showgrid": False})
+            fig.update_xaxes(type="category")
+            st.plotly_chart(ui.style_chart(fig, height=280), width="stretch", key=f"financials_chart_{code}")
+
+
 def _render_history_panel(code: str):
     with ui.panel("法人與融資歷史", "本地資料庫累積，每個交易日一筆"):
         tab_inst, tab_margin = st.tabs(["三大法人買賣超", "融資融券"])
@@ -696,6 +731,7 @@ def detail_page():
 
     _render_relative_strength_panel(code)
     _render_revenue_panel(code)
+    _render_financials_panel(code)
     _render_shareholding_panel(code)
     _render_ownership_panel(code)
 
@@ -1315,7 +1351,8 @@ _SCREEN_COLUMNS = {
     "vol_ma20_lots": "20日均量(張)", "pe_ratio": "本益比", "dividend_yield": "殖利率%",
     "pb_ratio": "淨值比", "yoy_pct": "營收年增%", "revenue_high_text": "營收創高", "yoy_growth_streak": "年增連續月",
     "big1000_pct": "千張大戶%", "big1000_pct_change": "大戶週增(百分點)", "foreign_pct": "外資持股%",
-    "foreign_change_20": "外資20日增(百分點)",
+    "foreign_change_20": "外資20日增(百分點)", "roe_annualized": "ROE年化%", "gross_margin": "毛利率%",
+    "eps_ttm": "近四季EPS",
     "signals": "觸發訊號",
 }
 
@@ -1352,6 +1389,11 @@ def _render_screen_tab(signal_df: pd.DataFrame):
             yield_min = f2.number_input("殖利率% ≥", min_value=0.0, value=None, step=0.5)
             pb_max = f3.number_input("淨值比 ≤", min_value=0.0, value=None, step=0.5)
             yoy_min = f4.number_input("營收年增% ≥", value=None, step=5.0)
+        with st.expander("獲利條件（季度財報）"):
+            q1, q2, q3, _ = st.columns([1, 1, 1, 1])
+            roe_min = q1.number_input("ROE（年化）% ≥", value=None, step=5.0)
+            gross_min = q2.number_input("單季毛利率% ≥", value=None, step=5.0)
+            eps_ttm_min = q3.number_input("近四季 EPS ≥（元）", value=None, step=1.0)
         with st.expander("營收條件（月營收，需累積歷史資料）"):
             r1, r2, _ = st.columns([1, 1, 2], vertical_alignment="bottom")
             revenue_high_only = r1.checkbox("營收創 12 個月新高")
@@ -1375,6 +1417,10 @@ def _render_screen_tab(signal_df: pd.DataFrame):
         result["revenue_high_text"] = result["revenue_high_12m"].map({True: "是", False: ""}).fillna("")
         result = result.merge(shareholding.latest_table()[["code", "big1000_pct", "big1000_pct_change"]], on="code", how="left")
         result = result.merge(ownership.latest_table(), on="code", how="left")
+        result = result.merge(financials.latest_table(), on="code", how="left")
+        for column, minimum in (("roe_annualized", roe_min), ("gross_margin", gross_min), ("eps_ttm", eps_ttm_min)):
+            if minimum is not None:
+                result = result[result[column].notna() & (result[column] >= minimum)]
         if foreign_change_min is not None:
             result = result[result["foreign_change_20"].notna() & (result["foreign_change_20"] >= foreign_change_min)]
         if big_min is not None:
@@ -1397,7 +1443,7 @@ def _render_screen_tab(signal_df: pd.DataFrame):
             view, signed=["漲跌%", "20日報酬%", "外資連買賣", "投信連買賣", "營收年增%", "大戶週增(百分點)", "外資20日增(百分點)"],
             thousands=["20日均量(張)", "外資連買賣", "投信連買賣", "年增連續月"],
             decimals=["收盤", "漲跌%", "20日報酬%", "本益比", "殖利率%", "淨值比", "營收年增%", "千張大戶%",
-                      "大戶週增(百分點)", "外資持股%", "外資20日增(百分點)"],
+                      "大戶週增(百分點)", "外資持股%", "外資20日增(百分點)", "ROE年化%", "毛利率%", "近四季EPS"],
         )
         table_key = f"screen_table_{st.session_state.get('screen_table_version', 0)}"
         stocks = list(zip(result["code"], result["name"]))

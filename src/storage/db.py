@@ -138,6 +138,22 @@ CREATE TABLE IF NOT EXISTS month_revenue (
     PRIMARY KEY (year_month, market, code)
 );
 
+-- 季度財報（公開資訊觀測站，年初累計值；金額千元、EPS 元）
+CREATE TABLE IF NOT EXISTS financials (
+    year INTEGER NOT NULL,
+    quarter INTEGER NOT NULL,
+    market TEXT NOT NULL,
+    code TEXT NOT NULL,
+    name TEXT,
+    revenue REAL,
+    gross_profit REAL,
+    operating_income REAL,
+    net_income REAL,
+    eps REAL,
+    equity REAL,
+    PRIMARY KEY (year, quarter, market, code)
+);
+
 -- 除權除息預告（上市 TWT48U、上櫃 tpex_exright_prepost），每天覆寫；kind：息／權／權息
 CREATE TABLE IF NOT EXISTS dividend_events (
     ex_date TEXT NOT NULL,
@@ -1181,3 +1197,31 @@ def query_dividend_events(start: str, end: str) -> list[dict]:
         cur = conn.execute("SELECT * FROM dividend_events WHERE ex_date >= ? AND ex_date <= ? ORDER BY ex_date, code",
                            (start, end))
         return [dict(r) for r in cur.fetchall()]
+
+
+def save_financials(rows: list[dict]):
+    if not rows:
+        return
+    with get_conn() as conn:
+        conn.executemany(
+            """INSERT OR REPLACE INTO financials (year, quarter, market, code, name, revenue, gross_profit,
+                   operating_income, net_income, eps, equity)
+               VALUES (:year, :quarter, :market, :code, :name, :revenue, :gross_profit, :operating_income,
+                   :net_income, :eps, :equity)""",
+            rows,
+        )
+
+
+def query_financials(code: str | None = None) -> list[dict]:
+    with get_conn() as conn:
+        if code:
+            cur = conn.execute("SELECT * FROM financials WHERE code = ? ORDER BY year, quarter", (code,))
+        else:
+            cur = conn.execute("SELECT * FROM financials ORDER BY code, year, quarter")
+        return [dict(r) for r in cur.fetchall()]
+
+
+def query_financials_counts() -> dict[tuple[int, int, str], int]:
+    with get_conn() as conn:
+        cur = conn.execute("SELECT year, quarter, market, COUNT(*) AS n FROM financials GROUP BY year, quarter, market")
+        return {(r["year"], r["quarter"], r["market"]): r["n"] for r in cur.fetchall()}

@@ -125,6 +125,20 @@ def collect_dividends() -> int:
     return len(twse) + len(tpex)
 
 
+def collect_financials() -> dict:
+    """季報：重抓最新一季（公司陸續公布，每天補上新公布的），其他缺漏季度一併補"""
+    from src import financials
+
+    try:
+        stats = financials.backfill(quarters=2, refresh_latest=True)
+    except Exception as exc:  # noqa: BLE001
+        db.log_step("季度財報", "failed", str(exc))
+        return {"filled": 0, "failed": 1}
+    status = "failed" if stats["failed"] else "success"
+    db.log_step("季度財報", status, f"更新 {stats['filled']} 份、跳過 {stats['skipped']} 份、失敗 {len(stats['failed'])} 份")
+    return {"filled": stats["filled"], "failed": len(stats["failed"])}
+
+
 def collect_shareholding() -> int:
     """集保股權分散表：每週更新一次，每天抓最新一週覆寫即可（同一週重複抓不會多存）"""
     return len(_run_step("集保股權分散表", tdcc.fetch_shareholding, db.save_shareholding))
@@ -161,6 +175,7 @@ def run_daily_collect() -> dict:
         "fundamentals": collect_fundamentals(),
         "shareholding": collect_shareholding(),
         "dividends": collect_dividends(),
+        "financials": collect_financials(),
         "ownership": collect_ownership(),
         "gap_fill": collect_recent_gaps(),
         "ownership_gap_fill": collect_ownership_gaps(),
