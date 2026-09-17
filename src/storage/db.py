@@ -1003,3 +1003,14 @@ def save_trade_review(trade_id: int, review: str):
 def query_trade_reviews() -> dict[int, dict]:
     with get_conn() as conn:
         return {r["trade_id"]: dict(r) for r in conn.execute("SELECT * FROM trade_reviews").fetchall()}
+
+
+def query_price_history(market: str = "TWSE", since: str | None = None) -> list[dict]:
+    """只讀股價表（不 join 法人融資），給只需要價量的全市場計算用，比 query_market_history 快很多"""
+    with get_conn() as conn:
+        cur = conn.execute(
+            """SELECT date, code, close, change, turnover FROM stock_price
+               WHERE market = ? AND date >= ? ORDER BY code, date""",
+            (market, since or "0000-00-00"),
+        )
+        return [dict(r) for r in cur.fetchall()]

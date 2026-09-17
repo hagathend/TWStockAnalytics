@@ -21,6 +21,7 @@ from datetime import date as _date, timedelta  # noqa: E402
 
 import pandas as pd  # noqa: E402
 import plotly.express as px  # noqa: E402
+import plotly.graph_objects as go  # noqa: E402
 import streamlit as st  # noqa: E402
 
 from src.ai_analysis import analyze_with_codex_deep, build_prompt, parse_and_save  # noqa: E402
@@ -41,7 +42,8 @@ from src.config_ai import (
 from src.config_watchlist import add_stock, add_stocks, load_watchlist, remove_stock
 from src.market_analysis import build_market_analysis_prompt, save_market_analysis
 from src.report_pdf import markdown_to_pdf
-from src import alerts, backtest, desktop, fundamentals, heatmap, notify, portfolio, predictions, shareholding, signals, ui, updater
+from src import (alerts, backtest, desktop, fundamentals, heatmap, market_breadth, notify, portfolio, predictions,
+                 shareholding, signals, ui, updater)
 from src.config import IS_INSTALLED
 from src.codex_cli import _executable as find_codex_executable
 from src.config_app import load_app_settings, save_app_settings
@@ -253,6 +255,45 @@ _INDUSTRY_COLUMNS = {
 }
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def _cached_breadth(date: str) -> pd.DataFrame:
+    return market_breadth.breadth_until(date)
+
+
+def _render_market_thermometer(selected_date: str):
+    breadth = _cached_breadth(selected_date)
+    with ui.panel("市場溫度計", "上市個股・收盤創 N 日新高／新低家數；新高多於新低代表上漲較普遍"):
+        if breadth.empty:
+            st.caption("本地資料庫沒有足夠的上市歷史資料")
+            return
+        last = breadth.iloc[-1]
+
+        def _count(value):
+            return "-" if pd.isna(value) else f"{int(value):,}"
+
+        ad = last["ad_ratio"]
+        heat = last["turnover_ma20_ratio"]
+        ui.cards([
+            {"label": "漲跌家數比", "value": "-" if pd.isna(ad) else f"{ad:.2f}",
+             "tone": "" if pd.isna(ad) else ("up" if ad > 1 else "down" if ad < 1 else ""),
+             "sub": f"上漲 {int(last['up'])}／下跌 {int(last['down'])}"},
+            {"label": "創 20 日新高", "value": _count(last["new_high_20"]), "tone": "up"},
+            {"label": "創 20 日新低", "value": _count(last["new_low_20"]), "tone": "down"},
+            {"label": "創 60 日新高／新低", "value": f"{_count(last['new_high_60'])}／{_count(last['new_low_60'])}"},
+            {"label": "成交值熱度", "value": "-" if pd.isna(heat) else f"{heat:.2f} 倍",
+             "sub": "相對前 20 日平均"},
+        ])
+        recent = breadth.dropna(subset=["new_high_20"]).tail(60)
+        if len(recent) >= 2:
+            fig = go.Figure()
+            fig.add_bar(x=recent["date"], y=recent["new_high_20"], name="創 20 日新高", marker_color=ui.UP_COLOR)
+            fig.add_bar(x=recent["date"], y=-recent["new_low_20"], name="創 20 日新低", marker_color=ui.DOWN_COLOR,
+                        customdata=recent["new_low_20"], hovertemplate="%{x}<br>創 20 日新低 %{customdata} 家<extra></extra>")
+            fig.update_layout(barmode="relative", bargap=0.15, yaxis_title="家數")
+            fig.update_xaxes(type="category", nticks=10)
+            st.plotly_chart(ui.style_chart(fig, height=280), width="stretch", key="breadth_chart")
+
+
 def _render_industry_heatmap(selected_date: str):
     with ui.panel("產業熱力圖", "方塊大小＝成交值、顏色＝漲跌幅（紅漲綠跌）・點產業可放大，點上方路徑返回"):
         col_market, _ = st.columns([1, 3])
@@ -276,6 +317,7 @@ def home_page():
     ui.page_header("市場總覽", f"{selected_date} 盤後價量、三大法人、融資融券與新聞")
 
     _market_summary_cards(selected_date)
+    _render_market_thermometer(selected_date)
     _render_industry_heatmap(selected_date)
 
     with st.container(border=True):

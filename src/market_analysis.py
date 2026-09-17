@@ -7,6 +7,7 @@
 
 from datetime import date as _date
 
+from src import market_breadth
 from src.storage import db
 
 _MARKET_ANALYSIS_PROMPT = """你是台股大盤分析助手。以下是 {date} 的大盤與市場資訊。
@@ -20,6 +21,9 @@ _MARKET_ANALYSIS_PROMPT = """你是台股大盤分析助手。以下是 {date} �
 【當日漲跌家數】（上市，不含權證）
 上漲 {up_count} 檔／下跌 {down_count} 檔／平盤 {flat_count} 檔
 
+【市場溫度計】（上市個股，程式計算；創新高／新低家數可看出上漲是普遍還是只集中在少數股票）
+{breadth_block}
+
 【今日新聞摘要】
 {news_summary}
 
@@ -31,7 +35,7 @@ _MARKET_ANALYSIS_PROMPT = """你是台股大盤分析助手。以下是 {date} �
 
 短期展望（1-2週）：
 中期展望（1-3個月）：
-籌碼分析：（大盤三大法人買賣超趨勢代表什麼意義？目前籌碼是偏多方掌控還是空方？）
+籌碼分析：（大盤三大法人買賣超與市場溫度計代表什麼意義？目前籌碼是偏多方掌控還是空方？）
 目前熱門產業和股票消息：（綜合新聞與焦點個股，總結目前市場關注的產業與個股）
 
 請直接用繁體中文條列輸出這四項，不需要輸出 JSON 格式，也不要輸出這四項以外的內容。
@@ -70,6 +74,7 @@ def build_market_analysis_prompt(date: str | None = None) -> tuple[bool, str]:
         up_count=breadth.get("up") or 0,
         down_count=breadth.get("down") or 0,
         flat_count=breadth.get("flat") or 0,
+        breadth_block=market_breadth.summarize_for_prompt(market_breadth.breadth_until(date)),
         news_summary=(ai_summary["summary"] if ai_summary else "（尚無新聞分析摘要）"),
         picks_block=_format_picks_block(picks),
     )
