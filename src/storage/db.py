@@ -138,6 +138,18 @@ CREATE TABLE IF NOT EXISTS month_revenue (
     PRIMARY KEY (year_month, market, code)
 );
 
+-- 除權除息預告（上市 TWT48U、上櫃 tpex_exright_prepost），每天覆寫；kind：息／權／權息
+CREATE TABLE IF NOT EXISTS dividend_events (
+    ex_date TEXT NOT NULL,
+    market TEXT NOT NULL,
+    code TEXT NOT NULL,
+    name TEXT,
+    kind TEXT,
+    cash_dividend REAL,
+    stock_ratio REAL,
+    PRIMARY KEY (ex_date, market, code)
+);
+
 -- 外資及陸資持股（證交所 MI_QFIIS，只存上市個股）
 CREATE TABLE IF NOT EXISTS foreign_holding (
     date TEXT NOT NULL,
@@ -1150,4 +1162,22 @@ def query_foreign_holding_changes(lag: int = 20) -> list[dict]:
                WHERE l.date = ?""",
             (base, latest),
         )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def save_dividend_events(rows: list[dict]):
+    if not rows:
+        return
+    with get_conn() as conn:
+        conn.executemany(
+            """INSERT OR REPLACE INTO dividend_events (ex_date, market, code, name, kind, cash_dividend, stock_ratio)
+               VALUES (:ex_date, :market, :code, :name, :kind, :cash_dividend, :stock_ratio)""",
+            rows,
+        )
+
+
+def query_dividend_events(start: str, end: str) -> list[dict]:
+    with get_conn() as conn:
+        cur = conn.execute("SELECT * FROM dividend_events WHERE ex_date >= ? AND ex_date <= ? ORDER BY ex_date, code",
+                           (start, end))
         return [dict(r) for r in cur.fetchall()]

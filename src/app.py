@@ -42,7 +42,7 @@ from src.config_ai import (
 from src.config_watchlist import add_stock, add_stocks, load_watchlist, remove_stock
 from src.market_analysis import build_market_analysis_prompt, save_market_analysis
 from src.report_pdf import markdown_to_pdf
-from src import (alerts, backtest, desktop, fundamentals, heatmap, market_breadth, market_index, notify, portfolio,
+from src import (alerts, backtest, calendar_events, desktop, fundamentals, heatmap, market_breadth, market_index, notify, portfolio,
                  ownership, predictions,
                  revenue, shareholding, signals, ui, updater)
 from src.config import IS_INSTALLED
@@ -1579,6 +1579,58 @@ def alerts_page():
             st.caption("還沒有觸發紀錄")
 
 
+# ─────────────────────────────── 行事曆 ───────────────────────────────
+
+_EVENT_COLUMNS = {"date": "日期", "weekday": "星期", "title": "事件", "stock": "股票", "detail": "說明", "tag": "相關"}
+_WEEKDAYS = "一二三四五六日"
+
+
+def _event_table(events: pd.DataFrame):
+    rows = events.assign(
+        weekday=events["date"].map(lambda d: _WEEKDAYS[_date.fromisoformat(d).weekday()]),
+        stock=(events["code"] + " " + events["name"]).str.strip(),
+        tag=[("持股" if h else "") + ("、" if h and w else "") + ("觀察" if w else "")
+             for h, w in zip(events["in_holdings"], events["in_watchlist"])],
+    )
+    view = rows[list(_EVENT_COLUMNS)].rename(columns=_EVENT_COLUMNS)
+    st.dataframe(view, width="stretch", hide_index=True,
+                 column_config={"說明": st.column_config.TextColumn("說明", width="large")})
+
+
+def calendar_page():
+    _render_sidebar()
+    ui.page_header("行事曆", "除權息、月營收公布期限與 AI 預測檢驗日；持股與觀察名單相關的事件排在最前面")
+
+    col_range, _ = st.columns([1, 3])
+    days = col_range.segmented_control("期間", [7, 30, 60], default=30, format_func=lambda d: f"{d} 天",
+                                       key="calendar_days") or 30
+    events = calendar_events.upcoming_events(_date.today(), days)
+    if events.empty:
+        st.info("這段期間沒有事件。除權息預告在每日收集時更新。")
+        return
+
+    mine = events[events["in_holdings"] | events["in_watchlist"]]
+    with ui.panel("我的持股與觀察名單", "除權息預估股利未扣二代健保補充保費與匯費"):
+        if mine.empty:
+            st.caption("這段期間持股與觀察名單沒有相關事件")
+        else:
+            _event_table(mine)
+
+    others = events[~(events["in_holdings"] | events["in_watchlist"]) & (events["kind"] != calendar_events.KIND_DIVIDEND)]
+    with ui.panel("其他提醒"):
+        if others.empty:
+            st.caption("沒有其他提醒")
+        else:
+            _event_table(others)
+
+    market = events[~(events["in_holdings"] | events["in_watchlist"]) & (events["kind"] == calendar_events.KIND_DIVIDEND)]
+    with ui.panel("全市場除權息", f"共 {len(market)} 檔"):
+        if market.empty:
+            st.caption("沒有其他除權息")
+        else:
+            _event_table(market)
+
+
 # ─────────────────────────────── 每日報告 ───────────────────────────────
 
 
@@ -1656,6 +1708,11 @@ def _build_report_text(date: str, include_holdings: bool = False) -> str:
             lines.append(signals.format_alerts_markdown(
                 signals.watchlist_alerts(signal_df, [p["code"] for p in positions])))
         lines.append("")
+
+    lines.append("## 未來 7 天事件")
+    lines.append(calendar_events.report_markdown(_date.fromisoformat(date) + timedelta(days=1), 7,
+                                                 include_holdings=include_holdings))
+    lines.append("")
 
     lines.append("## 個股深度分析")
     stock_analyses = db.query_stock_analysis(date)
@@ -1852,12 +1909,13 @@ PORTFOLIO_PAGE = st.Page(portfolio_page, title="我的持股")
 DETAIL_PAGE = st.Page(detail_page, title="個股詳情")
 SCREENER_PAGE = st.Page(screener_page, title="選股工具")
 ALERTS_PAGE = st.Page(alerts_page, title="條件提醒")
+CALENDAR_PAGE = st.Page(calendar_page, title="行事曆")
 AI_ANALYSIS_PAGE = st.Page(ai_analysis_page, title="AI 分析")
 REPORT_PAGE = st.Page(report_page, title="每日報告")
 AI_SETTINGS_PAGE = st.Page(ai_settings_page, title="AI 設定")
 
 if __name__ == "__main__":
-    nav = st.navigation([HOME_PAGE, PORTFOLIO_PAGE, DETAIL_PAGE, SCREENER_PAGE, ALERTS_PAGE, AI_ANALYSIS_PAGE, REPORT_PAGE,
+    nav = st.navigation([HOME_PAGE, PORTFOLIO_PAGE, DETAIL_PAGE, SCREENER_PAGE, ALERTS_PAGE, CALENDAR_PAGE, AI_ANALYSIS_PAGE, REPORT_PAGE,
                          AI_SETTINGS_PAGE, ONBOARDING_PAGE])
     nav.run()
     _render_sidebar_footer()

@@ -3,8 +3,8 @@
 from datetime import date as _date, timedelta
 
 from src import backfill
-from src.collectors import (finmind, fundamentals, news_crawler, news_rss, tdcc, twse_market, twse_official,
-                            twse_ownership)
+from src.collectors import (dividends, finmind, fundamentals, news_crawler, news_rss, tdcc, twse_market,
+                            twse_official, twse_ownership)
 from src.config import WATCHLIST
 from src.storage import db
 
@@ -118,6 +118,13 @@ def collect_ownership_gaps() -> dict:
     return {"filled": stats["filled"], "failed": len(stats["failed"])}
 
 
+def collect_dividends() -> int:
+    """除權除息預告（上市＋上櫃）"""
+    twse = _run_step("TWSE 除權息預告", dividends.fetch_twse_dividends, db.save_dividend_events)
+    tpex = _run_step("TPEx 除權息預告", dividends.fetch_tpex_dividends, db.save_dividend_events)
+    return len(twse) + len(tpex)
+
+
 def collect_shareholding() -> int:
     """集保股權分散表：每週更新一次，每天抓最新一週覆寫即可（同一週重複抓不會多存）"""
     return len(_run_step("集保股權分散表", tdcc.fetch_shareholding, db.save_shareholding))
@@ -153,6 +160,7 @@ def run_daily_collect() -> dict:
         "news": collect_news(),
         "fundamentals": collect_fundamentals(),
         "shareholding": collect_shareholding(),
+        "dividends": collect_dividends(),
         "ownership": collect_ownership(),
         "gap_fill": collect_recent_gaps(),
         "ownership_gap_fill": collect_ownership_gaps(),
