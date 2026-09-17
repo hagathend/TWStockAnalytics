@@ -41,7 +41,7 @@ from src.config_ai import (
 from src.config_watchlist import add_stock, add_stocks, load_watchlist, remove_stock
 from src.market_analysis import build_market_analysis_prompt, save_market_analysis
 from src.report_pdf import markdown_to_pdf
-from src import alerts, backtest, desktop, fundamentals, heatmap, notify, portfolio, predictions, signals, ui, updater
+from src import alerts, backtest, desktop, fundamentals, heatmap, notify, portfolio, predictions, shareholding, signals, ui, updater
 from src.config import IS_INSTALLED
 from src.codex_cli import _executable as find_codex_executable
 from src.config_app import load_app_settings, save_app_settings
@@ -414,6 +414,39 @@ def _render_chip_panel(code: str):
                 st.text(summarize_chip_metrics(metrics))
 
 
+def _render_shareholding_panel(code: str):
+    summary = shareholding.code_summary(code)
+    with ui.panel("股權分散（集保）", f"每週資料・{summary['date']}・已累積 {summary['weeks']} 週" if summary else "每週資料"):
+        if not summary:
+            st.caption("尚無集保股權分散資料（每日收集時會抓最新一週）")
+            return
+
+        def _pp(value):
+            return None if value is None else f"週變化 {value:+.2f} 個百分點"
+
+        holders_change = summary.get("holders_change_pct")
+        ui.cards([
+            {"label": "千張以上大戶", "value": f"{summary['big1000_pct']:.2f}%",
+             "sub": _pp(summary["big1000_pct_change"]), "sub_tone": ui.tone_of(summary["big1000_pct_change"])},
+            {"label": "400 張以上大戶", "value": f"{summary['big400_pct']:.2f}%",
+             "sub": _pp(summary["big400_pct_change"]), "sub_tone": ui.tone_of(summary["big400_pct_change"])},
+            {"label": "50 張以下散戶", "value": f"{summary['retail_pct']:.2f}%",
+             "sub": _pp(summary["retail_pct_change"])},
+            {"label": "總股東人數", "value": f"{summary['total_holders']:,}" if summary.get("total_holders") else "-",
+             "sub": None if holders_change is None else f"週變化 {holders_change:+.2f}%"},
+        ])
+        history = db.query_shareholding_history(code)
+        if len(history) >= 2:
+            df = pd.DataFrame(history)
+            fig = px.line(df, x="date", y=["big1000_pct", "big400_pct"], markers=True,
+                          labels={"value": "持股比例%", "date": "", "variable": ""},
+                          color_discrete_sequence=[ui.UP_COLOR, "#F5B942"])
+            fig.for_each_trace(lambda t: t.update(name={"big1000_pct": "千張以上", "big400_pct": "400 張以上"}[t.name]))
+            st.plotly_chart(ui.style_chart(fig, height=260), width="stretch")
+        else:
+            st.caption("累積兩週以上資料後會顯示大戶持股趨勢圖")
+
+
 def _render_fundamentals_panel(code: str):
     data = db.query_code_fundamentals(code)
     valuation, revenue = data["valuation"], data["revenue"]
@@ -530,6 +563,8 @@ def detail_page():
         _render_chip_panel(code)
     with col_fund:
         _render_fundamentals_panel(code)
+
+    _render_shareholding_panel(code)
 
     _render_history_panel(code)
 
@@ -1039,7 +1074,8 @@ _SCREEN_COLUMNS = {
     "return_20d": "20日報酬%", "rs_rank_pct": "相對強弱",
     "foreign_streak": "外資連買賣", "trust_streak": "投信連買賣",
     "vol_ma20_lots": "20日均量(張)", "pe_ratio": "本益比", "dividend_yield": "殖利率%",
-    "pb_ratio": "淨值比", "yoy_pct": "營收年增%", "signals": "觸發訊號",
+    "pb_ratio": "淨值比", "yoy_pct": "營收年增%", "big1000_pct": "千張大戶%", "big1000_pct_change": "大戶週增(百分點)",
+    "signals": "觸發訊號",
 }
 
 
@@ -1075,11 +1111,22 @@ def _render_screen_tab(signal_df: pd.DataFrame):
             yield_min = f2.number_input("殖利率% ≥", min_value=0.0, value=None, step=0.5)
             pb_max = f3.number_input("淨值比 ≤", min_value=0.0, value=None, step=0.5)
             yoy_min = f4.number_input("營收年增% ≥", value=None, step=5.0)
+        with st.expander("籌碼集中條件（集保股權分散，每週資料）"):
+            s1, s2, _ = st.columns([1, 1, 2])
+            big_min = s1.number_input("千張大戶持股% ≥", min_value=0.0, max_value=100.0, value=None, step=5.0)
+            big_change_min = s2.number_input("大戶週增 ≥（百分點）", value=None, step=0.1, format="%.2f")
 
     result = signals.screen(signal_df, [labels[c] for c in chosen], min_avg_volume_lots=min_lots,
                             mode="all" if mode == "全部符合" else "any")
     result = fundamentals.attach_fundamentals(result, fundamentals.latest_fundamentals())
     result = fundamentals.apply_filters(result, pe_max=pe_max, yield_min=yield_min, pb_max=pb_max, yoy_min=yoy_min)
+    if not result.empty:
+        result = result.merge(shareholding.latest_table()[["code", "big1000_pct", "big1000_pct_change"]], on="code", how="left")
+        if big_min is not None:
+            result = result[result["big1000_pct"].notna() & (result["big1000_pct"] >= big_min)]
+        if big_change_min is not None:
+            result = result[result["big1000_pct_change"].notna() & (result["big1000_pct_change"] >= big_change_min)]
+        result = result.reset_index(drop=True)
 
     with ui.panel("篩選結果", f"符合 {len(result)} 檔・依相對強弱排序・勾選後可加入觀察名單"):
         notice = st.session_state.pop("screen_notice", None)
@@ -1092,9 +1139,10 @@ def _render_screen_tab(signal_df: pd.DataFrame):
         result["vol_ma20_lots"] = (result["vol_ma20"] / 1000).round(0)
         view = result[list(_SCREEN_COLUMNS)].rename(columns=_SCREEN_COLUMNS)
         styler = _styled_table(
-            view, signed=["漲跌%", "20日報酬%", "外資連買賣", "投信連買賣", "營收年增%"],
+            view, signed=["漲跌%", "20日報酬%", "外資連買賣", "投信連買賣", "營收年增%", "大戶週增(百分點)"],
             thousands=["20日均量(張)", "外資連買賣", "投信連買賣"],
-            decimals=["收盤", "漲跌%", "20日報酬%", "本益比", "殖利率%", "淨值比", "營收年增%"],
+            decimals=["收盤", "漲跌%", "20日報酬%", "本益比", "殖利率%", "淨值比", "營收年增%", "千張大戶%",
+                      "大戶週增(百分點)"],
         )
         table_key = f"screen_table_{st.session_state.get('screen_table_version', 0)}"
         stocks = list(zip(result["code"], result["name"]))

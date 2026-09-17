@@ -138,6 +138,17 @@ CREATE TABLE IF NOT EXISTS month_revenue (
     PRIMARY KEY (year_month, market, code)
 );
 
+-- 集保戶股權分散表（每週）：level 1–15 為持股分級、17 為合計；來源只有最新一週，歷史靠累積
+CREATE TABLE IF NOT EXISTS shareholding (
+    date TEXT NOT NULL,
+    code TEXT NOT NULL,
+    level INTEGER NOT NULL,
+    holders INTEGER,
+    shares INTEGER,
+    pct REAL,
+    PRIMARY KEY (date, code, level)
+);
+
 -- 條件提醒：規則與觸發紀錄。同一規則、同一檔、同一資料日期只記一次（避免重複通知）
 CREATE TABLE IF NOT EXISTS alert_rules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -855,4 +866,49 @@ def save_alert_event(rule_id: int, event: dict) -> bool:
 def query_alert_events(limit: int = 100) -> list[dict]:
     with get_conn() as conn:
         cur = conn.execute("SELECT * FROM alert_events ORDER BY date DESC, id DESC LIMIT ?", (limit,))
+        return [dict(r) for r in cur.fetchall()]
+
+
+def save_shareholding(rows: list[dict]):
+    if not rows:
+        return
+    with get_conn() as conn:
+        conn.executemany(
+            """INSERT OR REPLACE INTO shareholding (date, code, level, holders, shares, pct)
+               VALUES (:date, :code, :level, :holders, :shares, :pct)""",
+            rows,
+        )
+
+
+# 集保分級 → 指標：千張以上＝第 15 級；400 張以上＝12–15 級；50 張以下散戶＝1–8 級；總人數＝第 17 級
+_SHAREHOLDING_SUMMARY_SQL = """
+    SELECT date, code,
+           SUM(CASE WHEN level = 15 THEN pct END) AS big1000_pct,
+           SUM(CASE WHEN level BETWEEN 12 AND 15 THEN pct END) AS big400_pct,
+           SUM(CASE WHEN level BETWEEN 1 AND 8 THEN pct END) AS retail_pct,
+           SUM(CASE WHEN level = 15 THEN holders END) AS big1000_holders,
+           SUM(CASE WHEN level = 17 THEN holders END) AS total_holders
+    FROM shareholding
+"""
+
+
+def query_shareholding_history(code: str, limit: int = 52) -> list[dict]:
+    """單一股票每週的股權分散指標（由舊到新）"""
+    with get_conn() as conn:
+        cur = conn.execute(
+            _SHAREHOLDING_SUMMARY_SQL + " WHERE code = ? GROUP BY date, code ORDER BY date DESC LIMIT ?",
+            (code, limit),
+        )
+        return list(reversed([dict(r) for r in cur.fetchall()]))
+
+
+def query_shareholding_dates() -> list[str]:
+    with get_conn() as conn:
+        return [r["date"] for r in conn.execute("SELECT DISTINCT date FROM shareholding ORDER BY date").fetchall()]
+
+
+def query_shareholding_on(date: str) -> list[dict]:
+    """某一週全部個股的股權分散指標"""
+    with get_conn() as conn:
+        cur = conn.execute(_SHAREHOLDING_SUMMARY_SQL + " WHERE date = ? GROUP BY date, code", (date,))
         return [dict(r) for r in cur.fetchall()]
