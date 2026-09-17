@@ -138,6 +138,21 @@ CREATE TABLE IF NOT EXISTS month_revenue (
     PRIMARY KEY (year_month, market, code)
 );
 
+-- 期貨三大法人（期交所，臺股期貨 TXF）；identity：foreign／trust／dealer；口數
+CREATE TABLE IF NOT EXISTS futures_institutional (
+    date TEXT NOT NULL,
+    commodity TEXT NOT NULL,
+    identity TEXT NOT NULL,
+    long_trade INTEGER,
+    short_trade INTEGER,
+    net_trade INTEGER,
+    long_oi INTEGER,
+    short_oi INTEGER,
+    net_oi INTEGER,
+    net_oi_value INTEGER,
+    PRIMARY KEY (date, commodity, identity)
+);
+
 -- 季度財報（公開資訊觀測站，年初累計值；金額千元、EPS 元）
 CREATE TABLE IF NOT EXISTS financials (
     year INTEGER NOT NULL,
@@ -1249,3 +1264,34 @@ def query_valuation_pe_all(market: str, since: str) -> list[dict]:
         cur = conn.execute("SELECT date, code, pe_ratio AS pe FROM valuation WHERE market = ? AND date >= ?",
                            (market, since))
         return [dict(r) for r in cur.fetchall()]
+
+
+def save_futures_institutional(rows: list[dict]):
+    if not rows:
+        return
+    with get_conn() as conn:
+        conn.executemany(
+            """INSERT OR REPLACE INTO futures_institutional (date, commodity, identity, long_trade, short_trade, net_trade,
+                   long_oi, short_oi, net_oi, net_oi_value)
+               VALUES (:date, :commodity, :identity, :long_trade, :short_trade, :net_trade, :long_oi, :short_oi,
+                   :net_oi, :net_oi_value)""",
+            rows,
+        )
+
+
+def query_futures_institutional(start: str, end: str, commodity: str = "TXF") -> list[dict]:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "SELECT * FROM futures_institutional WHERE commodity = ? AND date >= ? AND date <= ? ORDER BY date",
+            (commodity, start, end),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def query_futures_month_counts(commodity: str = "TXF") -> dict[str, int]:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "SELECT substr(date, 1, 7) AS ym, COUNT(DISTINCT date) AS n FROM futures_institutional WHERE commodity = ? GROUP BY ym",
+            (commodity,),
+        )
+        return {r["ym"]: r["n"] for r in cur.fetchall()}

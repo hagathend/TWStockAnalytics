@@ -69,14 +69,19 @@ AI 回覆通常一行一個重點，但 CommonMark 規則裡單一 `\n` 會被�
 
 ```
 src/
-├── app.py                 Streamlit 入口（市場總覽／我的持股／個股詳情／選股工具／AI 分析／每日報告／AI 設定／開始使用）
+├── app.py                 Streamlit 入口（市場總覽／我的持股／個股詳情／選股工具／條件提醒／行事曆／AI 分析／每日報告／AI 設定／開始使用）
 ├── ui.py                  共用樣式元件（頁首、面板、卡片、標籤、紅漲綠跌）
 ├── codex_cli.py           Codex CLI 非互動呼叫、登入檢查、JSON Schema
 ├── ai_analysis.py         新聞深度分析：抓內文→逐篇摘要→分批挑股（Codex；Ollama 函式保留未使用）
 ├── stock_analysis.py      個股分析提示詞（技術＋籌碼＋基本面＋持股）
 ├── market_analysis.py     大盤籌碼分析提示詞
 ├── indicators.py / chip_metrics.py / signals.py / backtest.py / fundamentals.py   程式計算的指標、訊號、回測
-├── portfolio.py           我的持股損益
+├── portfolio.py           交易紀錄重播：平均成本、稅費、未實現／已實現損益、覆盤提示詞
+├── predictions.py         AI 預測追蹤（解析「預測摘要」→ 5／10 日後檢驗）
+├── alerts.py / notify.py  條件提醒與 Windows 通知；calendar_events.py 行事曆
+├── market_breadth.py / market_index.py / heatmap.py / futures.py   市場溫度計、加權指數與相對強弱、產業熱力圖、期貨法人
+├── revenue.py / financials.py / pe_river.py   月營收趨勢、季度財報、本益比河流圖
+├── shareholding.py / ownership.py / price_levels.py   千張大戶、外資持股與借券、支撐壓力與成交量密集區
 ├── charting.py            個股 K 線圖（plotly + FinMind）
 ├── report_pdf.py          報告 Markdown → PDF（Playwright）
 ├── collect_all.py         每日收集流程；backfill.py 歷史補收集
@@ -85,7 +90,8 @@ src/
 ├── config.py / config_ai.py / config_app.py / config_watchlist.py   設定讀寫；version.py 版本號
 ├── ai_providers.py        舊的 Ollama／雲端 API 封裝（已停用，保留程式碼）
 ├── collectors/            twse_official（TWSE rwd + TPEx）、fundamentals、finmind、news_crawler、news_rss、
-│                          firecrawl_fetcher、article_fetcher
+│                          firecrawl_fetcher、article_fetcher、twse_market（加權指數）、twse_ownership（外資持股／借券）、
+│                          dividends、tdcc（集保股權分散）、mops_revenue／mops_financials（公開資訊觀測站舊站）、taifex
 └── storage/db.py          SQLite 全部讀寫
 scripts/                   run_daily_collect.py（排程呼叫）、backfill_history.py、migrate_to_installed.py
 launcher.pyw               安裝版啟動器；packaging/ 安裝程式打包；start_ui.bat 開發用啟動
@@ -120,6 +126,15 @@ AI 新聞分析（Codex CLI，收集後自動觸發）：
 | `market_analysis` | date | 大盤籌碼分析（Codex 或手動貼回） |
 | `valuation` / `month_revenue` | date or year_month+market+code | 本益比等估值／月營收 |
 | `trades` / `trade_reviews` | id / trade_id | 交易紀錄與 AI 覆盤（`holdings` 為舊表，已轉入 trades） |
+| `app_meta` | key | 一次性遷移旗標 |
+| `predictions` | id | AI 個股分析的方向與支撐壓力，事後檢驗結果 |
+| `alert_rules` / `alert_events` | id | 條件提醒規則／觸發紀錄（同規則同股同日只記一次） |
+| `market_index` | date | 加權指數 |
+| `shareholding` | date+code+level | 集保股權分散（每週） |
+| `foreign_holding` / `sbl_short` | date+code | 外資持股比例／借券賣出餘額（上市） |
+| `dividend_events` | ex_date+market+code | 除權息預告 |
+| `financials` | year+quarter+market+code | 季報（年初累計值，單季值由 `financials.py` 相減） |
+| `futures_institutional` | date+commodity+identity | 台指期三大法人交易與未平倉口數 |
 | `trading_calendar` | date+market | 補收集時記住的非交易日 |
 | `collect_log` | id | 每步驟成功/失敗紀錄，debug 收集問題先看這裡 |
 

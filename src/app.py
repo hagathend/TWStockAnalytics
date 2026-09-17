@@ -42,7 +42,7 @@ from src.config_ai import (
 from src.config_watchlist import add_stock, add_stocks, load_watchlist, remove_stock
 from src.market_analysis import build_market_analysis_prompt, save_market_analysis
 from src.report_pdf import markdown_to_pdf
-from src import (alerts, backtest, calendar_events, desktop, financials, pe_river, fundamentals, heatmap, market_breadth, market_index, notify, portfolio,
+from src import (alerts, backtest, calendar_events, desktop, financials, futures, pe_river, fundamentals, heatmap, market_breadth, market_index, notify, portfolio,
                  ownership, predictions,
                  revenue, shareholding, signals, ui, updater)
 from src.config import IS_INSTALLED
@@ -300,6 +300,37 @@ def _render_market_thermometer(selected_date: str):
             st.plotly_chart(ui.style_chart(fig, height=280), width="stretch", key="breadth_chart")
 
 
+def _render_futures_panel(selected_date: str):
+    frame = futures.net_oi_frame(selected_date)
+    summary = futures.summary(selected_date)
+    if frame.empty or not summary:
+        return
+    with ui.panel("期貨三大法人未平倉", f"臺股期貨多空未平倉口數淨額（{summary['date']}）・正＝淨多單、負＝淨空單；"
+                                   "期貨部位也可能是現貨的避險"):
+        cards = []
+        for key, label in futures.IDENTITY_LABELS.items():
+            value = summary[key]
+            if value is None:
+                continue
+            day, week = summary[f"{key}_change_1"], summary[f"{key}_change_5"]
+            sub = "較前一日 " + ("-" if day is None else f"{day:+,}") + "・5 日 " + ("-" if week is None else f"{week:+,}")
+            cards.append({"label": label, "value": f"{value:+,} 口", "tone": ui.tone_of(value),
+                          "sub": sub, "sub_tone": ui.tone_of(day or 0)})
+        ui.cards(cards)
+        recent = frame.tail(60)
+        if len(recent) >= 2:
+            fig = go.Figure()
+            colors = {"foreign": ui.ACCENT_COLOR, "trust": "#e0a84f", "dealer": "#8792a6"}
+            for key, label in futures.IDENTITY_LABELS.items():
+                fig.add_scatter(x=recent["date"], y=recent[key], mode="lines", name=label,
+                                line={"color": colors[key], "width": 2.2 if key == "foreign" else 1.5},
+                                hovertemplate=f"%{{x}}<br>{label} %{{y:+,}} 口<extra></extra>")
+            fig.add_hline(y=0, line={"color": "rgba(201, 209, 222, 0.35)", "width": 1})
+            fig.update_layout(yaxis_title="淨未平倉口數")
+            fig.update_xaxes(type="category", nticks=10)
+            st.plotly_chart(ui.style_chart(fig, height=280), width="stretch", key="futures_oi_chart")
+
+
 def _render_industry_heatmap(selected_date: str):
     with ui.panel("產業熱力圖", "方塊大小＝成交值、顏色＝漲跌幅（紅漲綠跌）・點產業可放大，點上方路徑返回"):
         col_market, _ = st.columns([1, 3])
@@ -324,6 +355,7 @@ def home_page():
 
     _market_summary_cards(selected_date)
     _render_market_thermometer(selected_date)
+    _render_futures_panel(selected_date)
     _render_industry_heatmap(selected_date)
 
     with st.container(border=True):

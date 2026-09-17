@@ -96,6 +96,13 @@ def collect_market_index() -> int:
     return len(_run_step("TWSE 加權指數", twse_market.fetch_current_month, db.save_market_index))
 
 
+def collect_futures() -> int:
+    """期交所台指期三大法人（抓近兩週覆寫，順便補漏收集的日子）"""
+    from src import futures  # 延遲匯入：futures 會載入 pandas
+
+    return len(_run_step("期交所 台指期三大法人", futures.collect_recent))
+
+
 def collect_ownership() -> dict:
     """外資持股比例與借券賣出餘額（上市，每日）"""
     foreign = _run_step("TWSE 外資持股", twse_ownership.fetch_foreign_holding, db.save_foreign_holding)
@@ -177,6 +184,7 @@ def run_daily_collect() -> dict:
         "dividends": collect_dividends(),
         "financials": collect_financials(),
         "ownership": collect_ownership(),
+        "futures": collect_futures(),
         "gap_fill": collect_recent_gaps(),
         "ownership_gap_fill": collect_ownership_gaps(),
     }
