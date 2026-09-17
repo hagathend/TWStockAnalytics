@@ -3,7 +3,8 @@
 from datetime import date as _date, timedelta
 
 from src import backfill
-from src.collectors import finmind, fundamentals, news_crawler, news_rss, tdcc, twse_market, twse_official
+from src.collectors import (finmind, fundamentals, news_crawler, news_rss, tdcc, twse_market, twse_official,
+                            twse_ownership)
 from src.config import WATCHLIST
 from src.storage import db
 
@@ -95,6 +96,28 @@ def collect_market_index() -> int:
     return len(_run_step("TWSE 加權指數", twse_market.fetch_current_month, db.save_market_index))
 
 
+def collect_ownership() -> dict:
+    """外資持股比例與借券賣出餘額（上市，每日）"""
+    foreign = _run_step("TWSE 外資持股", twse_ownership.fetch_foreign_holding, db.save_foreign_holding)
+    sbl = _run_step("TWSE 借券賣出", twse_ownership.fetch_sbl, db.save_sbl_short)
+    return {"foreign": len(foreign), "sbl": len(sbl)}
+
+
+def collect_ownership_gaps() -> dict:
+    """補最近兩週漏掉的外資持股／借券資料（已有的日期不會重抓）"""
+    from src import ownership
+
+    try:
+        stats = ownership.backfill(days=14)
+    except Exception as exc:  # noqa: BLE001
+        db.log_step("自動補齊外資持股與借券", "failed", str(exc))
+        return {"filled": 0, "failed": 1}
+    status = "failed" if stats["failed"] else "success"
+    detail = f"補齊 {stats['filled']} 份、失敗 {len(stats['failed'])} 份" if stats["filled"] or stats["failed"] else "近期無缺漏"
+    db.log_step("自動補齊外資持股與借券", status, detail)
+    return {"filled": stats["filled"], "failed": len(stats["failed"])}
+
+
 def collect_shareholding() -> int:
     """集保股權分散表：每週更新一次，每天抓最新一週覆寫即可（同一週重複抓不會多存）"""
     return len(_run_step("集保股權分散表", tdcc.fetch_shareholding, db.save_shareholding))
@@ -130,7 +153,9 @@ def run_daily_collect() -> dict:
         "news": collect_news(),
         "fundamentals": collect_fundamentals(),
         "shareholding": collect_shareholding(),
+        "ownership": collect_ownership(),
         "gap_fill": collect_recent_gaps(),
+        "ownership_gap_fill": collect_ownership_gaps(),
     }
     result["alerts"] = check_alerts_step()
     return result

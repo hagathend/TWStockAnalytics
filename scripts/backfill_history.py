@@ -17,7 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", line_buffering=True)
 
-from src import market_index, revenue  # noqa: E402
+from src import market_index, ownership, revenue  # noqa: E402
 from src.backfill import DEFAULT_SLEEP_SECONDS, backfill_twse  # noqa: E402
 
 if __name__ == "__main__":
@@ -34,6 +34,10 @@ if __name__ == "__main__":
     print(f"補收集範圍: {start} ~ {end}（間隔 {args.sleep} 秒）")
 
     stats = backfill_twse(start, end, sleep_seconds=args.sleep, progress=print)
+
+    print(f"\n補收集外資持股與借券賣出：近 {args.days} 天")
+    ownership_stats = ownership.backfill(args.days, progress=print, sleep_seconds=args.sleep)
+    stats["failed"] += ownership_stats["failed"]
 
     print("\n補收集加權指數：近 24 個月")
     index_stats = market_index.backfill(24, progress=print)

@@ -43,7 +43,7 @@ from src.config_watchlist import add_stock, add_stocks, load_watchlist, remove_s
 from src.market_analysis import build_market_analysis_prompt, save_market_analysis
 from src.report_pdf import markdown_to_pdf
 from src import (alerts, backtest, desktop, fundamentals, heatmap, market_breadth, market_index, notify, portfolio,
-                 predictions,
+                 ownership, predictions,
                  revenue, shareholding, signals, ui, updater)
 from src.config import IS_INSTALLED
 from src.codex_cli import _executable as find_codex_executable
@@ -565,6 +565,45 @@ def _render_relative_strength_panel(code: str):
         st.plotly_chart(ui.style_chart(fig, height=260), width="stretch", key=f"rs_chart_{code}")
 
 
+def _render_ownership_panel(code: str):
+    summary = ownership.code_summary(code)
+    if not summary:
+        return
+    with ui.panel("外資持股與借券賣出", "證交所每日資料・上市股"):
+        def _pp(value):
+            return None if value is None else f"20 日 {value:+.2f} 個百分點"
+
+        items = []
+        if summary["foreign_pct"] is not None:
+            items.append({"label": "外資持股比例", "value": f"{summary['foreign_pct']:.2f}%",
+                          "sub": _pp(summary["foreign_change_20"]), "sub_tone": ui.tone_of(summary["foreign_change_20"])})
+        if summary["sbl_lots"] is not None:
+            change = summary["sbl_change_20"]
+            items.append({"label": "借券賣出餘額", "value": f"{summary['sbl_lots']:,.0f} 張",
+                          "sub": None if change is None else f"20 日 {change:+,.0f} 張",
+                          # 借券賣出增加是潛在賣壓，顏色刻意反過來：增加顯示綠色
+                          "sub_tone": None if change is None else ("down" if change > 0 else "up" if change < 0 else "")})
+            if summary["sbl_days_of_volume"] is not None:
+                items.append({"label": "借券餘額相當成交量", "value": f"{summary['sbl_days_of_volume']:.1f} 天",
+                              "sub": "餘額 ÷ 20 日平均成交量"})
+        ui.cards(items)
+
+        foreign, sbl = summary["foreign"], summary["sbl"]
+        if len(foreign) >= 2 or len(sbl) >= 2:
+            fig = go.Figure()
+            if len(sbl) >= 2:
+                fig.add_bar(x=sbl["date"], y=sbl["balance"] / 1000, name="借券賣出餘額（張）", marker_color="#3A4A66",
+                            hovertemplate="%{x}<br>借券賣出餘額 %{y:,.0f} 張<extra></extra>")
+            if len(foreign) >= 2:
+                fig.add_scatter(x=foreign["date"], y=foreign["foreign_pct"], name="外資持股比例%", yaxis="y2",
+                                mode="lines", line={"color": "#F5B942", "width": 2},
+                                hovertemplate="%{x}<br>外資持股 %{y:.2f}%<extra></extra>")
+            fig.update_layout(yaxis={"title": "張"}, yaxis2={"title": "%", "overlaying": "y", "side": "right",
+                                                            "showgrid": False})
+            fig.update_xaxes(type="category", nticks=8)
+            st.plotly_chart(ui.style_chart(fig, height=260), width="stretch", key=f"ownership_chart_{code}")
+
+
 def _render_history_panel(code: str):
     with ui.panel("法人與融資歷史", "本地資料庫累積，每個交易日一筆"):
         tab_inst, tab_margin = st.tabs(["三大法人買賣超", "融資融券"])
@@ -658,6 +697,7 @@ def detail_page():
     _render_relative_strength_panel(code)
     _render_revenue_panel(code)
     _render_shareholding_panel(code)
+    _render_ownership_panel(code)
 
     _render_history_panel(code)
 
@@ -1274,7 +1314,8 @@ _SCREEN_COLUMNS = {
     "foreign_streak": "外資連買賣", "trust_streak": "投信連買賣",
     "vol_ma20_lots": "20日均量(張)", "pe_ratio": "本益比", "dividend_yield": "殖利率%",
     "pb_ratio": "淨值比", "yoy_pct": "營收年增%", "revenue_high_text": "營收創高", "yoy_growth_streak": "年增連續月",
-    "big1000_pct": "千張大戶%", "big1000_pct_change": "大戶週增(百分點)",
+    "big1000_pct": "千張大戶%", "big1000_pct_change": "大戶週增(百分點)", "foreign_pct": "外資持股%",
+    "foreign_change_20": "外資20日增(百分點)",
     "signals": "觸發訊號",
 }
 
@@ -1316,9 +1357,10 @@ def _render_screen_tab(signal_df: pd.DataFrame):
             revenue_high_only = r1.checkbox("營收創 12 個月新高")
             yoy_streak_min = r2.number_input("年增率連續成長 ≥（月）", min_value=0, value=0, step=1)
         with st.expander("籌碼集中條件（集保股權分散，每週資料）"):
-            s1, s2, _ = st.columns([1, 1, 2])
+            s1, s2, s3, _ = st.columns([1, 1, 1, 1])
             big_min = s1.number_input("千張大戶持股% ≥", min_value=0.0, max_value=100.0, value=None, step=5.0)
             big_change_min = s2.number_input("大戶週增 ≥（百分點）", value=None, step=0.1, format="%.2f")
+            foreign_change_min = s3.number_input("外資持股 20 日增 ≥（百分點）", value=None, step=0.5, format="%.2f")
 
     result = signals.screen(signal_df, [labels[c] for c in chosen], min_avg_volume_lots=min_lots,
                             mode="all" if mode == "全部符合" else "any")
@@ -1332,6 +1374,9 @@ def _render_screen_tab(signal_df: pd.DataFrame):
             result = result[result["yoy_growth_streak"].fillna(0) >= yoy_streak_min]
         result["revenue_high_text"] = result["revenue_high_12m"].map({True: "是", False: ""}).fillna("")
         result = result.merge(shareholding.latest_table()[["code", "big1000_pct", "big1000_pct_change"]], on="code", how="left")
+        result = result.merge(ownership.latest_table(), on="code", how="left")
+        if foreign_change_min is not None:
+            result = result[result["foreign_change_20"].notna() & (result["foreign_change_20"] >= foreign_change_min)]
         if big_min is not None:
             result = result[result["big1000_pct"].notna() & (result["big1000_pct"] >= big_min)]
         if big_change_min is not None:
@@ -1349,10 +1394,10 @@ def _render_screen_tab(signal_df: pd.DataFrame):
         result["vol_ma20_lots"] = (result["vol_ma20"] / 1000).round(0)
         view = result[list(_SCREEN_COLUMNS)].rename(columns=_SCREEN_COLUMNS)
         styler = _styled_table(
-            view, signed=["漲跌%", "20日報酬%", "外資連買賣", "投信連買賣", "營收年增%", "大戶週增(百分點)"],
+            view, signed=["漲跌%", "20日報酬%", "外資連買賣", "投信連買賣", "營收年增%", "大戶週增(百分點)", "外資20日增(百分點)"],
             thousands=["20日均量(張)", "外資連買賣", "投信連買賣", "年增連續月"],
             decimals=["收盤", "漲跌%", "20日報酬%", "本益比", "殖利率%", "淨值比", "營收年增%", "千張大戶%",
-                      "大戶週增(百分點)"],
+                      "大戶週增(百分點)", "外資持股%", "外資20日增(百分點)"],
         )
         table_key = f"screen_table_{st.session_state.get('screen_table_version', 0)}"
         stocks = list(zip(result["code"], result["name"]))

@@ -16,6 +16,7 @@ from src.collectors import finmind
 from src.fundamentals import summarize_for_prompt as summarize_fundamentals
 from src.portfolio import summarize_for_prompt as summarize_holding
 from src.market_index import stock_prompt_block as summarize_relative_strength
+from src.ownership import summarize_for_prompt as summarize_ownership
 from src.predictions import record_from_analysis
 from src.shareholding import summarize_for_prompt as summarize_shareholding
 from src.indicators import (
@@ -39,6 +40,9 @@ _STOCK_ANALYSIS_PROMPT = """你是台股個股分析助手。以下是 {code} {n
 
 【籌碼延伸指標】（由程式依本地累積的法人／融資歷史計算，非估算值）
 {chip_block}
+
+【外資持股與借券賣出】（證交所每日資料；借券賣出餘額增加代表潛在賣壓，大幅減少可能是回補）
+{ownership_block}
 
 【基本面】（本益比／殖利率／淨值比與月營收，官方公開資料；營收年增率已由來源計算）
 {fundamental_block}
@@ -217,6 +221,7 @@ def build_stock_analysis_prompt(code: str) -> str:
         indicator_block=_format_indicators(price_rows),
         chip_block=summarize_chip_metrics(metrics_for_code(code)),
         relative_block=summarize_relative_strength(code),
+        ownership_block=summarize_ownership(code),
         fundamental_block=summarize_fundamentals(code),
         shareholding_block=summarize_shareholding(code),
         price_block=_format_price_history(price_rows),

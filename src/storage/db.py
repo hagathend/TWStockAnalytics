@@ -138,6 +138,32 @@ CREATE TABLE IF NOT EXISTS month_revenue (
     PRIMARY KEY (year_month, market, code)
 );
 
+-- 外資及陸資持股（證交所 MI_QFIIS，只存上市個股）
+CREATE TABLE IF NOT EXISTS foreign_holding (
+    date TEXT NOT NULL,
+    code TEXT NOT NULL,
+    name TEXT,
+    issued_shares INTEGER,
+    foreign_shares INTEGER,
+    foreign_pct REAL,
+    foreign_limit_pct REAL,
+    PRIMARY KEY (date, code)
+);
+
+-- 借券賣出餘額（證交所 TWT93U 後半段，只存上市個股；股數）
+CREATE TABLE IF NOT EXISTS sbl_short (
+    date TEXT NOT NULL,
+    code TEXT NOT NULL,
+    name TEXT,
+    prev_balance INTEGER,
+    sold INTEGER,
+    returned INTEGER,
+    adjusted INTEGER,
+    balance INTEGER,
+    next_limit INTEGER,
+    PRIMARY KEY (date, code)
+);
+
 -- 加權指數與整體市場成交（證交所 FMTQIK，每日一列）
 CREATE TABLE IF NOT EXISTS market_index (
     date TEXT PRIMARY KEY,
@@ -1064,3 +1090,64 @@ def query_market_index_month_counts() -> dict[str, int]:
     with get_conn() as conn:
         cur = conn.execute("SELECT substr(date, 1, 7) AS ym, COUNT(*) AS n FROM market_index GROUP BY ym")
         return {r["ym"]: r["n"] for r in cur.fetchall()}
+
+
+def save_foreign_holding(rows: list[dict]):
+    if not rows:
+        return
+    with get_conn() as conn:
+        conn.executemany(
+            """INSERT OR REPLACE INTO foreign_holding (date, code, name, issued_shares, foreign_shares, foreign_pct, foreign_limit_pct)
+               VALUES (:date, :code, :name, :issued_shares, :foreign_shares, :foreign_pct, :foreign_limit_pct)""",
+            rows,
+        )
+
+
+def save_sbl_short(rows: list[dict]):
+    if not rows:
+        return
+    with get_conn() as conn:
+        conn.executemany(
+            """INSERT OR REPLACE INTO sbl_short (date, code, name, prev_balance, sold, returned, adjusted, balance, next_limit)
+               VALUES (:date, :code, :name, :prev_balance, :sold, :returned, :adjusted, :balance, :next_limit)""",
+            rows,
+        )
+
+
+def query_dates_in(table: str) -> set[str]:
+    if table not in ("foreign_holding", "sbl_short"):
+        raise ValueError(f"不支援的表格: {table}")
+    with get_conn() as conn:
+        return {r["date"] for r in conn.execute(f"SELECT DISTINCT date FROM {table}").fetchall()}
+
+
+def query_foreign_holding_history(code: str, since: str) -> list[dict]:
+    with get_conn() as conn:
+        cur = conn.execute("SELECT date, foreign_pct, foreign_shares FROM foreign_holding WHERE code = ? AND date >= ? ORDER BY date",
+                           (code, since))
+        return [dict(r) for r in cur.fetchall()]
+
+
+def query_sbl_history(code: str, since: str) -> list[dict]:
+    with get_conn() as conn:
+        cur = conn.execute("SELECT date, balance, sold, returned FROM sbl_short WHERE code = ? AND date >= ? ORDER BY date",
+                           (code, since))
+        return [dict(r) for r in cur.fetchall()]
+
+
+def query_foreign_holding_changes(lag: int = 20) -> list[dict]:
+    """每檔最新外資持股比例，以及與「往前第 lag 個有資料的交易日」相比的變化（百分點）"""
+    with get_conn() as conn:
+        dates = [r["date"] for r in conn.execute(
+            "SELECT DISTINCT date FROM foreign_holding ORDER BY date DESC LIMIT ?", (lag + 1,)).fetchall()]
+        if not dates:
+            return []
+        latest = dates[0]
+        base = dates[lag] if len(dates) > lag else None
+        cur = conn.execute(
+            """SELECT l.code, l.foreign_pct, l.foreign_pct - b.foreign_pct AS foreign_change_20
+               FROM foreign_holding l LEFT JOIN foreign_holding b ON b.code = l.code AND b.date = ?
+               WHERE l.date = ?""",
+            (base, latest),
+        )
+        return [dict(r) for r in cur.fetchall()]
