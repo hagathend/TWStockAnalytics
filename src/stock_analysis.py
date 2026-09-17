@@ -15,6 +15,12 @@ from src.chip_metrics import summarize_for_prompt as summarize_chip_metrics
 from src.collectors import finmind
 from src.fundamentals import summarize_for_prompt as summarize_fundamentals
 from src.portfolio import summarize_for_prompt as summarize_holding
+from src.market_index import stock_prompt_block as summarize_relative_strength
+from src.ownership import summarize_for_prompt as summarize_ownership
+from src.predictions import record_from_analysis
+from src.price_levels import from_finmind as _levels_frame
+from src.price_levels import summarize_for_prompt as summarize_price_levels
+from src.shareholding import summarize_for_prompt as summarize_shareholding
 from src.indicators import (
     RECOMMENDED_HISTORY_DAYS,
     add_indicators,
@@ -31,11 +37,23 @@ _STOCK_ANALYSIS_PROMPT = """你是台股個股分析助手。以下是 {code} {n
 【技術指標】（由程式依收盤價量計算，非估算值）
 {indicator_block}
 
+【支撐壓力與成交量密集區】（由程式依近期轉折高低點與價量分布計算）
+{levels_block}
+
+【相對大盤】（個股報酬與加權指數報酬比較，超額為正代表跑贏大盤）
+{relative_block}
+
 【籌碼延伸指標】（由程式依本地累積的法人／融資歷史計算，非估算值）
 {chip_block}
 
+【外資持股與借券賣出】（證交所每日資料；借券賣出餘額增加代表潛在賣壓，大幅減少可能是回補）
+{ownership_block}
+
 【基本面】（本益比／殖利率／淨值比與月營收，官方公開資料；營收年增率已由來源計算）
 {fundamental_block}
+
+【股權分散】（集保結算所每週資料；大戶比例上升、散戶與股東人數下降代表籌碼集中）
+{shareholding_block}
 
 【近期股價】（最近 {price_rows} 個交易日，資料來源 FinMind）
 {price_block}
@@ -52,13 +70,15 @@ _STOCK_ANALYSIS_PROMPT = """你是台股個股分析助手。以下是 {code} {n
 請根據以上資料，用簡潔的條列式回答，「每一項都必須嚴格限制在800字以內」，
 不要長篇大論、不要有開場白，直接條列以下{item_count}項結果：
 
-技術面分析：（依據上面已算好的均線、RSI、KD、MACD、布林通道與量能判讀目前技術面，
+技術面分析：（依據上面已算好的均線、RSI、KD、MACD、布林通道、量能與支撐壓力判讀目前技術面，
 　　　　　　　請直接引用這些數值，不要自己重新估算，800字以內）
-籌碼面分析：（依據上面已算好的法人連買連賣天數、累計買賣超、佔成交量比重與融資變化，
+籌碼面分析：（依據上面已算好的法人連買連賣天數、累計買賣超、佔成交量比重、融資變化與大戶持股變化，
 　　　　　　　判斷目前籌碼偏多方還是空方掌控，請直接引用這些數值，800字以內）
 未來1~2週展望：（綜合技術、籌碼與基本面（營收成長、本益比）判斷，800字以內）
 總結：（800字以內）
-{holding_instruction}
+{holding_instruction}預測摘要：（只輸出一行、格式固定，程式會自動解析並在兩週後對照實際走勢檢驗：
+　　　　　　　方向=偏多或中性或偏空；支撐=價格數字；壓力=價格數字；信心=高或中或低）
+
 請直接用繁體中文條列輸出這{item_count}項，不需要輸出 JSON 格式，也不要輸出這{item_count}項以外的內容。
 """
 
@@ -159,7 +179,8 @@ _HOLDING_INSTRUCTION = """持股應對：（對照我的平均成本與目前損
 
 
 HOLDING_SECTION_TITLE = "持股應對"
-_OTHER_SECTION_TITLES = ("技術面分析", "籌碼面分析", "未來1~2週展望", "總結")
+# 「預測摘要」也要列入：持股應對若排在它前面，移除持股段落時才會停在這裡、不會連預測一起刪掉
+_OTHER_SECTION_TITLES = ("技術面分析", "籌碼面分析", "未來1~2週展望", "總結", "預測摘要")
 
 
 # 標題行前面可能出現的修飾：-、*、#、>、粗體、「5.」「五、」「(5)」這類編號
@@ -203,15 +224,19 @@ def build_stock_analysis_prompt(code: str) -> str:
         date=_date.today().isoformat(),
         price_rows=_PRICE_ROWS_SHOWN,
         indicator_block=_format_indicators(price_rows),
+        levels_block=summarize_price_levels(_levels_frame(price_rows)) if price_rows else "（無法取得股價歷史）",
         chip_block=summarize_chip_metrics(metrics_for_code(code)),
+        relative_block=summarize_relative_strength(code),
+        ownership_block=summarize_ownership(code),
         fundamental_block=summarize_fundamentals(code),
+        shareholding_block=summarize_shareholding(code),
         price_block=_format_price_history(price_rows),
         institutional_block=_format_institutional_history(code),
         margin_block=_format_margin_history(code),
         news_block=_format_related_news(code, name),
         holding_block=_HOLDING_BLOCK.format(holding=holding) if holding else "",
         holding_instruction=_HOLDING_INSTRUCTION if holding else "",
-        item_count="五" if holding else "四",
+        item_count="六" if holding else "五",
     )
 
 
@@ -222,4 +247,6 @@ def save_stock_analysis(code: str, analysis_text: str, date: str | None = None) 
     date = date or _date.today().isoformat()
     name = db.lookup_stock_name(code) or code
     db.save_stock_analysis(date, code, name, analysis_text.strip())
-    return {"ok": True, "message": "個股分析已儲存"}
+    prediction = record_from_analysis(date, code, name, analysis_text)
+    tracking = "，已記錄預測摘要供之後檢驗" if prediction else "（回覆裡沒有預測摘要，這次不追蹤）"
+    return {"ok": True, "message": "個股分析已儲存" + tracking}

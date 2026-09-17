@@ -7,6 +7,7 @@
 
 from datetime import date as _date
 
+from src import futures, market_breadth, market_index
 from src.storage import db
 
 _MARKET_ANALYSIS_PROMPT = """你是台股大盤分析助手。以下是 {date} 的大盤與市場資訊。
@@ -17,13 +18,22 @@ _MARKET_ANALYSIS_PROMPT = """你是台股大盤分析助手。以下是 {date} �
 自營商: {dealer_total}
 合計: {total_net}
 
+【加權指數】
+{index_block}
+
 【當日漲跌家數】（上市，不含權證）
 上漲 {up_count} 檔／下跌 {down_count} 檔／平盤 {flat_count} 檔
+
+【市場溫度計】（上市個股，程式計算；創新高／新低家數可看出上漲是普遍還是只集中在少數股票）
+{breadth_block}
+
+【期貨三大法人未平倉】（期交所，臺股期貨；期貨部位可能是現貨的避險，需與現貨買賣超一起看）
+{futures_block}
 
 【今日新聞摘要】
 {news_summary}
 
-【今日新聞焦點個股 Top 20】
+【今日新聞焦點個股】
 {picks_block}
 
 請根據以上資料，用簡潔的條列式回答，總字數控制在 1000 字以內，「每一項都要精簡」，
@@ -31,7 +41,7 @@ _MARKET_ANALYSIS_PROMPT = """你是台股大盤分析助手。以下是 {date} �
 
 短期展望（1-2週）：
 中期展望（1-3個月）：
-籌碼分析：（大盤三大法人買賣超趨勢代表什麼意義？目前籌碼是偏多方掌控還是空方？）
+籌碼分析：（大盤三大法人現貨買賣超、期貨未平倉與市場溫度計代表什麼意義？目前籌碼是偏多方掌控還是空方？）
 目前熱門產業和股票消息：（綜合新聞與焦點個股，總結目前市場關注的產業與個股）
 
 請直接用繁體中文條列輸出這四項，不需要輸出 JSON 格式，也不要輸出這四項以外的內容。
@@ -70,6 +80,9 @@ def build_market_analysis_prompt(date: str | None = None) -> tuple[bool, str]:
         up_count=breadth.get("up") or 0,
         down_count=breadth.get("down") or 0,
         flat_count=breadth.get("flat") or 0,
+        breadth_block=market_breadth.summarize_for_prompt(market_breadth.breadth_until(date)),
+        index_block=market_index.market_prompt_block(date),
+        futures_block=futures.market_prompt_block(date),
         news_summary=(ai_summary["summary"] if ai_summary else "（尚無新聞分析摘要）"),
         picks_block=_format_picks_block(picks),
     )

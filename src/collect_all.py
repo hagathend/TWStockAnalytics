@@ -3,8 +3,9 @@
 from datetime import date as _date, timedelta
 
 from src import backfill
-from src.collectors import finmind, fundamentals, news_crawler, news_rss, twse_official
-from src.config import WATCHLIST
+from src.collectors import (dividends, finmind, fundamentals, news_crawler, news_rss, tdcc, twse_market,
+                            twse_official, twse_ownership)
+from src.config_watchlist import load_watchlist
 from src.storage import db
 
 
@@ -56,7 +57,7 @@ def collect_finmind_watchlist(days_back: int = 7) -> int:
     start_date = (_date.today() - timedelta(days=days_back)).isoformat()
 
     total = 0
-    for code in WATCHLIST:
+    for code in load_watchlist():  # 所有觀察名單的聯集
         try:
             rows = finmind.fetch_stock_price(code, start_date, end_date)
             total += len(rows)
@@ -75,7 +76,7 @@ def collect_news() -> dict:
     )
     rss_rows = _run_step(
         "Google News RSS (watchlist)",
-        lambda: news_rss.fetch_watchlist_news(WATCHLIST),
+        lambda: news_rss.fetch_watchlist_news(load_watchlist()),
         db.save_news,
     )
     return {"cnyes": len(cnyes_rows), "rss": len(rss_rows)}
@@ -88,6 +89,66 @@ def collect_fundamentals() -> dict:
     twse_rev = _run_step("TWSE 月營收", fundamentals.fetch_twse_month_revenue, db.save_month_revenue)
     tpex_rev = _run_step("TPEx 月營收", fundamentals.fetch_tpex_month_revenue, db.save_month_revenue)
     return {"valuation": len(twse_val) + len(tpex_val), "month_revenue": len(twse_rev) + len(tpex_rev)}
+
+
+def collect_market_index() -> int:
+    """加權指數：抓本月（含今天）的每日資料覆寫"""
+    return len(_run_step("TWSE 加權指數", twse_market.fetch_current_month, db.save_market_index))
+
+
+def collect_futures() -> int:
+    """期交所台指期三大法人（抓近兩週覆寫，順便補漏收集的日子）"""
+    from src import futures  # 延遲匯入：futures 會載入 pandas
+
+    return len(_run_step("期交所 台指期三大法人", futures.collect_recent))
+
+
+def collect_ownership() -> dict:
+    """外資持股比例與借券賣出餘額（上市，每日）"""
+    foreign = _run_step("TWSE 外資持股", twse_ownership.fetch_foreign_holding, db.save_foreign_holding)
+    sbl = _run_step("TWSE 借券賣出", twse_ownership.fetch_sbl, db.save_sbl_short)
+    return {"foreign": len(foreign), "sbl": len(sbl)}
+
+
+def collect_ownership_gaps() -> dict:
+    """補最近兩週漏掉的外資持股／借券資料（已有的日期不會重抓）"""
+    from src import ownership
+
+    try:
+        stats = ownership.backfill(days=14)
+    except Exception as exc:  # noqa: BLE001
+        db.log_step("自動補齊外資持股與借券", "failed", str(exc))
+        return {"filled": 0, "failed": 1}
+    status = "failed" if stats["failed"] else "success"
+    detail = f"補齊 {stats['filled']} 份、失敗 {len(stats['failed'])} 份" if stats["filled"] or stats["failed"] else "近期無缺漏"
+    db.log_step("自動補齊外資持股與借券", status, detail)
+    return {"filled": stats["filled"], "failed": len(stats["failed"])}
+
+
+def collect_dividends() -> int:
+    """除權除息預告（上市＋上櫃）"""
+    twse = _run_step("TWSE 除權息預告", dividends.fetch_twse_dividends, db.save_dividend_events)
+    tpex = _run_step("TPEx 除權息預告", dividends.fetch_tpex_dividends, db.save_dividend_events)
+    return len(twse) + len(tpex)
+
+
+def collect_financials() -> dict:
+    """季報：重抓最新一季（公司陸續公布，每天補上新公布的），其他缺漏季度一併補"""
+    from src import financials
+
+    try:
+        stats = financials.backfill(quarters=2, refresh_latest=True)
+    except Exception as exc:  # noqa: BLE001
+        db.log_step("季度財報", "failed", str(exc))
+        return {"filled": 0, "failed": 1}
+    status = "failed" if stats["failed"] else "success"
+    db.log_step("季度財報", status, f"更新 {stats['filled']} 份、跳過 {stats['skipped']} 份、失敗 {len(stats['failed'])} 份")
+    return {"filled": stats["filled"], "failed": len(stats["failed"])}
+
+
+def collect_shareholding() -> int:
+    """集保股權分散表：每週更新一次，每天抓最新一週覆寫即可（同一週重複抓不會多存）"""
+    return len(_run_step("集保股權分散表", tdcc.fetch_shareholding, db.save_shareholding))
 
 
 def collect_recent_gaps() -> dict:
@@ -113,11 +174,32 @@ def run_daily_collect() -> dict:
     db.init_db()
     result = {
         "price": collect_stock_price(),
+        "market_index": collect_market_index(),
         "institutional": collect_institutional(),
         "margin": collect_margin(),
         "finmind": collect_finmind_watchlist(),
         "news": collect_news(),
         "fundamentals": collect_fundamentals(),
+        "shareholding": collect_shareholding(),
+        "dividends": collect_dividends(),
+        "financials": collect_financials(),
+        "ownership": collect_ownership(),
+        "futures": collect_futures(),
         "gap_fill": collect_recent_gaps(),
+        "ownership_gap_fill": collect_ownership_gaps(),
     }
+    result["alerts"] = check_alerts_step()
     return result
+
+
+def check_alerts_step() -> dict:
+    """收集完檢查條件提醒並跳 Windows 通知；失敗只記錄，不影響收集結果"""
+    from src import alerts  # 延遲匯入：alerts 會載入訊號計算，收集器本身不需要
+
+    try:
+        outcome = alerts.check_alerts()
+    except Exception as exc:  # noqa: BLE001
+        db.log_step("條件提醒檢查", "failed", str(exc))
+        return {"new_events": 0}
+    db.log_step("條件提醒檢查", "success", outcome["message"])
+    return {"new_events": len(outcome["new_events"])}

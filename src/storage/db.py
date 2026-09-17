@@ -138,6 +138,161 @@ CREATE TABLE IF NOT EXISTS month_revenue (
     PRIMARY KEY (year_month, market, code)
 );
 
+-- 期貨三大法人（期交所，臺股期貨 TXF）；identity：foreign／trust／dealer；口數
+CREATE TABLE IF NOT EXISTS futures_institutional (
+    date TEXT NOT NULL,
+    commodity TEXT NOT NULL,
+    identity TEXT NOT NULL,
+    long_trade INTEGER,
+    short_trade INTEGER,
+    net_trade INTEGER,
+    long_oi INTEGER,
+    short_oi INTEGER,
+    net_oi INTEGER,
+    net_oi_value INTEGER,
+    PRIMARY KEY (date, commodity, identity)
+);
+
+-- 季度財報（公開資訊觀測站，年初累計值；金額千元、EPS 元）
+CREATE TABLE IF NOT EXISTS financials (
+    year INTEGER NOT NULL,
+    quarter INTEGER NOT NULL,
+    market TEXT NOT NULL,
+    code TEXT NOT NULL,
+    name TEXT,
+    revenue REAL,
+    gross_profit REAL,
+    operating_income REAL,
+    net_income REAL,
+    eps REAL,
+    equity REAL,
+    PRIMARY KEY (year, quarter, market, code)
+);
+
+-- 除權除息預告（上市 TWT48U、上櫃 tpex_exright_prepost），每天覆寫；kind：息／權／權息
+CREATE TABLE IF NOT EXISTS dividend_events (
+    ex_date TEXT NOT NULL,
+    market TEXT NOT NULL,
+    code TEXT NOT NULL,
+    name TEXT,
+    kind TEXT,
+    cash_dividend REAL,
+    stock_ratio REAL,
+    PRIMARY KEY (ex_date, market, code)
+);
+
+-- 外資及陸資持股（證交所 MI_QFIIS，只存上市個股）
+CREATE TABLE IF NOT EXISTS foreign_holding (
+    date TEXT NOT NULL,
+    code TEXT NOT NULL,
+    name TEXT,
+    issued_shares INTEGER,
+    foreign_shares INTEGER,
+    foreign_pct REAL,
+    foreign_limit_pct REAL,
+    PRIMARY KEY (date, code)
+);
+
+-- 借券賣出餘額（證交所 TWT93U 後半段，只存上市個股；股數）
+CREATE TABLE IF NOT EXISTS sbl_short (
+    date TEXT NOT NULL,
+    code TEXT NOT NULL,
+    name TEXT,
+    prev_balance INTEGER,
+    sold INTEGER,
+    returned INTEGER,
+    adjusted INTEGER,
+    balance INTEGER,
+    next_limit INTEGER,
+    PRIMARY KEY (date, code)
+);
+
+-- 加權指數與整體市場成交（證交所 FMTQIK，每日一列）
+CREATE TABLE IF NOT EXISTS market_index (
+    date TEXT PRIMARY KEY,
+    taiex REAL,
+    change REAL,
+    volume INTEGER,
+    turnover INTEGER,
+    transactions INTEGER
+);
+
+-- 交易紀錄（取代 holdings）：持倉與已實現損益都由這張表以平均成本法推算。股數以「股」計，金額單位元
+CREATE TABLE IF NOT EXISTS trades (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    date TEXT NOT NULL,
+    code TEXT NOT NULL,
+    name TEXT,
+    side TEXT NOT NULL CHECK (side IN ('buy', 'sell')),
+    shares INTEGER NOT NULL,
+    price REAL NOT NULL,
+    fee REAL NOT NULL DEFAULT 0,
+    tax REAL NOT NULL DEFAULT 0,
+    reason TEXT,
+    created_at TEXT
+);
+
+-- 賣出交易的 AI 覆盤
+CREATE TABLE IF NOT EXISTS trade_reviews (
+    trade_id INTEGER PRIMARY KEY,
+    review TEXT NOT NULL,
+    created_at TEXT
+);
+
+-- 一次性資料轉換的完成標記（例如 holdings → trades），避免使用者刪光交易後又被重新匯入
+CREATE TABLE IF NOT EXISTS app_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
+
+-- 集保戶股權分散表（每週）：level 1–15 為持股分級、17 為合計；來源只有最新一週，歷史靠累積
+CREATE TABLE IF NOT EXISTS shareholding (
+    date TEXT NOT NULL,
+    code TEXT NOT NULL,
+    level INTEGER NOT NULL,
+    holders INTEGER,
+    shares INTEGER,
+    pct REAL,
+    PRIMARY KEY (date, code, level)
+);
+
+-- 條件提醒：規則與觸發紀錄。同一規則、同一檔、同一資料日期只記一次（避免重複通知）
+CREATE TABLE IF NOT EXISTS alert_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    code TEXT,
+    name TEXT,
+    threshold REAL,
+    signal_key TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    note TEXT,
+    created_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS alert_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rule_id INTEGER NOT NULL,
+    date TEXT NOT NULL,
+    code TEXT NOT NULL,
+    name TEXT,
+    message TEXT,
+    created_at TEXT,
+    UNIQUE (rule_id, code, date)
+);
+
+-- AI 預測追蹤：從個股分析的「預測摘要」解析出來，結果在需要時用股價即時計算（不存結果，股價補齊後會自動更新）
+CREATE TABLE IF NOT EXISTS predictions (
+    date TEXT NOT NULL,
+    code TEXT NOT NULL,
+    name TEXT,
+    direction TEXT NOT NULL,
+    support REAL,
+    resistance REAL,
+    confidence TEXT,
+    created_at TEXT,
+    PRIMARY KEY (date, code)
+);
+
 -- 我的持股：每一筆買進一列（分批買進就多列），股數以「股」為單位（1 張 = 1000 股，零股也能記）。
 -- 賣出時直接修改股數或刪除該筆。屬於個人財務資料，資料庫檔案不進版控。
 CREATE TABLE IF NOT EXISTS holdings (
@@ -185,6 +340,20 @@ def get_conn():
         conn.close()
 
 
+def _migrate_holdings_to_trades(conn):
+    """舊版「我的持股」每筆買進存在 holdings；改用 trades 後轉成買進交易（只做一次，手續費當 0）"""
+    if conn.execute("SELECT 1 FROM app_meta WHERE key = 'holdings_migrated'").fetchone():
+        return
+    now = datetime.now().isoformat(timespec="seconds")
+    conn.execute(
+        """INSERT INTO trades (date, code, name, side, shares, price, fee, tax, reason, created_at)
+           SELECT COALESCE(buy_date, substr(created_at, 1, 10), ?), code, name, 'buy', shares, cost_price, 0, 0, note, ?
+           FROM holdings ORDER BY id""",
+        (now[:10], now),
+    )
+    conn.execute("INSERT INTO app_meta (key, value) VALUES ('holdings_migrated', ?)", (now,))
+
+
 def init_db():
     with get_conn() as conn:
         conn.executescript(SCHEMA)
@@ -196,6 +365,7 @@ def init_db():
         # 修復舊版解析錯誤存下的上櫃自營商欄位（當時存成外資的數字）。
         # 官方合計欄位是對的，且「合計 = 外資 + 投信 + 自營商」，所以自營商可由另外三欄推回；
         # 資料正確時條件不成立、不會更新任何列。
+        _migrate_holdings_to_trades(conn)
         conn.execute(
             """UPDATE institutional SET dealer_net = total_net - foreign_net - COALESCE(trust_net, 0)
                WHERE market = 'TPEx' AND total_net IS NOT NULL AND foreign_net IS NOT NULL
@@ -716,3 +886,412 @@ def query_latest_close(code: str, as_of: str | None = None) -> dict | None:
             (code, as_of),
         ).fetchone()
         return dict(row) if row else None
+
+
+def save_prediction(date: str, code: str, name: str, prediction: dict):
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT OR REPLACE INTO predictions (date, code, name, direction, support, resistance, confidence, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (date, code, name, prediction["direction"], prediction.get("support"), prediction.get("resistance"),
+             prediction.get("confidence"), datetime.now().isoformat(timespec="seconds")),
+        )
+
+
+def delete_prediction(date: str, code: str):
+    with get_conn() as conn:
+        conn.execute("DELETE FROM predictions WHERE date = ? AND code = ?", (date, code))
+
+
+def query_predictions(code: str | None = None) -> list[dict]:
+    with get_conn() as conn:
+        if code:
+            cur = conn.execute("SELECT * FROM predictions WHERE code = ? ORDER BY date DESC", (code,))
+        else:
+            cur = conn.execute("SELECT * FROM predictions ORDER BY date DESC, code")
+        return [dict(r) for r in cur.fetchall()]
+
+
+def query_price_range(code: str, start: str, end: str | None = None) -> list[dict]:
+    """某檔股票 start（含）到 end（含，None 表示到最新）的日線"""
+    with get_conn() as conn:
+        cur = conn.execute(
+            "SELECT date, open, high, low, close FROM stock_price WHERE code = ? AND date >= ? AND date <= ? ORDER BY date",
+            (code, start, end or "9999-12-31"),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def query_market_average_return(start_date: str, end_date: str) -> float | None:
+    """上市個股從 start_date 收盤到 end_date 收盤的平均報酬（%），當作「同期大盤」基準"""
+    with get_conn() as conn:
+        row = conn.execute(
+            f"""SELECT AVG(e.close / b.close - 1) * 100 AS avg_return, COUNT(*) AS n
+                FROM stock_price b JOIN stock_price e ON e.code = b.code AND e.market = b.market
+                WHERE b.date = ? AND e.date = ? AND b.market = 'TWSE' AND b.close > 0 AND e.close IS NOT NULL
+                  AND {STOCK_CODE_SQL.replace("code", "b.code")}""",
+            (start_date, end_date),
+        ).fetchone()
+        return row["avg_return"] if row and row["n"] else None
+
+
+def query_industry_map() -> dict[str, str]:
+    """代號 → 產業別（取每檔最新一個月營收資料上的產業別）"""
+    with get_conn() as conn:
+        cur = conn.execute(
+            """SELECT r.code, r.industry FROM month_revenue r
+               JOIN (SELECT code, MAX(year_month) AS ym FROM month_revenue GROUP BY code) latest
+                 ON r.code = latest.code AND r.year_month = latest.ym
+               WHERE r.industry IS NOT NULL AND r.industry != ''"""
+        )
+        return {r["code"]: r["industry"] for r in cur.fetchall()}
+
+
+def add_alert_rule(kind: str, code: str | None = None, name: str | None = None, threshold: float | None = None,
+                   signal_key: str | None = None, note: str = "") -> int:
+    with get_conn() as conn:
+        cur = conn.execute(
+            """INSERT INTO alert_rules (kind, code, name, threshold, signal_key, enabled, note, created_at)
+               VALUES (?, ?, ?, ?, ?, 1, ?, ?)""",
+            (kind, code or None, name, threshold, signal_key or None, note, datetime.now().isoformat(timespec="seconds")),
+        )
+        return cur.lastrowid
+
+
+def set_alert_rule_enabled(rule_id: int, enabled: bool):
+    with get_conn() as conn:
+        conn.execute("UPDATE alert_rules SET enabled = ? WHERE id = ?", (1 if enabled else 0, rule_id))
+
+
+def delete_alert_rule(rule_id: int):
+    with get_conn() as conn:
+        conn.execute("DELETE FROM alert_rules WHERE id = ?", (rule_id,))
+
+
+def query_alert_rules() -> list[dict]:
+    with get_conn() as conn:
+        return [dict(r) for r in conn.execute("SELECT * FROM alert_rules ORDER BY id").fetchall()]
+
+
+def save_alert_event(rule_id: int, event: dict) -> bool:
+    """新觸發才寫入並回傳 True；同一規則同一檔同一天已經記過就回傳 False"""
+    with get_conn() as conn:
+        cur = conn.execute(
+            """INSERT OR IGNORE INTO alert_events (rule_id, date, code, name, message, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (rule_id, event["date"], event["code"], event.get("name"), event["message"],
+             datetime.now().isoformat(timespec="seconds")),
+        )
+        return cur.rowcount == 1
+
+
+def query_alert_events(limit: int = 100) -> list[dict]:
+    with get_conn() as conn:
+        cur = conn.execute("SELECT * FROM alert_events ORDER BY date DESC, id DESC LIMIT ?", (limit,))
+        return [dict(r) for r in cur.fetchall()]
+
+
+def save_shareholding(rows: list[dict]):
+    if not rows:
+        return
+    with get_conn() as conn:
+        conn.executemany(
+            """INSERT OR REPLACE INTO shareholding (date, code, level, holders, shares, pct)
+               VALUES (:date, :code, :level, :holders, :shares, :pct)""",
+            rows,
+        )
+
+
+# 集保分級 → 指標：千張以上＝第 15 級；400 張以上＝12–15 級；50 張以下散戶＝1–8 級；總人數＝第 17 級
+_SHAREHOLDING_SUMMARY_SQL = """
+    SELECT date, code,
+           SUM(CASE WHEN level = 15 THEN pct END) AS big1000_pct,
+           SUM(CASE WHEN level BETWEEN 12 AND 15 THEN pct END) AS big400_pct,
+           SUM(CASE WHEN level BETWEEN 1 AND 8 THEN pct END) AS retail_pct,
+           SUM(CASE WHEN level = 15 THEN holders END) AS big1000_holders,
+           SUM(CASE WHEN level = 17 THEN holders END) AS total_holders
+    FROM shareholding
+"""
+
+
+def query_shareholding_history(code: str, limit: int = 52) -> list[dict]:
+    """單一股票每週的股權分散指標（由舊到新）"""
+    with get_conn() as conn:
+        cur = conn.execute(
+            _SHAREHOLDING_SUMMARY_SQL + " WHERE code = ? GROUP BY date, code ORDER BY date DESC LIMIT ?",
+            (code, limit),
+        )
+        return list(reversed([dict(r) for r in cur.fetchall()]))
+
+
+def query_shareholding_dates() -> list[str]:
+    with get_conn() as conn:
+        return [r["date"] for r in conn.execute("SELECT DISTINCT date FROM shareholding ORDER BY date").fetchall()]
+
+
+def query_shareholding_on(date: str) -> list[dict]:
+    """某一週全部個股的股權分散指標"""
+    with get_conn() as conn:
+        cur = conn.execute(_SHAREHOLDING_SUMMARY_SQL + " WHERE date = ? GROUP BY date, code", (date,))
+        return [dict(r) for r in cur.fetchall()]
+
+
+def add_trade(date: str, code: str, name: str, side: str, shares: int, price: float, fee: float = 0,
+              tax: float = 0, reason: str = "") -> int:
+    with get_conn() as conn:
+        cur = conn.execute(
+            """INSERT INTO trades (date, code, name, side, shares, price, fee, tax, reason, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (date, code, name, side, shares, price, fee, tax, reason, datetime.now().isoformat(timespec="seconds")),
+        )
+        return cur.lastrowid
+
+
+def update_trade(trade_id: int, **fields):
+    allowed = {"date", "side", "shares", "price", "fee", "tax", "reason"}
+    updates = {k: v for k, v in fields.items() if k in allowed}
+    if not updates:
+        return
+    with get_conn() as conn:
+        conn.execute(f"UPDATE trades SET {', '.join(f'{k} = ?' for k in updates)} WHERE id = ?",
+                     (*updates.values(), trade_id))
+
+
+def delete_trade(trade_id: int):
+    with get_conn() as conn:
+        conn.execute("DELETE FROM trades WHERE id = ?", (trade_id,))
+        conn.execute("DELETE FROM trade_reviews WHERE trade_id = ?", (trade_id,))
+
+
+def query_trades(code: str | None = None) -> list[dict]:
+    """交易紀錄，依日期與輸入順序由舊到新（平均成本法必須照時間順序計算）"""
+    with get_conn() as conn:
+        if code:
+            cur = conn.execute("SELECT * FROM trades WHERE code = ? ORDER BY date, id", (code,))
+        else:
+            cur = conn.execute("SELECT * FROM trades ORDER BY date, id")
+        return [dict(r) for r in cur.fetchall()]
+
+
+def save_trade_review(trade_id: int, review: str):
+    with get_conn() as conn:
+        conn.execute("INSERT OR REPLACE INTO trade_reviews (trade_id, review, created_at) VALUES (?, ?, ?)",
+                     (trade_id, review, datetime.now().isoformat(timespec="seconds")))
+
+
+def query_trade_reviews() -> dict[int, dict]:
+    with get_conn() as conn:
+        return {r["trade_id"]: dict(r) for r in conn.execute("SELECT * FROM trade_reviews").fetchall()}
+
+
+def query_price_history(market: str = "TWSE", since: str | None = None) -> list[dict]:
+    """只讀股價表（不 join 法人融資），給只需要價量的全市場計算用，比 query_market_history 快很多"""
+    with get_conn() as conn:
+        cur = conn.execute(
+            """SELECT date, code, close, change, turnover FROM stock_price
+               WHERE market = ? AND date >= ? ORDER BY code, date""",
+            (market, since or "0000-00-00"),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def query_month_revenue_counts() -> dict[tuple[str, str], int]:
+    """(year_month, market) → 公司數，回補時判斷哪些月份已經有資料"""
+    with get_conn() as conn:
+        cur = conn.execute("SELECT year_month, market, COUNT(*) AS n FROM month_revenue GROUP BY year_month, market")
+        return {(r["year_month"], r["market"]): r["n"] for r in cur.fetchall()}
+
+
+def query_month_revenue_history(since_year_month: str = "0000-00") -> list[dict]:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "SELECT code, year_month, revenue, yoy_pct FROM month_revenue WHERE year_month >= ? ORDER BY code, year_month",
+            (since_year_month,),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def save_market_index(rows: list[dict]):
+    if not rows:
+        return
+    with get_conn() as conn:
+        conn.executemany(
+            """INSERT OR REPLACE INTO market_index (date, taiex, change, volume, turnover, transactions)
+               VALUES (:date, :taiex, :change, :volume, :turnover, :transactions)""",
+            rows,
+        )
+
+
+def query_market_index(start: str, end: str | None = None) -> list[dict]:
+    with get_conn() as conn:
+        cur = conn.execute("SELECT * FROM market_index WHERE date >= ? AND date <= ? ORDER BY date",
+                           (start, end or "9999-12-31"))
+        return [dict(r) for r in cur.fetchall()]
+
+
+def query_market_index_month_counts() -> dict[str, int]:
+    with get_conn() as conn:
+        cur = conn.execute("SELECT substr(date, 1, 7) AS ym, COUNT(*) AS n FROM market_index GROUP BY ym")
+        return {r["ym"]: r["n"] for r in cur.fetchall()}
+
+
+def save_foreign_holding(rows: list[dict]):
+    if not rows:
+        return
+    with get_conn() as conn:
+        conn.executemany(
+            """INSERT OR REPLACE INTO foreign_holding (date, code, name, issued_shares, foreign_shares, foreign_pct, foreign_limit_pct)
+               VALUES (:date, :code, :name, :issued_shares, :foreign_shares, :foreign_pct, :foreign_limit_pct)""",
+            rows,
+        )
+
+
+def save_sbl_short(rows: list[dict]):
+    if not rows:
+        return
+    with get_conn() as conn:
+        conn.executemany(
+            """INSERT OR REPLACE INTO sbl_short (date, code, name, prev_balance, sold, returned, adjusted, balance, next_limit)
+               VALUES (:date, :code, :name, :prev_balance, :sold, :returned, :adjusted, :balance, :next_limit)""",
+            rows,
+        )
+
+
+def query_dates_in(table: str) -> set[str]:
+    if table not in ("foreign_holding", "sbl_short"):
+        raise ValueError(f"不支援的表格: {table}")
+    with get_conn() as conn:
+        return {r["date"] for r in conn.execute(f"SELECT DISTINCT date FROM {table}").fetchall()}
+
+
+def query_foreign_holding_history(code: str, since: str) -> list[dict]:
+    with get_conn() as conn:
+        cur = conn.execute("SELECT date, foreign_pct, foreign_shares FROM foreign_holding WHERE code = ? AND date >= ? ORDER BY date",
+                           (code, since))
+        return [dict(r) for r in cur.fetchall()]
+
+
+def query_sbl_history(code: str, since: str) -> list[dict]:
+    with get_conn() as conn:
+        cur = conn.execute("SELECT date, balance, sold, returned FROM sbl_short WHERE code = ? AND date >= ? ORDER BY date",
+                           (code, since))
+        return [dict(r) for r in cur.fetchall()]
+
+
+def query_foreign_holding_changes(lag: int = 20) -> list[dict]:
+    """每檔最新外資持股比例，以及與「往前第 lag 個有資料的交易日」相比的變化（百分點）"""
+    with get_conn() as conn:
+        dates = [r["date"] for r in conn.execute(
+            "SELECT DISTINCT date FROM foreign_holding ORDER BY date DESC LIMIT ?", (lag + 1,)).fetchall()]
+        if not dates:
+            return []
+        latest = dates[0]
+        base = dates[lag] if len(dates) > lag else None
+        cur = conn.execute(
+            """SELECT l.code, l.foreign_pct, l.foreign_pct - b.foreign_pct AS foreign_change_20
+               FROM foreign_holding l LEFT JOIN foreign_holding b ON b.code = l.code AND b.date = ?
+               WHERE l.date = ?""",
+            (base, latest),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def save_dividend_events(rows: list[dict]):
+    if not rows:
+        return
+    with get_conn() as conn:
+        conn.executemany(
+            """INSERT OR REPLACE INTO dividend_events (ex_date, market, code, name, kind, cash_dividend, stock_ratio)
+               VALUES (:ex_date, :market, :code, :name, :kind, :cash_dividend, :stock_ratio)""",
+            rows,
+        )
+
+
+def query_dividend_events(start: str, end: str) -> list[dict]:
+    with get_conn() as conn:
+        cur = conn.execute("SELECT * FROM dividend_events WHERE ex_date >= ? AND ex_date <= ? ORDER BY ex_date, code",
+                           (start, end))
+        return [dict(r) for r in cur.fetchall()]
+
+
+def save_financials(rows: list[dict]):
+    if not rows:
+        return
+    with get_conn() as conn:
+        conn.executemany(
+            """INSERT OR REPLACE INTO financials (year, quarter, market, code, name, revenue, gross_profit,
+                   operating_income, net_income, eps, equity)
+               VALUES (:year, :quarter, :market, :code, :name, :revenue, :gross_profit, :operating_income,
+                   :net_income, :eps, :equity)""",
+            rows,
+        )
+
+
+def query_financials(code: str | None = None) -> list[dict]:
+    with get_conn() as conn:
+        if code:
+            cur = conn.execute("SELECT * FROM financials WHERE code = ? ORDER BY year, quarter", (code,))
+        else:
+            cur = conn.execute("SELECT * FROM financials ORDER BY code, year, quarter")
+        return [dict(r) for r in cur.fetchall()]
+
+
+def query_financials_counts() -> dict[tuple[int, int, str], int]:
+    with get_conn() as conn:
+        cur = conn.execute("SELECT year, quarter, market, COUNT(*) AS n FROM financials GROUP BY year, quarter, market")
+        return {(r["year"], r["quarter"], r["market"]): r["n"] for r in cur.fetchall()}
+
+
+def query_valuation_dates(market: str = "TWSE") -> set[str]:
+    with get_conn() as conn:
+        return {r["date"] for r in conn.execute("SELECT DISTINCT date FROM valuation WHERE market = ?", (market,)).fetchall()}
+
+
+def query_pe_history(code: str, since: str) -> list[dict]:
+    """同一天的收盤價與本益比（本益比河流圖用）"""
+    with get_conn() as conn:
+        cur = conn.execute(
+            """SELECT v.date, p.close, v.pe_ratio AS pe FROM valuation v
+               JOIN stock_price p ON p.date = v.date AND p.code = v.code AND p.market = v.market
+               WHERE v.code = ? AND v.date >= ? ORDER BY v.date""",
+            (code, since),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def query_valuation_pe_all(market: str, since: str) -> list[dict]:
+    with get_conn() as conn:
+        cur = conn.execute("SELECT date, code, pe_ratio AS pe FROM valuation WHERE market = ? AND date >= ?",
+                           (market, since))
+        return [dict(r) for r in cur.fetchall()]
+
+
+def save_futures_institutional(rows: list[dict]):
+    if not rows:
+        return
+    with get_conn() as conn:
+        conn.executemany(
+            """INSERT OR REPLACE INTO futures_institutional (date, commodity, identity, long_trade, short_trade, net_trade,
+                   long_oi, short_oi, net_oi, net_oi_value)
+               VALUES (:date, :commodity, :identity, :long_trade, :short_trade, :net_trade, :long_oi, :short_oi,
+                   :net_oi, :net_oi_value)""",
+            rows,
+        )
+
+
+def query_futures_institutional(start: str, end: str, commodity: str = "TXF") -> list[dict]:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "SELECT * FROM futures_institutional WHERE commodity = ? AND date >= ? AND date <= ? ORDER BY date",
+            (commodity, start, end),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def query_futures_month_counts(commodity: str = "TXF") -> dict[str, int]:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "SELECT substr(date, 1, 7) AS ym, COUNT(DISTINCT date) AS n FROM futures_institutional WHERE commodity = ? GROUP BY ym",
+            (commodity,),
+        )
+        return {r["ym"]: r["n"] for r in cur.fetchall()}

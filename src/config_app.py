@@ -12,6 +12,8 @@ _DEFAULT = {
     "disclaimer_accepted": False,
     "update_checked_at": None,
     "latest_release": None,
+    # 券商手續費折扣（1＝無折扣，2.8 折填 0.28），交易紀錄自動試算手續費用
+    "fee_discount": 1.0,
 }
 
 

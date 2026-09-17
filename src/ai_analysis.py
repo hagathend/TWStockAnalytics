@@ -1,4 +1,4 @@
-"""用當日新聞產生「新聞焦點 Top 20」觀察名單。
+"""用當日新聞產生「新聞焦點 Top 50」焦點個股清單。
 
 分析方式：
 1. **Ollama 深度分析（推薦，免費、自動）**：本機跑開源模型，逐篇抓內文摘要後彙整挑股，
@@ -21,6 +21,7 @@ from src.config_ai import load_scraping_settings
 from src.storage import db
 
 _MAX_NEWS_ITEMS = 60
+MAX_PICKS = 50  # 新聞焦點個股最多幾檔（側邊欄、報告、大盤提示詞共用）
 _SUMMARY_TRUNCATE = 150
 
 _MAX_CNYES_FOR_DEEP = 40  # 鉅亨網一般市場新聞：涵蓋整個大盤，篇數多才能覆蓋到夠多不同的公司
@@ -41,7 +42,7 @@ _DEEP_PROMPT_TEMPLATE = """你是台股新聞分析助手。以下是 {date} 收
 
 請完成以下工作：
 1. 用 3-5 句話總結今天新聞的重點主題與市場氣氛
-2. 從中挑出最多 20 檔你認為最值得投資人今天關注的個股，依重要程度排序，盡量附上正確的股票代號（若新聞未提供代號，可依你的知識補上；無法判斷代號就不要列入），每檔給不超過 40 字的關注原因
+2. 從中挑出最多 {max_picks} 檔你認為最值得投資人今天關注的個股，依重要程度排序，盡量附上正確的股票代號（若新聞未提供代號，可依你的知識補上；無法判斷代號就不要列入），每檔給不超過 40 字的關注原因
 
 請「只」回傳以下 JSON 格式的內容，不要加上任何說明文字、不要用 markdown code fence 包起來：
 {{"summary": "...", "picks": [{{"code": "2330", "name": "台積電", "reason": "..."}}]}}
@@ -117,7 +118,7 @@ _FINAL_RANK_PROMPT = """你是台股新聞分析助手。以下是根據 {date} 
 
 請完成以下工作：
 1. 用 3-5 句話總結今天新聞的重點主題與市場氣氛
-2. 把清單中「每一檔」個股都納入最終結果（最多列出 20 檔），依重要程度排序。
+2. 把清單中「每一檔」個股都納入最終結果（最多列出 {max_picks} 檔），依重要程度排序。
    只有在確定兩檔是同一家公司重複時才合併，不要因為主觀覺得某檔「不夠重要」
    就自己刪減——這份候選清單已經是篩選過的結果，原則上都要保留
 
@@ -132,7 +133,7 @@ _PROMPT_TEMPLATE = """你是台股新聞分析助手。以下是 {date} 收集�
 
 請完成以下工作：
 1. 用 3-5 句話總結今天新聞的重點主題與市場氣氛
-2. 從中挑出最多 20 檔你認為最值得投資人今天關注的個股，依重要程度排序，盡量附上正確的股票代號（若新聞未提供代號，可依你的知識補上；無法判斷代號就不要列入），每檔給不超過 40 字的關注原因
+2. 從中挑出最多 {max_picks} 檔你認為最值得投資人今天關注的個股，依重要程度排序，盡量附上正確的股票代號（若新聞未提供代號，可依你的知識補上；無法判斷代號就不要列入），每檔給不超過 40 字的關注原因
 
 請「只」回傳以下 JSON 格式的內容，不要加上任何說明文字、不要用 markdown code fence 包起來：
 {{"summary": "...", "picks": [{{"code": "2330", "name": "台積電", "reason": "..."}}]}}
@@ -156,7 +157,7 @@ def build_prompt(date: str) -> tuple[bool, str]:
     if not news_rows:
         return False, "此日期尚無新聞資料，請先收集資料"
     prompt = _PROMPT_TEMPLATE.format(
-        date=date, count=len(news_rows), news_block=_build_news_block(news_rows)
+        date=date, count=len(news_rows), news_block=_build_news_block(news_rows), max_picks=MAX_PICKS
     )
     return True, prompt
 
@@ -194,7 +195,7 @@ def _verify_pick(code: str, name: str) -> tuple[str, str]:
 
 def _normalize_picks(raw_picks: list[dict]) -> list[dict]:
     picks = []
-    for i, p in enumerate(raw_picks[:20], start=1):
+    for i, p in enumerate(raw_picks[:MAX_PICKS], start=1):
         code = str(p.get("code", "")).strip()
         code = re.sub(r"[.\-](TW|TWO|TPEX)$", "", code, flags=re.IGNORECASE)
         name = p.get("name", "")
@@ -243,7 +244,7 @@ def _select_top_picks(date: str, summaries: list[str], call_llm) -> tuple[str | 
     回傳 (錯誤訊息或None, 總結文字, 原始picks清單)"""
     if len(summaries) <= _BATCH_SIZE:
         prompt = _DEEP_PROMPT_TEMPLATE.format(
-            date=date, count=len(summaries), summaries_block="\n".join(summaries)
+            date=date, count=len(summaries), summaries_block="\n".join(summaries), max_picks=MAX_PICKS
         )
         ok, text = call_llm(prompt, _PICKS_SCHEMA)
         if not ok:
@@ -281,7 +282,7 @@ def _select_top_picks(date: str, summaries: list[str], call_llm) -> tuple[str | 
         f"{c.get('code', '')} {c.get('name', '')} — {c.get('reason', '')}" for c in candidates
     )
     prompt = _FINAL_RANK_PROMPT.format(
-        date=date, count=len(candidates), candidates_block=candidates_block
+        date=date, count=len(candidates), candidates_block=candidates_block, max_picks=MAX_PICKS
     )
     ok, text = call_llm(prompt, _PICKS_SCHEMA)
     if not ok:

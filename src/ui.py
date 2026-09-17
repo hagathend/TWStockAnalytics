@@ -44,12 +44,35 @@ _CSS = f"""
                      border-left: 3px solid {ACCENT_COLOR}; padding-left: 0.55rem; line-height: 1.2; }}
 .tw-section-caption {{ font-size: 0.8rem; color: {MUTED_COLOR}; }}
 
-/* 側邊欄層級：導覽（主要功能）> 區塊標籤（資料收集、觀察名單…）> 清單項目。導覽不放圖示 */
-[data-testid="stSidebarNav"] {{ padding-top: 0.4rem; }}
-[data-testid="stSidebarNavLink"] {{ padding: 0.45rem 0.75rem; margin: 0.1rem 0; border-radius: 0.5rem; }}
-[data-testid="stSidebarNavLink"] span {{ font-size: 1.02rem; font-weight: 500; color: #C9D1DE; }}
-[data-testid="stSidebarNavLink"][aria-current="page"] span {{ color: #FFFFFF; font-weight: 600; }}
-[data-testid="stSidebarNavSeparator"] {{ margin: 0.6rem 0; }}
+/* 側邊欄層級：導覽大項（主要功能）> 導覽子項（頁內分頁）> 區塊標籤（資料收集、觀察名單…）> 清單項目。不放圖示 */
+section[data-testid="stSidebar"] [class*="st-key-navg_"] button {{
+    justify-content: flex-start; width: 100%; padding: 0.45rem 0.75rem; min-height: 0; margin: 0.05rem 0;
+    border-radius: 0.5rem; border: none; background: transparent; }}
+section[data-testid="stSidebar"] [class*="st-key-navg_"] button p {{ font-size: 1.02rem; font-weight: 500; color: #C9D1DE; }}
+section[data-testid="stSidebar"] [class*="st-key-navg_"] button:hover {{ background: #1A2231; }}
+/* 可摺疊的大項目：右側細箭頭（CSS 畫的線，不是圖示字型）；展開朝下、摺疊朝右 */
+section[data-testid="stSidebar"] [class*="st-key-navg_"] button {{ position: relative; }}
+section[data-testid="stSidebar"] [class*="st-key-navg_"][class*="open_"] button::after,
+section[data-testid="stSidebar"] [class*="st-key-navg_"][class*="shut_"] button::after {{
+    content: ""; position: absolute; right: 0.95rem; top: 50%; width: 0.4rem; height: 0.4rem;
+    border-right: 1.5px solid {MUTED_COLOR}; border-bottom: 1.5px solid {MUTED_COLOR}; }}
+section[data-testid="stSidebar"] [class*="st-key-navg_"][class*="open_"] button::after {{ transform: translateY(-70%) rotate(45deg); }}
+section[data-testid="stSidebar"] [class*="st-key-navg_"][class*="shut_"] button::after {{ transform: translateY(-50%) rotate(-45deg); }}
+section[data-testid="stSidebar"] [class*="st-key-navg_on_"] button {{ background: #1F2633; }}
+section[data-testid="stSidebar"] [class*="st-key-navg_on_"] button p {{ color: #FFFFFF; font-weight: 600; }}
+section[data-testid="stSidebar"] [class*="st-key-navs_"] button {{
+    justify-content: flex-start; width: 100%; min-height: 0; padding: 0.28rem 0.75rem 0.28rem 0.85rem;
+    margin: 0 0 0 1.1rem; width: calc(100% - 1.1rem); border-radius: 0 0.4rem 0.4rem 0; border: none;
+    border-left: 2px solid {BORDER_COLOR}; background: transparent; }}
+section[data-testid="stSidebar"] [class*="st-key-nav"] button > div,
+section[data-testid="stSidebar"] [class*="st-key-nav"] button [data-testid="stMarkdownContainer"] {{
+    justify-content: flex-start; text-align: left; width: 100%; }}
+section[data-testid="stSidebar"] [class*="st-key-navs_"] button p {{ font-size: 0.88rem; color: {MUTED_COLOR}; }}
+section[data-testid="stSidebar"] [class*="st-key-navs_"] button:hover p {{ color: #FFFFFF; }}
+section[data-testid="stSidebar"] [class*="st-key-navs_on_"] button {{ border-left-color: {ACCENT_COLOR}; background: #161D29; }}
+section[data-testid="stSidebar"] [class*="st-key-navs_on_"] button p {{ color: #FFFFFF; font-weight: 500; }}
+.st-key-tw_nav [data-testid="stVerticalBlock"] {{ gap: 0; }}
+.st-key-tw_nav {{ gap: 0; padding-top: 0.4rem; }}
 .tw-sidebar-label {{ font-size: 0.75rem; font-weight: 600; letter-spacing: 0.06em; color: {MUTED_COLOR};
                      margin: 0.9rem 0 0.35rem 0.1rem; }}
 section[data-testid="stSidebar"] hr {{ margin: 0.9rem 0; }}
@@ -138,6 +161,38 @@ def panel(title: str, caption: str | None = None):
     with box:
         section(title, caption)
     return box
+
+
+_NAV_TABS_STORE = "tw_nav_tabs"
+
+
+def remember_tab(page_id: str, label: str):
+    """記住某頁要顯示的分頁（側邊欄子項目點選時呼叫）；下次進入該頁會停在這個分頁"""
+    st.session_state.setdefault(_NAV_TABS_STORE, {})[page_id] = label
+    st.session_state[f"tw_tabs_{page_id}"] = label
+
+
+def current_tab(page_id: str, labels: list[str]) -> str:
+    label = st.session_state.get(f"tw_tabs_{page_id}") or st.session_state.get(_NAV_TABS_STORE, {}).get(page_id)
+    return label if label in labels else labels[0]
+
+
+def page_tabs(page_id: str, labels: list[str]):
+    """頁內分頁（對應側邊欄的子項目）：回傳 (目前分頁名稱, 分頁容器)。
+    只執行目前分頁的內容（on_change 追蹤狀態），切換分頁不必重算其他分頁；
+    widget 狀態在離開頁面時會被 Streamlit 清掉，所以另外記在 session_state 的字典裡，回到頁面時還原。"""
+    key = f"tw_tabs_{page_id}"
+    store = st.session_state.setdefault(_NAV_TABS_STORE, {})
+    if st.session_state.get(key) not in labels:
+        st.session_state[key] = store.get(page_id) if store.get(page_id) in labels else labels[0]
+
+    def _changed():
+        store[page_id] = st.session_state[key]
+
+    containers = st.tabs(labels, key=key, on_change=_changed)
+    active = st.session_state[key]
+    store[page_id] = active
+    return active, containers[labels.index(active)]
 
 
 def sidebar_label(text: str):
