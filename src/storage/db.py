@@ -1295,3 +1295,91 @@ def query_futures_month_counts(commodity: str = "TXF") -> dict[str, int]:
             (commodity,),
         )
         return {r["ym"]: r["n"] for r in cur.fetchall()}
+
+
+# ---------- 歷史查詢（跨日期區間＋關鍵字） ----------
+
+HISTORY_LIMIT = 500
+
+
+def _like(keyword: str | None) -> str:
+    return f"%{(keyword or '').strip()}%"
+
+
+def search_news(start: str, end: str, keyword: str | None = None, source: str | None = None,
+                limit: int = HISTORY_LIMIT) -> list[dict]:
+    """期間內的新聞（標題、摘要、AI 逐篇摘要、關聯代號任一符合關鍵字），新到舊"""
+    sql = """SELECT id, date, source, title, url, summary, excerpt, related_code, published_at FROM news
+             WHERE date >= ? AND date <= ?
+               AND (title LIKE ? OR IFNULL(summary, '') LIKE ? OR IFNULL(excerpt, '') LIKE ? OR IFNULL(related_code, '') LIKE ?)"""
+    like = _like(keyword)
+    params = [start, end, like, like, like, like]
+    if source:
+        sql += " AND source = ?"
+        params.append(source)
+    sql += " ORDER BY date DESC, published_at DESC LIMIT ?"
+    params.append(limit)
+    with get_conn() as conn:
+        return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+
+def query_news_sources() -> list[str]:
+    with get_conn() as conn:
+        return [r["source"] for r in conn.execute("SELECT DISTINCT source FROM news ORDER BY source").fetchall()]
+
+
+def search_ai_picks(start: str, end: str, keyword: str | None = None, limit: int = HISTORY_LIMIT) -> list[dict]:
+    """期間內每天的新聞焦點個股（代號、名稱、原因任一符合），新到舊、同一天依排名"""
+    like = _like(keyword)
+    with get_conn() as conn:
+        cur = conn.execute(
+            """SELECT date, rank, code, name, reason FROM ai_picks
+               WHERE date >= ? AND date <= ? AND (code LIKE ? OR IFNULL(name, '') LIKE ? OR IFNULL(reason, '') LIKE ?)
+               ORDER BY date DESC, rank LIMIT ?""",
+            (start, end, like, like, like, limit),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def search_ai_summaries(start: str, end: str) -> list[dict]:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "SELECT * FROM ai_analysis_summary WHERE date >= ? AND date <= ? ORDER BY date DESC", (start, end))
+        return [dict(r) for r in cur.fetchall()]
+
+
+def search_stock_analysis(start: str, end: str, keyword: str | None = None, limit: int = HISTORY_LIMIT) -> list[dict]:
+    """期間內的個股分析（代號、名稱、內文任一符合），新到舊"""
+    like = _like(keyword)
+    with get_conn() as conn:
+        cur = conn.execute(
+            """SELECT date, code, name, analysis, created_at FROM stock_analysis
+               WHERE date >= ? AND date <= ? AND (code LIKE ? OR IFNULL(name, '') LIKE ? OR IFNULL(analysis, '') LIKE ?)
+               ORDER BY date DESC, code LIMIT ?""",
+            (start, end, like, like, like, limit),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def search_market_analysis(start: str, end: str, keyword: str | None = None, limit: int = HISTORY_LIMIT) -> list[dict]:
+    like = _like(keyword)
+    with get_conn() as conn:
+        cur = conn.execute(
+            """SELECT date, analysis, created_at FROM market_analysis
+               WHERE date >= ? AND date <= ? AND IFNULL(analysis, '') LIKE ?
+               ORDER BY date DESC LIMIT ?""",
+            (start, end, like, limit),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def query_history_date_bounds() -> tuple[str | None, str | None]:
+    """所有新聞與 AI 結果中最早、最晚的日期（歷史查詢的日期選擇範圍）"""
+    with get_conn() as conn:
+        row = conn.execute(
+            """SELECT MIN(d) AS first, MAX(d) AS last FROM (
+                   SELECT date AS d FROM news UNION ALL SELECT date FROM ai_picks
+                   UNION ALL SELECT date FROM stock_analysis UNION ALL SELECT date FROM market_analysis
+                   UNION ALL SELECT date FROM predictions)"""
+        ).fetchone()
+        return row["first"], row["last"]

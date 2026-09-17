@@ -69,7 +69,7 @@ AI 回覆通常一行一個重點，但 CommonMark 規則裡單一 `\n` 會被�
 
 ```
 src/
-├── app.py                 Streamlit 入口（市場總覽／我的持股／個股詳情／選股工具／條件提醒／行事曆／AI 分析／每日報告／AI 設定／開始使用）
+├── app.py                 Streamlit 入口（開始使用／市場總覽／我的持股／個股詳情／選股工具／條件提醒／行事曆／AI 分析／每日報告／歷史查詢／AI 設定）
 ├── ui.py                  共用樣式元件（頁首、面板、卡片、標籤、紅漲綠跌）
 ├── codex_cli.py           Codex CLI 非互動呼叫、登入檢查、JSON Schema
 ├── ai_analysis.py         新聞深度分析：抓內文→逐篇摘要→分批挑股（Codex；Ollama 函式保留未使用）
@@ -78,6 +78,7 @@ src/
 ├── indicators.py / chip_metrics.py / signals.py / backtest.py / fundamentals.py   程式計算的指標、訊號、回測
 ├── portfolio.py           交易紀錄重播：平均成本、稅費、未實現／已實現損益、覆盤提示詞
 ├── predictions.py         AI 預測追蹤（解析「預測摘要」→ 5／10 日後檢驗）
+├── history.py             歷史查詢：新聞焦點上榜次數統計、依期間／方向／狀態篩選 AI 預測（查詢 SQL 在 db.search_*）
 ├── alerts.py / notify.py  條件提醒與 Windows 通知；calendar_events.py 行事曆
 ├── market_breadth.py / market_index.py / heatmap.py / futures.py   市場溫度計、加權指數與相對強弱、產業熱力圖、期貨法人
 ├── revenue.py / financials.py / pe_river.py   月營收趨勢、季度財報、本益比河流圖

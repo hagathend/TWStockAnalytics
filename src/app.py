@@ -40,7 +40,7 @@ from src.config_ai import (
     save_report_settings,
     save_scraping_settings,
 )
-from src import config_watchlist, scheduled_ai
+from src import config_watchlist, history, scheduled_ai
 from src.config_watchlist import add_stocks, load_watchlist
 from src.market_analysis import build_market_analysis_prompt, save_market_analysis
 from src.report_pdf import markdown_to_pdf
@@ -1099,7 +1099,7 @@ def _yes_no(value) -> str:
     return "-" if value is None else ("是" if value else "否")
 
 
-def _prediction_table(results: list[dict], show_stock: bool = True):
+def _prediction_table(results: list[dict], show_stock: bool = True, key: str | None = None):
     rows = [{**r, "result_text": _prediction_result_text(r), "support_text": _yes_no(r["support_broken"]),
              "resistance_text": _yes_no(r["resistance_reached"])} for r in results]
     columns = [c for c in _PREDICTION_COLUMNS if show_stock or c not in ("code", "name")]
@@ -1110,7 +1110,10 @@ def _prediction_table(results: list[dict], show_stock: bool = True):
                         subset=["方向"])
     styler = styler.map(lambda v: "font-weight: 600" if v in ("命中", "未命中") else f"color: {ui.MUTED_COLOR}",
                         subset=["結果"])
-    st.dataframe(styler, width="stretch", hide_index=True)
+    if key is None:
+        st.dataframe(styler, width="stretch", hide_index=True)
+        return None
+    return st.dataframe(styler, width="stretch", hide_index=True, on_select="rerun", selection_mode="single-row", key=key)
 
 
 def _render_prediction_tracking():
@@ -1994,6 +1997,169 @@ def report_page():
         st.markdown(report_text)
 
 
+# ─────────────────────────────── 歷史查詢 ───────────────────────────────
+
+_HISTORY_NEWS_COLUMNS = {"date": "日期", "source": "來源", "title": "標題", "url": "原文", "related_code": "關聯代號"}
+_HISTORY_PICK_COLUMNS = {"code": "代號", "name": "名稱", "count": "上榜次數", "best_rank": "最佳排名",
+                         "first_date": "第一次", "last_date": "最近一次", "last_reason": "最近原因"}
+_HISTORY_ANALYSIS_COLUMNS = {"date": "日期", "code": "代號", "name": "名稱", "created_at": "產生時間"}
+_PREDICTION_STATUS = {"全部": None, "已到期": "done", "進行中": "pending", "資料不足": "no_data"}
+
+
+def _selected_row(event, rows: list[dict]) -> dict | None:
+    selected = event.selection.rows if event else []
+    return rows[selected[0]] if selected and selected[0] < len(rows) else None
+
+
+def _limit_note(rows: list[dict]) -> str:
+    return f"・只顯示最新 {db.HISTORY_LIMIT} 筆，請縮小期間或加上關鍵字" if len(rows) >= db.HISTORY_LIMIT else ""
+
+
+def _render_history_news(start: str, end: str, keyword: str):
+    col_source, _ = st.columns([1, 3])
+    sources = ["全部來源", *db.query_news_sources()]
+    source = col_source.selectbox("來源", sources, key="history_news_source")
+    rows = db.search_news(start, end, keyword, None if source == "全部來源" else source)
+    with ui.panel("新聞", f"共 {len(rows)} 則{_limit_note(rows)}・點選一則看摘要與原文連結"):
+        if not rows:
+            st.caption("這段期間沒有符合的新聞")
+            return
+        view = pd.DataFrame(rows)[list(_HISTORY_NEWS_COLUMNS)].fillna("").rename(columns=_HISTORY_NEWS_COLUMNS)
+        event = st.dataframe(view, width="stretch", hide_index=True, height=420, on_select="rerun",
+                             selection_mode="single-row", key="history_news_table",
+                             column_config={"標題": st.column_config.TextColumn("標題", width="large"),
+                                            "原文": st.column_config.LinkColumn("原文", display_text="開啟", width="small")})
+        row = _selected_row(event, rows)
+    if row:
+        with ui.panel(row["title"], f"{row['date']}・{row['source']}" + (f"・關聯 {row['related_code']}" if row.get("related_code") else "")):
+            if row.get("excerpt"):
+                ui.section("AI 逐篇摘要")
+                st.markdown(_md_linebreaks(row["excerpt"]))
+            if row.get("summary"):
+                ui.section("原始摘要")
+                st.markdown(ui.strip_html(row["summary"]))
+            if row.get("url"):
+                st.link_button("開啟原文", row["url"])
+
+
+def _render_history_picks(start: str, end: str, keyword: str):
+    picks = db.search_ai_picks(start, end, keyword)
+    frequency = history.pick_frequency(picks)
+    with ui.panel("上榜次數統計", f"期間內 {frequency.shape[0]} 檔・{len({p['date'] for p in picks})} 天{_limit_note(picks)}・點選一檔開啟個股詳情"):
+        if frequency.empty:
+            st.caption("這段期間沒有新聞焦點紀錄")
+            return
+        view = frequency.rename(columns=_HISTORY_PICK_COLUMNS)
+        event = st.dataframe(view, width="stretch", hide_index=True, height=360, on_select="rerun",
+                             selection_mode="single-row", key="history_pick_freq",
+                             column_config={"最近原因": st.column_config.TextColumn("最近原因", width="large")})
+        if event.selection.rows:
+            _go_to_detail(frequency.iloc[event.selection.rows[0]]["code"])
+
+    summaries = {row["date"]: row for row in db.search_ai_summaries(start, end)}
+    by_date: dict[str, list[dict]] = {}
+    for pick in picks:
+        by_date.setdefault(pick["date"], []).append(pick)
+    with ui.panel("每日新聞焦點", "每天的新聞總結與焦點個股"):
+        # 有關鍵字時只列出有符合個股的日子；沒有關鍵字時，只有總結沒有個股的日子也列出來
+        dates = set(by_date) if keyword else set(by_date) | set(summaries)
+        for index, date in enumerate(sorted(dates, reverse=True)):
+            day_picks = by_date.get(date, [])
+            with st.expander(f"{date}・{len(day_picks)} 檔", expanded=index == 0):
+                summary = summaries.get(date)
+                if summary and not keyword:
+                    st.markdown(_md_linebreaks(summary["summary"]))
+                if day_picks:
+                    st.dataframe(_display_df(day_picks, _PICK_COLUMNS), width="stretch", hide_index=True,
+                                 column_config={"原因": st.column_config.TextColumn("原因", width="large")})
+
+
+def _render_history_stock_analysis(start: str, end: str, keyword: str):
+    rows = db.search_stock_analysis(start, end, keyword)
+    with ui.panel("個股分析紀錄", f"共 {len(rows)} 篇{_limit_note(rows)}・點選一篇看全文；關鍵字也會搜尋分析內文"):
+        if not rows:
+            st.caption("這段期間沒有符合的個股分析")
+            return
+        view = pd.DataFrame(rows)[list(_HISTORY_ANALYSIS_COLUMNS)].rename(columns=_HISTORY_ANALYSIS_COLUMNS)
+        event = st.dataframe(view, width="stretch", hide_index=True, height=320, on_select="rerun",
+                             selection_mode="single-row", key="history_stock_table")
+        row = _selected_row(event, rows)
+    if row:
+        with ui.panel(f"{row['code']} {row['name']}", f"{row['date']} 的分析・產生時間 {row['created_at']}"):
+            st.markdown(_md_linebreaks(row["analysis"]))
+
+
+def _render_history_market_analysis(start: str, end: str, keyword: str):
+    rows = db.search_market_analysis(start, end, keyword)
+    with ui.panel("大盤分析紀錄", f"共 {len(rows)} 篇{_limit_note(rows)}"):
+        if not rows:
+            st.caption("這段期間沒有符合的大盤分析")
+            return
+        for index, row in enumerate(rows):
+            with st.expander(f"{row['date']}・產生時間 {row['created_at']}", expanded=index == 0):
+                st.markdown(_md_linebreaks(row["analysis"]))
+
+
+def _render_history_predictions(start: str, end: str, keyword: str):
+    col_direction, col_status, _ = st.columns([1, 1, 2])
+    direction = col_direction.selectbox("方向", ["全部", *predictions.DIRECTIONS], key="history_pred_direction")
+    status = col_status.selectbox("檢驗狀態", list(_PREDICTION_STATUS), key="history_pred_status")
+    results = history.search_predictions(start, end, keyword, None if direction == "全部" else direction,
+                                         _PREDICTION_STATUS[status])
+    with ui.panel("AI 預測紀錄", f"共 {len(results)} 筆・{predictions.VERDICT_HORIZON} 個交易日後對照實際走勢・點選一筆看當時的完整分析"):
+        if not results:
+            st.caption("這段期間沒有符合的預測")
+            return
+        summary = predictions.summarize(results)
+        ui.cards([
+            {"label": "預測筆數", "value": f"{summary['total']}", "sub": f"進行中 {summary['pending']} 筆"},
+            {"label": "已到期", "value": f"{summary['done']}"},
+            {"label": "方向命中率", "value": "-" if summary["hit_rate"] is None else f"{summary['hit_rate']:.0f}%",
+             "sub": "樣本少時參考性低" if summary["done"] < 20 else None},
+        ])
+        event = _prediction_table(results, key="history_pred_table")
+        row = _selected_row(event, results)
+    if row:
+        text = history.analysis_for_prediction(row)
+        with ui.panel(f"{row['code']} {row['name']}", f"{row['date']} 的分析原文"):
+            if text:
+                st.markdown(_md_linebreaks(text))
+            else:
+                st.caption("找不到這筆預測對應的分析原文")
+
+
+def history_page():
+    ui.page_header("歷史查詢", "查詢過去的新聞、新聞焦點、個股與大盤分析，以及 AI 預測的檢驗結果")
+    first, last = db.query_history_date_bounds()
+    if not first:
+        st.info("還沒有任何新聞或 AI 分析紀錄")
+        return
+    first_date, last_date = _date.fromisoformat(first), max(_date.fromisoformat(last), _date.today())
+    default_start = max(first_date, last_date - timedelta(days=30))
+    col_range, col_keyword = st.columns([1.2, 2], vertical_alignment="bottom")
+    picked = col_range.date_input("期間", value=(default_start, last_date), min_value=first_date, max_value=last_date,
+                                  key="history_range", format="YYYY-MM-DD")
+    keyword = col_keyword.text_input("關鍵字", placeholder="股票代號、名稱或內文關鍵字，留空＝全部",
+                                     key="history_keyword").strip()
+    if not isinstance(picked, (tuple, list)) or len(picked) != 2:
+        st.caption("請選擇起訖兩個日期")
+        return
+    start, end = (d.isoformat() for d in picked)
+
+    tab, body = ui.page_tabs("history", NAV_TABS["history"])
+    with body:
+        if tab == "新聞":
+            _render_history_news(start, end, keyword)
+        elif tab == "新聞焦點":
+            _render_history_picks(start, end, keyword)
+        elif tab == "個股分析":
+            _render_history_stock_analysis(start, end, keyword)
+        elif tab == "大盤分析":
+            _render_history_market_analysis(start, end, keyword)
+        elif tab == "AI 預測":
+            _render_history_predictions(start, end, keyword)
+
+
 # ─────────────────────────────── 開始使用 ───────────────────────────────
 
 _DISCLAIMER = """本工具整理證交所、櫃買中心與新聞等公開資料，並用 AI 產生分析文字，**僅供資訊整理與研究參考，不構成任何投資建議**。
@@ -2186,6 +2352,7 @@ NAV_TABS = {
     "alerts": ["最近觸發", "提醒規則", "新增提醒"],
     "calendar": ["持股與觀察名單", "其他提醒", "全市場除權息"],
     "ai": ["新聞深度分析", "大盤籌碼分析", "預測追蹤", "手動貼上"],
+    "history": ["新聞", "新聞焦點", "個股分析", "大盤分析", "AI 預測"],
     "ai_settings": ["Codex CLI", "每日排程", "Firecrawl"],
 }
 
@@ -2199,12 +2366,13 @@ ALERTS_PAGE = st.Page(alerts_page, title="條件提醒", url_path="alerts")
 CALENDAR_PAGE = st.Page(calendar_page, title="行事曆", url_path="calendar")
 AI_ANALYSIS_PAGE = st.Page(ai_analysis_page, title="AI 分析", url_path="ai")
 REPORT_PAGE = st.Page(report_page, title="每日報告", url_path="report")
+HISTORY_PAGE = st.Page(history_page, title="歷史查詢", url_path="history")
 AI_SETTINGS_PAGE = st.Page(ai_settings_page, title="AI 設定", url_path="ai_settings")
 
 NAV_PAGES = {
     "onboarding": ONBOARDING_PAGE, "home": HOME_PAGE, "portfolio": PORTFOLIO_PAGE, "detail": DETAIL_PAGE,
     "screener": SCREENER_PAGE, "alerts": ALERTS_PAGE, "calendar": CALENDAR_PAGE, "ai": AI_ANALYSIS_PAGE,
-    "report": REPORT_PAGE, "ai_settings": AI_SETTINGS_PAGE,
+    "report": REPORT_PAGE, "history": HISTORY_PAGE, "ai_settings": AI_SETTINGS_PAGE,
 }
 
 

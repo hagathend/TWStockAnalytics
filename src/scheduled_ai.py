@@ -13,7 +13,7 @@ from src.storage import db
 
 def stock_targets(settings: dict | None = None) -> list[dict]:
     """依設定列出要分析的個股：[{"code", "name", "source": "持股"|"觀察名單"}]，持股優先、不重複"""
-    settings = settings or load_codex_settings()
+    settings = load_codex_settings() if settings is None else settings
     targets: dict[str, dict] = {}
     if settings.get("auto_analyze_holdings"):
         for p in portfolio.load_positions():
