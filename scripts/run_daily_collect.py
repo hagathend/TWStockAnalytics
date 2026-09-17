@@ -1,4 +1,6 @@
-"""每日 20:00 執行的收集腳本，供 Windows 工作排程器呼叫。
+"""每日排程執行的收集腳本，供 Windows 工作排程器呼叫（執行時間在「開始使用」或「AI 設定 › 每日排程」設定）。
+
+收集完之後依設定執行 AI 分析：新聞焦點、持股個股、觀察名單個股（各自可開關，見 src/scheduled_ai.py）。
 
 用法（在專案根目錄執行）:
     python scripts/run_daily_collect.py
@@ -19,17 +21,12 @@ if sys.stdout is None:
 from src.collect_all import run_daily_collect  # noqa: E402
 
 if __name__ == "__main__":
-    from datetime import datetime
+    from datetime import date, datetime
+
+    from src.scheduled_ai import run_after_collect
 
     print(f"\n===== {datetime.now():%Y-%m-%d %H:%M:%S} 開始每日收集 =====")
     result = run_daily_collect()
     print(result)
-    from datetime import date
-    from src.config_ai import load_codex_settings
-    from src.ai_analysis import analyze_with_codex_deep
-
-    if load_codex_settings().get("auto_analyze_after_collect", True):
-        analysis = analyze_with_codex_deep(date.today().isoformat())
-        print(analysis["message"])
-        if not analysis["ok"]:
-            sys.exit(1)
+    if not run_after_collect(date.today().isoformat()):
+        sys.exit(1)

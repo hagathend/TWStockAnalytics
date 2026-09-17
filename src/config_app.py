@@ -14,6 +14,8 @@ _DEFAULT = {
     "latest_release": None,
     # 券商手續費折扣（1＝無折扣，2.8 折填 0.28），交易紀錄自動試算手續費用
     "fee_discount": 1.0,
+    # 每日自動收集的執行時間（HH:MM）；實際排程存在 Windows 工作排程器，這裡記住使用者選的時間
+    "daily_task_time": "20:00",
 }
 
 

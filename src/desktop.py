@@ -107,7 +107,7 @@ def build_register_task_script(time_text: str = DEFAULT_TASK_TIME) -> str:
     """產生註冊排程的 PowerShell 指令。
 
     用 Register-ScheduledTask 而不是 schtasks：只有它能設定 StartWhenAvailable，
-    晚上 8 點電腦沒開的話，下次開機會自動補跑，不懂電腦的使用者不必自己記得手動收集。"""
+    排程時間電腦沒開的話，下次開機會自動補跑，不懂電腦的使用者不必自己記得手動收集。"""
     script = BASE_DIR / "scripts" / "run_daily_collect.py"
     return "\n".join([
         "$ErrorActionPreference = 'Stop'",

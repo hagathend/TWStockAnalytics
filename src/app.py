@@ -24,7 +24,8 @@ import plotly.express as px  # noqa: E402
 import plotly.graph_objects as go  # noqa: E402
 import streamlit as st  # noqa: E402
 
-from src.ai_analysis import MAX_PICKS, analyze_with_codex_deep, build_prompt, parse_and_save  # noqa: E402
+from src.ai_analysis import (NEWS_TOP_N_OPTIONS, analyze_with_codex_deep, build_prompt,  # noqa: E402
+                             news_top_n, parse_and_save)
 from src.codex_cli import generate_codex_text, check_codex_login, list_codex_models
 from src.charting import build_candlestick
 from src.chip_metrics import metrics_for_code
@@ -35,11 +36,11 @@ from src.config_ai import (
     load_codex_settings,
     load_report_settings,
     load_scraping_settings,
-    save_codex_settings,
+    update_codex_settings,
     save_report_settings,
     save_scraping_settings,
 )
-from src import config_watchlist
+from src import config_watchlist, scheduled_ai
 from src.config_watchlist import add_stocks, load_watchlist
 from src.market_analysis import build_market_analysis_prompt, save_market_analysis
 from src.report_pdf import markdown_to_pdf
@@ -192,7 +193,7 @@ def _render_sidebar() -> str:
                 "查詢日期", value=_date.today().isoformat(), label_visibility="collapsed"
             )
 
-        ui.sidebar_label(f"新聞焦點 Top {MAX_PICKS}")
+        ui.sidebar_label(f"新聞焦點 Top {news_top_n()}")
         ai_picks = db.query_ai_picks(selected_date)
         if ai_picks:
             for pick in ai_picks:
@@ -981,20 +982,16 @@ def _render_realized_panel():
 
 def _analyze_all_positions(positions: list[dict]):
     progress = st.progress(0.0, text="準備中...")
-    failures = []
-    for index, p in enumerate(positions, start=1):
-        progress.progress((index - 1) / len(positions),
-                          text=f"分析 {p['code']} {p['name']}（{index}/{len(positions)}）")
-        ok, text = generate_codex_text(build_stock_analysis_prompt(p["code"]))
-        if ok:
-            save_stock_analysis(p["code"], text)
-        else:
-            failures.append(f"{p['code']}：{text}")
+
+    def _update(done, total, message):
+        progress.progress(done / total if total else 0.0, text=f"{message}（{done + 1}/{total}）")
+
+    outcome = scheduled_ai.analyze_stocks(positions, _date.today().isoformat(), progress=_update, skip_existing=False)
     progress.empty()
-    if failures:
-        st.error("部分分析失敗：\n" + "\n".join(failures))
+    if outcome["failed"]:
+        st.error("部分分析失敗：\n" + "\n".join(f"{code}：{message}" for code, message in outcome["failed"]))
     else:
-        st.success(f"已完成 {len(positions)} 檔持股分析，並收錄到每日報告")
+        st.success(f"已完成 {len(outcome['done'])} 檔持股分析，並收錄到每日報告")
 
 
 def portfolio_page():
@@ -1182,7 +1179,10 @@ def ai_analysis_page():
     tab, body = ui.page_tabs("ai", NAV_TABS["ai"])
     with body:
         if tab == "新聞深度分析":
-            with ui.panel("新聞深度分析", f"先取得新聞內文，逐篇摘要後挑出最多 {MAX_PICKS} 檔有新聞依據的焦點個股"):
+            with ui.panel("新聞深度分析", "先取得新聞內文，逐篇摘要後挑出有新聞依據的焦點個股；檔數越多，彙整時用的額度越多"):
+                col_top, _ = st.columns([2, 3])
+                with col_top:
+                    _render_news_top_n("ai_news_top_n")
                 if st.button("用 Codex 分析這天的新聞", type="primary"):
                     progress_bar = st.progress(0.0, text="準備中...")
 
@@ -1295,16 +1295,14 @@ def ai_settings_page():
                 if st.checkbox("手動指定其他模型"):
                     model = st.text_input("模型代號", value=current)
 
-                col3, col4 = st.columns(2)
+                col3, _ = st.columns(2)
                 timeout = col3.number_input("每次分析最長等待秒數", min_value=30, max_value=1800,
                                             value=int(settings["timeout_seconds"]))
-                auto = col4.checkbox("收集後自動用 Codex 分析新聞", value=settings["auto_analyze_after_collect"])
-                edited = {"executable": executable, "model": model, "timeout_seconds": int(timeout),
-                          "auto_analyze_after_collect": auto}
+                edited = {**settings, "executable": executable, "model": model, "timeout_seconds": int(timeout)}
 
                 b1, b2, b3, _ = st.columns([1, 1, 1, 2])
                 if b1.button("儲存設定", type="primary", width="stretch"):
-                    save_codex_settings(edited)
+                    update_codex_settings({k: edited[k] for k in ("executable", "model", "timeout_seconds")})
                     st.success("已儲存")
                 if b2.button("測試所選模型", width="stretch"):
                     with st.spinner("測試模型中..."):
@@ -1313,6 +1311,9 @@ def ai_settings_page():
                 if b3.button("檢查登入", width="stretch"):
                     ok, message = check_codex_login(edited)
                     (st.success if ok else st.error)(message)
+        elif tab == "每日排程":
+            with ui.panel("每日排程", "自動收集的時間，以及收集完要用 Codex 做哪些分析"):
+                _render_schedule_setup()
         elif tab == "Firecrawl":
             with ui.panel("Firecrawl 內文擷取", "選用・免費額度每月 1000 次，沒設定 Key 會自動改用本機 Playwright"):
                 scraping_settings = load_scraping_settings()
@@ -2052,16 +2053,66 @@ def _render_codex_setup():
         st.rerun()
 
 
+_SCHEDULE_TIMES = [f"{hour:02d}:{minute:02d}" for hour in range(24) for minute in (0, 30)]
+
+
+def _render_news_top_n(key: str):
+    """新聞焦點要挑出前幾檔（存 codex_settings.json，手動分析與排程共用）"""
+    current = news_top_n()
+    chosen = st.segmented_control("新聞焦點檔數", NEWS_TOP_N_OPTIONS, default=current, key=key,
+                                  format_func=lambda n: f"前 {n} 檔")
+    if chosen and chosen != current:
+        update_codex_settings({"news_top_n": chosen})
+
+
 def _render_schedule_setup():
     if "daily_task_status" not in st.session_state:
         st.session_state["daily_task_status"] = desktop.daily_task_status()
     status = st.session_state["daily_task_status"]
-    enabled = st.toggle(f"每天 {desktop.DEFAULT_TASK_TIME} 自動收集資料並執行 AI 分析", value=status["exists"])
-    if enabled != status["exists"]:
-        ok, message = desktop.register_daily_task() if enabled else desktop.unregister_daily_task()
+    app_settings = load_app_settings()
+    current_time = status["time"] or app_settings["daily_task_time"]
+    times = _SCHEDULE_TIMES if current_time in _SCHEDULE_TIMES else sorted([*_SCHEDULE_TIMES, current_time])
+
+    col_time, col_toggle = st.columns([1, 2.4], vertical_alignment="bottom")
+    chosen_time = col_time.selectbox("執行時間", times, index=times.index(current_time), key="schedule_time",
+                                     help="建議傍晚以後：三大法人、融資融券等盤後資料大約下午 4 點後才會公布齊全")
+    enabled = col_toggle.toggle(f"每天 {chosen_time} 自動收集資料並執行分析", value=status["exists"], key="schedule_enabled")
+    if chosen_time != app_settings["daily_task_time"]:
+        save_app_settings({"daily_task_time": chosen_time})
+    if enabled and (not status["exists"] or status["time"] != chosen_time):
+        ok, message = desktop.register_daily_task(chosen_time)
+        (st.success if ok else st.error)(message)
+        st.session_state["daily_task_status"] = desktop.daily_task_status()
+    elif not enabled and status["exists"]:
+        ok, message = desktop.unregister_daily_task()
         (st.success if ok else st.error)(message)
         st.session_state["daily_task_status"] = desktop.daily_task_status()
     st.caption("需要電腦開著並連上網路；如果那個時間電腦沒開，下次開機後會自動補做。")
+
+    st.divider()
+    ui.section("收集完之後的 AI 分析", "都會使用 Codex 帳號額度；個股分析每檔各呼叫一次，檔數多時建議只開需要的項目，同一天已分析過的個股不會重複分析")
+    settings = load_codex_settings()
+    changes = {}
+    col_news, col_top = st.columns([1.2, 1], vertical_alignment="bottom")
+    news = col_news.checkbox("分析當日新聞並挑出焦點個股", value=settings["auto_analyze_after_collect"], key="schedule_news",
+                             help="側邊欄「立即收集今日資料」也會依這個設定決定要不要分析新聞")
+    with col_top:
+        _render_news_top_n("schedule_news_top_n")
+    holdings_count = len(portfolio.load_positions())
+    holdings = st.checkbox(f"分析所有持股（目前 {holdings_count} 檔）", value=settings["auto_analyze_holdings"],
+                           key="schedule_holdings")
+    watch_codes = set(load_watchlist())
+    watch = st.checkbox(f"分析所有觀察名單（目前 {len(watch_codes)} 檔，與持股重複的只分析一次）",
+                        value=settings["auto_analyze_watchlist"], key="schedule_watchlist")
+    for field, value in (("auto_analyze_after_collect", news), ("auto_analyze_holdings", holdings),
+                         ("auto_analyze_watchlist", watch)):
+        if value != settings[field]:
+            changes[field] = value
+    if changes:
+        settings = update_codex_settings(changes)
+    count = len(scheduled_ai.stock_targets(settings))
+    if count:
+        st.caption(f"每天會做 {count} 檔個股分析（{count} 次 Codex 呼叫）")
 
 
 def onboarding_page():
@@ -2135,7 +2186,7 @@ NAV_TABS = {
     "alerts": ["最近觸發", "提醒規則", "新增提醒"],
     "calendar": ["持股與觀察名單", "其他提醒", "全市場除權息"],
     "ai": ["新聞深度分析", "大盤籌碼分析", "預測追蹤", "手動貼上"],
-    "ai_settings": ["Codex CLI", "Firecrawl"],
+    "ai_settings": ["Codex CLI", "每日排程", "Firecrawl"],
 }
 
 ONBOARDING_NEEDED = _onboarding_needed()

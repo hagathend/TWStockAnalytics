@@ -85,6 +85,7 @@ src/
 ├── charting.py            個股 K 線圖（plotly + FinMind）
 ├── report_pdf.py          報告 Markdown → PDF（Playwright）
 ├── collect_all.py         每日收集流程；backfill.py 歷史補收集
+├── scheduled_ai.py        收集後的 AI 分析（新聞／持股／觀察名單，各自在 codex_settings.json 開關，預設只分析新聞）
 ├── desktop.py             安裝版：背景工作、工作排程、Codex 登入
 ├── updater.py             安裝版：檢查 GitHub Releases 並更新
 ├── config.py / config_ai.py / config_app.py / config_watchlist.py   設定讀寫；version.py 版本號
@@ -106,7 +107,7 @@ launcher.pyw               安裝版啟動器；packaging/ 安裝程式打包；
         ↓
 AI 新聞分析（Codex CLI，收集後自動觸發）：
      缺內文的用 Firecrawl→Playwright 補 → 逐篇摘要存 news.excerpt
-     → 分批找候選 → 去重+代號校正 → 彙整挑 Top50 → ai_picks / ai_analysis_summary
+     → 分批找候選 → 去重+代號校正 → 彙整挑 Top N → ai_picks / ai_analysis_summary
         ↓
 個股/大盤分析（Codex CLI 按鈕，或產生提示詞手動貼到網頁版 AI 再貼回）→ stock_analysis / market_analysis
         ↓
@@ -121,7 +122,7 @@ AI 新聞分析（Codex CLI，收集後自動觸發）：
 | `institutional` | date+market+code | 三大法人買賣超 |
 | `margin` | date+market+code | 融資融券 |
 | `news` | id | `content`=全文、`excerpt`=AI逐篇摘要 |
-| `ai_picks` | date+rank | AI 挑的當日焦點個股 Top50（`ai_analysis.MAX_PICKS`） |
+| `ai_picks` | date+rank | AI 挑的當日焦點個股（檔數 `news_top_n` 可選 10／20／30／50） |
 | `ai_analysis_summary` | date | 當日新聞總結 |
 | `stock_analysis` | date+code | 個股分析（Codex 或手動貼回） |
 | `market_analysis` | date | 大盤籌碼分析（Codex 或手動貼回） |
@@ -147,7 +148,9 @@ Schema 變更走 `db.init_db()` 裡的 `ALTER TABLE ... ADD COLUMN` + `try/excep
 ## AI 分析：Codex CLI
 
 目前所有 AI 分析都走 **Codex CLI**（`src/codex_cli.py`），使用這台電腦已登入的帳號與額度，不需要 API Key：
-- 新聞深度分析：收集後依 `data/codex_settings.json` 的 `auto_analyze_after_collect` 自動觸發（UI 與排程腳本都是）
+- 新聞深度分析：收集後依 `data/codex_settings.json` 的 `auto_analyze_after_collect` 自動觸發（UI 與排程腳本都是）；
+  排程另可開 `auto_analyze_holdings`／`auto_analyze_watchlist` 逐檔分析個股（**每檔一次 Codex 呼叫，預設關閉**，
+  使用者在意額度）。設定 UI 在「AI 設定 › 每日排程」與「開始使用」第 4 步，排程時間存 `app_settings.json` 的 `daily_task_time`
 - 個股／大盤：頁面上「用 Codex 分析並儲存」；也保留「產生提示詞 → 貼到網頁版 AI → 貼回儲存」的手動流程
 - 以 `exec --ignore-user-config --ephemeral --sandbox read-only` 在暫存目錄執行，新聞內文中的指令一律視為資料
 - 需要結構化輸出時傳 `--output-schema`（JSON Schema），光靠文字要求 JSON 會自創格式
