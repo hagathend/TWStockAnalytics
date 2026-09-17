@@ -18,6 +18,8 @@ from src.portfolio import summarize_for_prompt as summarize_holding
 from src.market_index import stock_prompt_block as summarize_relative_strength
 from src.ownership import summarize_for_prompt as summarize_ownership
 from src.predictions import record_from_analysis
+from src.price_levels import from_finmind as _levels_frame
+from src.price_levels import summarize_for_prompt as summarize_price_levels
 from src.shareholding import summarize_for_prompt as summarize_shareholding
 from src.indicators import (
     RECOMMENDED_HISTORY_DAYS,
@@ -34,6 +36,9 @@ _STOCK_ANALYSIS_PROMPT = """你是台股個股分析助手。以下是 {code} {n
 
 【技術指標】（由程式依收盤價量計算，非估算值）
 {indicator_block}
+
+【支撐壓力與成交量密集區】（由程式依近期轉折高低點與價量分布計算）
+{levels_block}
 
 【相對大盤】（個股報酬與加權指數報酬比較，超額為正代表跑贏大盤）
 {relative_block}
@@ -65,7 +70,7 @@ _STOCK_ANALYSIS_PROMPT = """你是台股個股分析助手。以下是 {code} {n
 請根據以上資料，用簡潔的條列式回答，「每一項都必須嚴格限制在800字以內」，
 不要長篇大論、不要有開場白，直接條列以下{item_count}項結果：
 
-技術面分析：（依據上面已算好的均線、RSI、KD、MACD、布林通道與量能判讀目前技術面，
+技術面分析：（依據上面已算好的均線、RSI、KD、MACD、布林通道、量能與支撐壓力判讀目前技術面，
 　　　　　　　請直接引用這些數值，不要自己重新估算，800字以內）
 籌碼面分析：（依據上面已算好的法人連買連賣天數、累計買賣超、佔成交量比重、融資變化與大戶持股變化，
 　　　　　　　判斷目前籌碼偏多方還是空方掌控，請直接引用這些數值，800字以內）
@@ -219,6 +224,7 @@ def build_stock_analysis_prompt(code: str) -> str:
         date=_date.today().isoformat(),
         price_rows=_PRICE_ROWS_SHOWN,
         indicator_block=_format_indicators(price_rows),
+        levels_block=summarize_price_levels(_levels_frame(price_rows)) if price_rows else "（無法取得股價歷史）",
         chip_block=summarize_chip_metrics(metrics_for_code(code)),
         relative_block=summarize_relative_strength(code),
         ownership_block=summarize_ownership(code),

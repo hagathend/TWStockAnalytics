@@ -13,7 +13,7 @@ from datetime import date as _date, timedelta
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from src import ui
+from src import price_levels, ui
 from src.collectors import finmind
 from src.indicators import RECOMMENDED_HISTORY_DAYS, add_indicators, to_dataframe
 
@@ -96,6 +96,8 @@ def build_candlestick(code: str, name: str, days: int = 90) -> go.Figure | None:
         col=1,
     )
 
+    _add_price_levels(fig, rows, display_df)
+
     # 標題由頁面上的區塊標題負責，圖內不再放標題——圖內標題會跟上方圖例擠在同一行黏在一起
     ui.style_chart(fig, height=560)
     fig.update_layout(
@@ -109,3 +111,37 @@ def build_candlestick(code: str, name: str, days: int = 90) -> go.Figure | None:
     fig.update_yaxes(title_text="價格", title_font={"size": 11}, row=1, col=1)
     fig.update_yaxes(title_text="成交量(股)", title_font={"size": 11}, row=2, col=1)
     return fig
+
+
+def _add_price_levels(fig: go.Figure, rows: list[dict], display_df) -> None:
+    """在 K 線圖上標出最近的支撐壓力（虛線）、成交量最密集價位（點線），並在右側疊一層半透明的價量分布"""
+    history = price_levels.from_finmind(rows)
+    if history.empty:
+        return
+    low, high = float(display_df["min"].min()), float(display_df["max"].max())
+    visible = (low * 0.97, high * 1.03)  # 太遠的價位不畫，免得把 K 線壓扁
+
+    levels = price_levels.support_resistance(history.tail(120), max_levels=2)
+    for items, color, label in ((levels["supports"], _DOWN_COLOR, "支撐"), (levels["resistances"], _UP_COLOR, "壓力")):
+        for level in items:
+            if visible[0] <= level["price"] <= visible[1]:
+                fig.add_hline(y=level["price"], line={"color": color, "width": 1, "dash": "dash"}, opacity=0.8,
+                              annotation_text=f"{label} {level['price']:,.2f}", annotation_position="top left",
+                              annotation_font={"size": 11, "color": color}, row=1, col=1)
+
+    profile = price_levels.volume_profile(history.tail(60))
+    if not profile:
+        return
+    if visible[0] <= profile["poc"] <= visible[1]:
+        fig.add_hline(y=profile["poc"], line={"color": "#F5B942", "width": 1, "dash": "dot"}, opacity=0.8,
+                      annotation_text=f"量密集 {profile['poc']:,.2f}", annotation_position="bottom left",
+                      annotation_font={"size": 11, "color": "#F5B942"}, row=1, col=1)
+    bins = profile["bins"]
+    fig.add_trace(go.Bar(
+        x=bins["volume"], y=bins["price_mid"], orientation="h", xaxis="x3", yaxis="y",
+        width=float(bins["price_high"].iloc[0] - bins["price_low"].iloc[0]) * 0.9,
+        marker={"color": "rgba(135, 146, 166, 0.18)"}, name="近 60 日價量分布", hoverinfo="skip", showlegend=False,
+    ))
+    # 價量分布用獨立的 x 軸，範圍反過來讓長條從右邊往左長，最多佔圖寬約四分之一
+    fig.update_layout(xaxis3={"overlaying": "x", "anchor": "y", "side": "top", "visible": False,
+                              "range": [float(bins["volume"].max()) * 4, 0]})
