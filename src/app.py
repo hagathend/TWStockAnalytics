@@ -42,7 +42,7 @@ from src.config_ai import (
 from src.config_watchlist import add_stock, add_stocks, load_watchlist, remove_stock
 from src.market_analysis import build_market_analysis_prompt, save_market_analysis
 from src.report_pdf import markdown_to_pdf
-from src import (alerts, backtest, calendar_events, desktop, financials, fundamentals, heatmap, market_breadth, market_index, notify, portfolio,
+from src import (alerts, backtest, calendar_events, desktop, financials, pe_river, fundamentals, heatmap, market_breadth, market_index, notify, portfolio,
                  ownership, predictions,
                  revenue, shareholding, signals, ui, updater)
 from src.config import IS_INSTALLED
@@ -639,6 +639,32 @@ def _render_financials_panel(code: str):
             st.plotly_chart(ui.style_chart(fig, height=280), width="stretch", key=f"financials_chart_{code}")
 
 
+_RIVER_COLORS = {10: "rgba(34, 181, 115, 0.22)", 25: "rgba(34, 181, 115, 0.12)", 50: "rgba(135, 146, 166, 0.10)",
+                 75: "rgba(240, 82, 79, 0.12)", 90: "rgba(240, 82, 79, 0.22)"}
+
+
+def _render_pe_river_panel(code: str):
+    result = pe_river.river(code)
+    if not result:
+        return
+    frame, multiples = result["frame"], result["multiples"]
+    percentile = result["percentile"]
+    position = "偏便宜" if percentile <= 25 else "偏貴" if percentile >= 75 else "中間"
+    with ui.panel("本益比河流圖", f"目前 {result['current_pe']:.1f} 倍・位於近 {result['days']} 個交易日第 "
+                               f"{percentile:.0f} 百分位（{position}）・只比較自己的歷史，不同產業不能互比"):
+        fig = go.Figure()
+        levels = list(pe_river.BAND_PERCENTILES)
+        for i, p in enumerate(levels):
+            fig.add_scatter(x=frame["date"], y=frame[f"band_{p}"], mode="lines", name=f"{multiples[p]:.1f} 倍（{p}%）",
+                            line={"width": 1, "color": "rgba(201, 209, 222, 0.35)"},
+                            fill="tonexty" if i else None, fillcolor=_RIVER_COLORS[p],
+                            hovertemplate=f"%{{x}}<br>{multiples[p]:.1f} 倍價格 %{{y:,.2f}}<extra></extra>")
+        fig.add_scatter(x=frame["date"], y=frame["close"], mode="lines", name="收盤價",
+                        line={"color": ui.ACCENT_COLOR, "width": 2.2})
+        fig.update_xaxes(type="category", nticks=8)
+        st.plotly_chart(ui.style_chart(fig, height=320), width="stretch", key=f"pe_river_{code}")
+
+
 def _render_history_panel(code: str):
     with ui.panel("法人與融資歷史", "本地資料庫累積，每個交易日一筆"):
         tab_inst, tab_margin = st.tabs(["三大法人買賣超", "融資融券"])
@@ -732,6 +758,7 @@ def detail_page():
     _render_relative_strength_panel(code)
     _render_revenue_panel(code)
     _render_financials_panel(code)
+    _render_pe_river_panel(code)
     _render_shareholding_panel(code)
     _render_ownership_panel(code)
 
@@ -1352,7 +1379,7 @@ _SCREEN_COLUMNS = {
     "pb_ratio": "淨值比", "yoy_pct": "營收年增%", "revenue_high_text": "營收創高", "yoy_growth_streak": "年增連續月",
     "big1000_pct": "千張大戶%", "big1000_pct_change": "大戶週增(百分點)", "foreign_pct": "外資持股%",
     "foreign_change_20": "外資20日增(百分點)", "roe_annualized": "ROE年化%", "gross_margin": "毛利率%",
-    "eps_ttm": "近四季EPS",
+    "eps_ttm": "近四季EPS", "pe_percentile": "本益比百分位",
     "signals": "觸發訊號",
 }
 
@@ -1390,10 +1417,12 @@ def _render_screen_tab(signal_df: pd.DataFrame):
             pb_max = f3.number_input("淨值比 ≤", min_value=0.0, value=None, step=0.5)
             yoy_min = f4.number_input("營收年增% ≥", value=None, step=5.0)
         with st.expander("獲利條件（季度財報）"):
-            q1, q2, q3, _ = st.columns([1, 1, 1, 1])
+            q1, q2, q3, q4 = st.columns([1, 1, 1, 1])
             roe_min = q1.number_input("ROE（年化）% ≥", value=None, step=5.0)
             gross_min = q2.number_input("單季毛利率% ≥", value=None, step=5.0)
             eps_ttm_min = q3.number_input("近四季 EPS ≥（元）", value=None, step=1.0)
+            pe_pct_max = q4.number_input("本益比歷史百分位 ≤", min_value=0.0, max_value=100.0, value=None, step=10.0,
+                                         help="目前本益比在自己近兩年（或已收集期間）的位置，0＝最便宜；只有上市股")
         with st.expander("營收條件（月營收，需累積歷史資料）"):
             r1, r2, _ = st.columns([1, 1, 2], vertical_alignment="bottom")
             revenue_high_only = r1.checkbox("營收創 12 個月新高")
@@ -1421,6 +1450,9 @@ def _render_screen_tab(signal_df: pd.DataFrame):
         for column, minimum in (("roe_annualized", roe_min), ("gross_margin", gross_min), ("eps_ttm", eps_ttm_min)):
             if minimum is not None:
                 result = result[result[column].notna() & (result[column] >= minimum)]
+        result = result.merge(pe_river.latest_percentiles(), on="code", how="left")
+        if pe_pct_max is not None:
+            result = result[result["pe_percentile"].notna() & (result["pe_percentile"] <= pe_pct_max)]
         if foreign_change_min is not None:
             result = result[result["foreign_change_20"].notna() & (result["foreign_change_20"] >= foreign_change_min)]
         if big_min is not None:
@@ -1443,7 +1475,7 @@ def _render_screen_tab(signal_df: pd.DataFrame):
             view, signed=["漲跌%", "20日報酬%", "外資連買賣", "投信連買賣", "營收年增%", "大戶週增(百分點)", "外資20日增(百分點)"],
             thousands=["20日均量(張)", "外資連買賣", "投信連買賣", "年增連續月"],
             decimals=["收盤", "漲跌%", "20日報酬%", "本益比", "殖利率%", "淨值比", "營收年增%", "千張大戶%",
-                      "大戶週增(百分點)", "外資持股%", "外資20日增(百分點)", "ROE年化%", "毛利率%", "近四季EPS"],
+                      "大戶週增(百分點)", "外資持股%", "外資20日增(百分點)", "ROE年化%", "毛利率%", "近四季EPS", "本益比百分位"],
         )
         table_key = f"screen_table_{st.session_state.get('screen_table_version', 0)}"
         stocks = list(zip(result["code"], result["name"]))

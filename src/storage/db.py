@@ -1225,3 +1225,27 @@ def query_financials_counts() -> dict[tuple[int, int, str], int]:
     with get_conn() as conn:
         cur = conn.execute("SELECT year, quarter, market, COUNT(*) AS n FROM financials GROUP BY year, quarter, market")
         return {(r["year"], r["quarter"], r["market"]): r["n"] for r in cur.fetchall()}
+
+
+def query_valuation_dates(market: str = "TWSE") -> set[str]:
+    with get_conn() as conn:
+        return {r["date"] for r in conn.execute("SELECT DISTINCT date FROM valuation WHERE market = ?", (market,)).fetchall()}
+
+
+def query_pe_history(code: str, since: str) -> list[dict]:
+    """同一天的收盤價與本益比（本益比河流圖用）"""
+    with get_conn() as conn:
+        cur = conn.execute(
+            """SELECT v.date, p.close, v.pe_ratio AS pe FROM valuation v
+               JOIN stock_price p ON p.date = v.date AND p.code = v.code AND p.market = v.market
+               WHERE v.code = ? AND v.date >= ? ORDER BY v.date""",
+            (code, since),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def query_valuation_pe_all(market: str, since: str) -> list[dict]:
+    with get_conn() as conn:
+        cur = conn.execute("SELECT date, code, pe_ratio AS pe FROM valuation WHERE market = ? AND date >= ?",
+                           (market, since))
+        return [dict(r) for r in cur.fetchall()]
