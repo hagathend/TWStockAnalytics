@@ -591,15 +591,14 @@ _POSITION_COLUMNS = {
 
 def _render_position_panel(code: str):
     """個股詳情頁：有持有這檔才顯示"""
-    records = db.query_holdings(code)
-    if not records:
+    p = next((pos for pos in portfolio.load_positions() if pos["code"] == code), None)
+    if not p:
         return
-    p = portfolio.summarize_position(records, db.query_latest_close(code))
-    with ui.panel("我的持股", "損益以本地最新收盤價計算，未扣手續費與證交稅"):
+    with ui.panel("我的持股", "成本含買進手續費；損益以本地最新收盤價計算，未扣將來賣出的稅費"):
         items = [
             {"label": "持有", "value": portfolio.lots_text(p["shares"]), "sub": f"{p['records']} 筆買進"},
             {"label": "平均成本", "value": f"{p['avg_cost']:,.2f}",
-             "sub": f"最早買進 {p['first_buy_date']}" if p["first_buy_date"] else None},
+             "sub": f"從 {p['first_buy_date']} 開始持有" if p["first_buy_date"] else None},
         ]
         if p["pnl"] is not None:
             items += [
@@ -611,69 +610,167 @@ def _render_position_panel(code: str):
         ui.cards(items)
 
 
-def _render_add_holding_form():
-    with st.form("add_holding_form", clear_on_submit=True, border=False):
-        c1, c2, c3, c4, c5 = st.columns([1.2, 1, 1, 1.2, 1.4])
-        code = c1.text_input("股票代號", placeholder="例如 2330")
-        lots = c2.number_input("張數", min_value=0, value=1, step=1)
-        odd = c3.number_input("零股（股）", min_value=0, max_value=999, value=0, step=100)
-        price = c4.number_input("成交均價", min_value=0.0, value=None, step=0.5, format="%.2f")
-        buy_date = c5.date_input("買進日期", value=_date.today(), max_value=_date.today())
-        note = st.text_input("備註（選填）", placeholder="例如：拉回月線分批買進")
-        if st.form_submit_button("新增紀錄", type="primary"):
-            shares = int(lots) * portfolio.SHARES_PER_LOT + int(odd)
-            code = code.strip()
-            if not code or not shares or not price:
-                st.warning("請填入股票代號、股數與成交均價")
-            else:
-                name = db.lookup_stock_name(code) or code
-                db.add_holding(code, name, shares, float(price), buy_date.isoformat(), note)
-                st.rerun()
+def _trade_form_key(name: str) -> str:
+    return f"trade_{name}_{st.session_state.get('trade_form_version', 0)}"
 
 
-def _render_holding_records():
-    records = db.query_holdings()
-    if not records:
-        st.caption("尚無買進紀錄")
+def _render_add_trade_form():
+    settings = load_app_settings()
+    discount = float(settings.get("fee_discount") or 1.0)
+
+    c1, c2, c3, c4 = st.columns([1, 1.2, 1, 1])
+    side_label = c1.segmented_control("買賣", ["買進", "賣出"], default="買進", key=_trade_form_key("side")) or "買進"
+    side = "buy" if side_label == "買進" else "sell"
+    code = c2.text_input("股票代號", placeholder="例如 2330", key=_trade_form_key("code")).strip()
+    lots = c3.number_input("張數", min_value=0, value=1, step=1, key=_trade_form_key("lots"))
+    odd = c4.number_input("零股（股）", min_value=0, max_value=999, value=0, step=100, key=_trade_form_key("odd"))
+
+    c5, c6, c7, c8 = st.columns([1, 1.2, 1, 1])
+    price = c5.number_input("成交價", min_value=0.0, value=None, step=0.5, format="%.2f", key=_trade_form_key("price"))
+    trade_date = c6.date_input("成交日期", value=_date.today(), max_value=_date.today(), key=_trade_form_key("date"))
+    shares = int(lots) * portfolio.SHARES_PER_LOT + int(odd)
+    auto_fee = portfolio.estimate_fee(shares, price, discount) if price and shares else 0
+    auto_tax = portfolio.estimate_tax(code, shares, price) if price and shares and side == "sell" and code else 0
+    fee = c7.number_input("手續費", min_value=0, value=None, step=1, placeholder=f"自動 {auto_fee:,}",
+                          key=_trade_form_key("fee"), help=f"留空＝依折扣 {discount:g} 自動試算")
+    tax = c8.number_input("證交稅", min_value=0, value=None, step=1, placeholder=f"自動 {auto_tax:,}",
+                          key=_trade_form_key("tax"), disabled=side == "buy", help="只有賣出要繳；留空＝自動試算")
+    reason = st.text_area("進出場理由（交易日誌，AI 覆盤時會參考）", height=80, key=_trade_form_key("reason"),
+                          placeholder="例如：站回月線、投信連買三天，停損設在前波低點")
+
+    if st.button("新增交易", type="primary", key="trade_submit"):
+        if not code or not shares or not price:
+            st.warning("請填入股票代號、股數與成交價")
+            return
+        name = db.lookup_stock_name(code) or code
+        new_trade = {"id": 10**9, "date": trade_date.isoformat(), "code": code, "name": name, "side": side,
+                     "shares": shares, "price": float(price),
+                     "fee": auto_fee if fee is None else fee, "tax": (auto_tax if tax is None else tax) if side == "sell" else 0}
+        error = portfolio.validate(db.query_trades(code) + [new_trade])
+        if error:
+            st.error(error)
+            return
+        db.add_trade(new_trade["date"], code, name, side, shares, float(price), new_trade["fee"], new_trade["tax"], reason)
+        st.session_state["trade_form_version"] = st.session_state.get("trade_form_version", 0) + 1
+        st.session_state["trade_notice"] = f"已新增：{side_label} {code} {name} {portfolio.lots_text(shares)} @ {price:,.2f}"
+        st.rerun()
+
+    with st.expander("手續費設定"):
+        new_discount = st.number_input("券商手續費折扣（例如 2.8 折填 0.28，沒有折扣填 1）", min_value=0.01, max_value=1.0,
+                                       value=discount, step=0.01, format="%.2f", key="fee_discount_input")
+        if new_discount != discount:
+            save_app_settings({"fee_discount": new_discount})
+            st.rerun()
+
+
+_TRADE_SIDE_LABELS = {"buy": "買進", "sell": "賣出"}
+
+
+def _render_trade_records():
+    trades = db.query_trades()
+    if not trades:
+        st.caption("尚無交易紀錄")
         return
-    df = pd.DataFrame(records)
-    df["buy_date"] = pd.to_datetime(df["buy_date"], errors="coerce").dt.date
+    df = pd.DataFrame(trades)
+    df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
+    df["side"] = df["side"].map(_TRADE_SIDE_LABELS)
     df["delete"] = False
+    df = df.iloc[::-1].reset_index(drop=True)  # 新的在上面
     edited = st.data_editor(
-        df[["id", "code", "name", "shares", "cost_price", "buy_date", "note", "delete"]],
-        hide_index=True, width="stretch", key="holding_editor",
+        df[["id", "date", "side", "code", "name", "shares", "price", "fee", "tax", "reason", "delete"]],
+        hide_index=True, width="stretch", key=f"trade_editor_{st.session_state.get('trade_form_version', 0)}",
         disabled=["id", "code", "name"],
         column_config={
             "id": None,
+            "date": st.column_config.DateColumn("日期", format="YYYY-MM-DD"),
+            "side": st.column_config.SelectboxColumn("買賣", options=list(_TRADE_SIDE_LABELS.values()), required=True),
             "code": st.column_config.TextColumn("代號"),
             "name": st.column_config.TextColumn("名稱"),
-            "shares": st.column_config.NumberColumn("股數", min_value=1, step=1, format="%d",
-                                                    help="1 張 = 1000 股；賣出部分時直接改股數"),
-            "cost_price": st.column_config.NumberColumn("成交均價", min_value=0.0, format="%.2f"),
-            "buy_date": st.column_config.DateColumn("買進日期", format="YYYY-MM-DD"),
-            "note": st.column_config.TextColumn("備註"),
-            "delete": st.column_config.CheckboxColumn("刪除", help="勾選後按「儲存變更」刪除這筆（例如已全部賣出）"),
+            "shares": st.column_config.NumberColumn("股數", min_value=1, step=1, format="%d"),
+            "price": st.column_config.NumberColumn("成交價", min_value=0.01, format="%.2f"),
+            "fee": st.column_config.NumberColumn("手續費", min_value=0, format="%d"),
+            "tax": st.column_config.NumberColumn("證交稅", min_value=0, format="%d"),
+            "reason": st.column_config.TextColumn("理由", width="large"),
+            "delete": st.column_config.CheckboxColumn("刪除"),
         },
     )
-    if st.button("儲存變更", key="save_holdings"):
-        original = df.set_index("id")
-        changed = 0
+    if st.button("儲存變更", key="save_trades"):
+        sides = {v: k for k, v in _TRADE_SIDE_LABELS.items()}
+        original = {t["id"]: t for t in trades}
+        kept, deleted, updated = [], [], []
         for row in edited.to_dict("records"):
+            trade_id = int(row["id"])
             if row["delete"]:
-                db.delete_holding(int(row["id"]))
-                changed += 1
+                deleted.append(trade_id)
                 continue
-            before = original.loc[row["id"]]
-            buy_date = row["buy_date"].isoformat() if pd.notna(row["buy_date"]) else None
-            before_date = before["buy_date"].isoformat() if pd.notna(before["buy_date"]) else None
-            if (int(row["shares"]) != int(before["shares"]) or float(row["cost_price"]) != float(before["cost_price"])
-                    or buy_date != before_date or (row["note"] or "") != (before["note"] or "")):
-                db.update_holding(int(row["id"]), int(row["shares"]), float(row["cost_price"]), buy_date,
-                                  row["note"] or "")
-                changed += 1
-        if changed:
+            new = {**original[trade_id], "date": row["date"].isoformat() if pd.notna(row["date"]) else original[trade_id]["date"],
+                   "side": sides.get(row["side"], original[trade_id]["side"]), "shares": int(row["shares"]),
+                   "price": float(row["price"]), "fee": float(row["fee"] or 0), "tax": float(row["tax"] or 0),
+                   "reason": row["reason"] or ""}
+            kept.append(new)
+            if any(new[k] != original[trade_id][k] for k in ("date", "side", "shares", "price", "fee", "tax", "reason")):
+                updated.append(new)
+        error = portfolio.validate(kept)
+        if error:
+            st.error(f"無法儲存：{error}")
+            return
+        for trade_id in deleted:
+            db.delete_trade(trade_id)
+        for t in updated:
+            db.update_trade(t["id"], date=t["date"], side=t["side"], shares=t["shares"], price=t["price"],
+                            fee=t["fee"], tax=t["tax"], reason=t["reason"])
+        if deleted or updated:
+            st.session_state["trade_form_version"] = st.session_state.get("trade_form_version", 0) + 1
+            st.session_state["trade_notice"] = f"已更新 {len(updated)} 筆、刪除 {len(deleted)} 筆"
             st.rerun()
         st.info("沒有變更")
+
+
+_REALIZED_COLUMNS = {
+    "date": "賣出日", "code": "代號", "name": "名稱", "shares_text": "股數", "avg_cost": "平均成本", "price": "賣出價",
+    "pnl": "已實現損益", "return_pct": "報酬率%", "holding_days": "持有天數", "reviewed": "覆盤",
+}
+
+
+def _render_realized_panel():
+    records = portfolio.realized_trades()
+    with ui.panel("已實現損益與 AI 覆盤", "已扣手續費與證交稅；選一筆賣出，用 Codex 檢討這次的進出場"):
+        if not records:
+            st.caption("還沒有賣出紀錄")
+            return
+        this_year = [r for r in records if r["date"].startswith(str(_date.today().year))]
+        wins = [r for r in records if r["pnl"] > 0]
+        ui.cards([
+            {"label": f"{_date.today().year} 已實現", "value": f"{sum(r['pnl'] for r in this_year):+,.0f}",
+             "tone": ui.tone_of(sum(r["pnl"] for r in this_year)), "sub": f"{len(this_year)} 筆賣出"},
+            {"label": "累計已實現", "value": f"{sum(r['pnl'] for r in records):+,.0f}",
+             "tone": ui.tone_of(sum(r["pnl"] for r in records)), "sub": f"{len(records)} 筆賣出"},
+            {"label": "獲利筆數比例", "value": f"{len(wins) / len(records) * 100:.0f}%"},
+        ])
+        reviews = db.query_trade_reviews()
+        rows = [{**r, "shares_text": portfolio.lots_text(r["shares"]), "reviewed": "有" if r["id"] in reviews else ""}
+                for r in records]
+        view = pd.DataFrame(rows)[list(_REALIZED_COLUMNS)].rename(columns=_REALIZED_COLUMNS)
+        st.dataframe(_styled_table(view, signed=["已實現損益", "報酬率%"], thousands=["已實現損益"],
+                                   decimals=["平均成本", "賣出價", "報酬率%"]), width="stretch", hide_index=True)
+
+        options = {r["id"]: f"{r['date']}　{r['code']} {r['name']}　{portfolio.lots_text(r['shares'])}　{r['pnl']:+,.0f}"
+                   for r in records}
+        col_pick, col_btn = st.columns([3, 1], vertical_alignment="bottom")
+        chosen = col_pick.selectbox("選擇要覆盤的賣出交易", list(options), format_func=options.get, key="review_pick")
+        if col_btn.button("用 Codex 覆盤", type="primary", width="stretch", key="review_run"):
+            with st.spinner("Codex 正在覆盤..."):
+                ok, text = generate_codex_text(portfolio.build_review_prompt(chosen))
+            if ok:
+                db.save_trade_review(chosen, text)
+                reviews = db.query_trade_reviews()
+            else:
+                st.error(text)
+        if chosen in reviews:
+            st.caption(f"覆盤結果・{reviews[chosen]['created_at']}")
+            st.markdown(_md_linebreaks(reviews[chosen]["review"]))
+        with st.expander("覆盤提示詞（也可以複製到網頁版 AI）"):
+            st.code(portfolio.build_review_prompt(chosen), language=None)
 
 
 def _analyze_all_positions(positions: list[dict]):
@@ -696,7 +793,14 @@ def _analyze_all_positions(positions: list[dict]):
 
 def portfolio_page():
     _render_sidebar()
-    ui.page_header("我的持股", "持倉成本與損益以本地最新收盤價計算，未扣手續費與證交稅；資料只存在本機資料庫")
+    ui.page_header("我的持股", "由交易紀錄以平均成本法計算；成本含買進手續費，未實現損益未扣將來賣出的稅費；資料只存在本機資料庫")
+
+    notice = st.session_state.pop("trade_notice", None)
+    if notice:
+        st.success(notice)
+    trade_error = portfolio.validate(db.query_trades())
+    if trade_error:
+        st.error(f"交易紀錄有誤，請到下方修正：{trade_error}")
 
     positions = portfolio.load_positions()
     if positions:
@@ -752,13 +856,15 @@ def portfolio_page():
                     with st.expander(f"{p['code']} {p['name']}・今天的分析（{saved[0]['created_at']}）"):
                         st.markdown(_md_linebreaks(saved[0]["analysis"]))
     else:
-        st.info("還沒有持股紀錄，請在下方新增第一筆買進紀錄")
+        st.info("目前沒有持有中的股票，請在下方新增交易")
 
-    with ui.panel("新增買進紀錄", "同一檔分批買進請分開記錄，會自動計算加權平均成本"):
-        _render_add_holding_form()
+    with ui.panel("新增交易", "買進、賣出都記一筆；手續費與證交稅留空會自動試算"):
+        _render_add_trade_form()
 
-    with ui.panel("買進紀錄", "可直接修改股數、成交均價、日期與備註；部分賣出請改股數，全部賣出請勾選刪除"):
-        _render_holding_records()
+    _render_realized_panel()
+
+    with ui.panel("交易紀錄", "可直接修改或勾選刪除；儲存前會檢查賣出股數有沒有超過當時持有"):
+        _render_trade_records()
 
 
 # ─────────────────────────────── AI 預測追蹤 ───────────────────────────────

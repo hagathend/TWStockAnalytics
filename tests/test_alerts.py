@@ -56,8 +56,8 @@ class AlertCheckTests(TempDBTestCase):
         self.assertEqual(alerts.check_alerts()["message"], "沒有啟用中的提醒規則")
 
     def test_holding_loss_for_all_holdings(self):
-        db.add_holding("2317", "鴻海", 1000, 60.0, "2026-09-01")   # 45 / 60 → -25%
-        db.add_holding("2330", "台積電", 1000, 100.0, "2026-09-01")  # +10%
+        db.add_trade("2026-09-01", "2317", "鴻海", "buy", 1000, 60.0)     # 45 / 60 → -25%
+        db.add_trade("2026-09-01", "2330", "台積電", "buy", 1000, 100.0)  # +10%
         db.add_alert_rule("holding_loss", threshold=8)
         db.add_alert_rule("holding_gain", "2330", threshold=5)
         messages = [e["message"] for e in alerts.check_alerts()["new_events"]]

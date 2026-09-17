@@ -138,6 +138,34 @@ CREATE TABLE IF NOT EXISTS month_revenue (
     PRIMARY KEY (year_month, market, code)
 );
 
+-- 交易紀錄（取代 holdings）：持倉與已實現損益都由這張表以平均成本法推算。股數以「股」計，金額單位元
+CREATE TABLE IF NOT EXISTS trades (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    date TEXT NOT NULL,
+    code TEXT NOT NULL,
+    name TEXT,
+    side TEXT NOT NULL CHECK (side IN ('buy', 'sell')),
+    shares INTEGER NOT NULL,
+    price REAL NOT NULL,
+    fee REAL NOT NULL DEFAULT 0,
+    tax REAL NOT NULL DEFAULT 0,
+    reason TEXT,
+    created_at TEXT
+);
+
+-- 賣出交易的 AI 覆盤
+CREATE TABLE IF NOT EXISTS trade_reviews (
+    trade_id INTEGER PRIMARY KEY,
+    review TEXT NOT NULL,
+    created_at TEXT
+);
+
+-- 一次性資料轉換的完成標記（例如 holdings → trades），避免使用者刪光交易後又被重新匯入
+CREATE TABLE IF NOT EXISTS app_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
+
 -- 集保戶股權分散表（每週）：level 1–15 為持股分級、17 為合計；來源只有最新一週，歷史靠累積
 CREATE TABLE IF NOT EXISTS shareholding (
     date TEXT NOT NULL,
@@ -233,6 +261,20 @@ def get_conn():
         conn.close()
 
 
+def _migrate_holdings_to_trades(conn):
+    """舊版「我的持股」每筆買進存在 holdings；改用 trades 後轉成買進交易（只做一次，手續費當 0）"""
+    if conn.execute("SELECT 1 FROM app_meta WHERE key = 'holdings_migrated'").fetchone():
+        return
+    now = datetime.now().isoformat(timespec="seconds")
+    conn.execute(
+        """INSERT INTO trades (date, code, name, side, shares, price, fee, tax, reason, created_at)
+           SELECT COALESCE(buy_date, substr(created_at, 1, 10), ?), code, name, 'buy', shares, cost_price, 0, 0, note, ?
+           FROM holdings ORDER BY id""",
+        (now[:10], now),
+    )
+    conn.execute("INSERT INTO app_meta (key, value) VALUES ('holdings_migrated', ?)", (now,))
+
+
 def init_db():
     with get_conn() as conn:
         conn.executescript(SCHEMA)
@@ -244,6 +286,7 @@ def init_db():
         # 修復舊版解析錯誤存下的上櫃自營商欄位（當時存成外資的數字）。
         # 官方合計欄位是對的，且「合計 = 外資 + 投信 + 自營商」，所以自營商可由另外三欄推回；
         # 資料正確時條件不成立、不會更新任何列。
+        _migrate_holdings_to_trades(conn)
         conn.execute(
             """UPDATE institutional SET dealer_net = total_net - foreign_net - COALESCE(trust_net, 0)
                WHERE market = 'TPEx' AND total_net IS NOT NULL AND foreign_net IS NOT NULL
@@ -912,3 +955,51 @@ def query_shareholding_on(date: str) -> list[dict]:
     with get_conn() as conn:
         cur = conn.execute(_SHAREHOLDING_SUMMARY_SQL + " WHERE date = ? GROUP BY date, code", (date,))
         return [dict(r) for r in cur.fetchall()]
+
+
+def add_trade(date: str, code: str, name: str, side: str, shares: int, price: float, fee: float = 0,
+              tax: float = 0, reason: str = "") -> int:
+    with get_conn() as conn:
+        cur = conn.execute(
+            """INSERT INTO trades (date, code, name, side, shares, price, fee, tax, reason, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (date, code, name, side, shares, price, fee, tax, reason, datetime.now().isoformat(timespec="seconds")),
+        )
+        return cur.lastrowid
+
+
+def update_trade(trade_id: int, **fields):
+    allowed = {"date", "side", "shares", "price", "fee", "tax", "reason"}
+    updates = {k: v for k, v in fields.items() if k in allowed}
+    if not updates:
+        return
+    with get_conn() as conn:
+        conn.execute(f"UPDATE trades SET {', '.join(f'{k} = ?' for k in updates)} WHERE id = ?",
+                     (*updates.values(), trade_id))
+
+
+def delete_trade(trade_id: int):
+    with get_conn() as conn:
+        conn.execute("DELETE FROM trades WHERE id = ?", (trade_id,))
+        conn.execute("DELETE FROM trade_reviews WHERE trade_id = ?", (trade_id,))
+
+
+def query_trades(code: str | None = None) -> list[dict]:
+    """交易紀錄，依日期與輸入順序由舊到新（平均成本法必須照時間順序計算）"""
+    with get_conn() as conn:
+        if code:
+            cur = conn.execute("SELECT * FROM trades WHERE code = ? ORDER BY date, id", (code,))
+        else:
+            cur = conn.execute("SELECT * FROM trades ORDER BY date, id")
+        return [dict(r) for r in cur.fetchall()]
+
+
+def save_trade_review(trade_id: int, review: str):
+    with get_conn() as conn:
+        conn.execute("INSERT OR REPLACE INTO trade_reviews (trade_id, review, created_at) VALUES (?, ?, ?)",
+                     (trade_id, review, datetime.now().isoformat(timespec="seconds")))
+
+
+def query_trade_reviews() -> dict[int, dict]:
+    with get_conn() as conn:
+        return {r["trade_id"]: dict(r) for r in conn.execute("SELECT * FROM trade_reviews").fetchall()}
