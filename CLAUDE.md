@@ -190,6 +190,10 @@ Schema 變更走 `db.init_db()` 裡的 `ALTER TABLE ... ADD COLUMN` + `try/excep
 - **不要放圖示**：emoji 和 Material 圖示使用者都覺得醜，導覽列與按鈕一律純文字。
 - **紅漲綠跌**：顏色只從 `ui.UP_COLOR` / `ui.DOWN_COLOR` 取；表格用 `_styled_table()`、圖表用 `ui.style_chart()`。
 - plotly 圖不要放圖內標題（會跟圖例黏在一起），標題交給外面的 panel。
+- **導覽＝可摺疊的大項目＋子項目**：`app.py` 的 `_render_nav()` 自訂側邊欄（內建導覽 `position="hidden"`），
+  子項目對應頁內分頁，清單在 `NAV_TABS`。頁面用 `ui.page_tabs(page_id, NAV_TABS[page_id])` 取得目前分頁，
+  **只執行目前分頁的內容**（不要一頁從頭畫到尾一直往下拉）。新增區塊時放進適當分頁，或在 `NAV_TABS` 加子項目。
+  側邊欄子項目用 `on_click` 切換，不要在腳本中途 `st.rerun()`（會清掉頁面上還沒畫到的輸入框狀態）。
 
 ## 安裝版（給不懂電腦的朋友，詳見 `packaging/README.md`）
 
