@@ -3,9 +3,10 @@
   "configurations": [
     {
       "name": "streamlit",
-      "runtimeExecutable": ".venv/Scripts/python.exe",
-      "runtimeArgs": ["-m", "streamlit", "run", "src/app.py", "--server.headless", "true"],
-      "port": 8501
+      "runtimeExecutable": "cmd",
+      "runtimeArgs": ["/c", ".venv\\Scripts\\python.exe -m streamlit run src/app.py --server.headless true --server.port %PORT%"],
+      "port": 8502,
+      "autoPort": true
     }
   ]
 }
