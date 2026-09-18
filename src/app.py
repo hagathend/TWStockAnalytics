@@ -18,6 +18,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 import os  # noqa: E402
 from functools import partial  # noqa: E402
 import threading  # noqa: E402
+import time  # noqa: E402
 from datetime import date as _date, timedelta  # noqa: E402
 
 import pandas as pd  # noqa: E402
@@ -155,12 +156,38 @@ def _styled_table(df: pd.DataFrame, signed: list[str] = (), thousands: list[str]
     return styler
 
 
+_CLICK_MAX_AGE = 3.0  # 秒：雙擊會送出兩次點擊，第二次可能在換頁後才到，太舊的點擊不理會
+
+
+def _on_table_click(key: str):
+    """表格選取改變時的回呼：點到儲存格就記下那一列（附時間），並把儲存格選取清掉、勾選框的列選取保留"""
+    selection = (st.session_state.get(key) or {}).get("selection", {})
+    cells = selection.get("cells") or []
+    if cells:
+        st.session_state[f"{key}__click"] = (cells[0][0], time.time())
+        st.session_state[key] = {"selection": {"rows": list(selection.get("rows") or []), "columns": [], "cells": []}}
+
+
+def _take_table_click(key: str) -> int | None:
+    clicked = st.session_state.pop(f"{key}__click", None)
+    if clicked and time.time() - clicked[1] <= _CLICK_MAX_AGE:
+        return clicked[0]
+    return None
+
+
 def _clickable_table(data, key: str, **kwargs):
-    """點任一格就回傳那一列的位置（沒點回傳 None）。用「單格選取」模式，表格左邊不會出現勾選框；
-    搭配 st.dialog 時，關閉視窗要呼叫 _clear_table_click(key) 清掉選取，同一列才能再點一次"""
-    event = st.dataframe(data, key=key, on_select="rerun", selection_mode="single-cell", **kwargs)
-    cells = event.selection.get("cells", []) if event else []
-    return cells[0][0] if cells else None
+    """點任一格（單擊或雙擊）就回傳那一列的位置（沒點回傳 None）。只用「單格選取」，表格左邊不會出現勾選框"""
+    st.dataframe(data, key=key, on_select=partial(_on_table_click, key), selection_mode="single-cell", **kwargs)
+    return _take_table_click(key)
+
+
+def _checkable_table(data, key: str, selected_rows: list[int] | None = None, **kwargs):
+    """左邊有勾選框可以複選（搭配表格上方的按鈕），點其他儲存格則回傳那一列（開個股詳情用）。
+    回傳 (勾選的列, 點到的列或 None)；selected_rows 是這個表格第一次畫出來時要預先勾選的列（換頁回來還原用）"""
+    options = {"selection_default": {"selection": {"rows": selected_rows}}} if selected_rows else {}
+    event = st.dataframe(data, key=key, on_select=partial(_on_table_click, key),
+                         selection_mode=["multi-row", "single-cell"], **options, **kwargs)
+    return list(event.selection.rows), _take_table_click(key)
 
 
 def _clear_table_click(key: str):
@@ -174,6 +201,10 @@ def _md_linebreaks(text: str) -> str:
 
 
 def _go_to_detail(code: str):
+    """開個股詳情，並記住是從哪一頁來的（個股詳情上方會出現「返回」按鈕）"""
+    origin = st.session_state.get("tw_nav_page")
+    if origin and origin != "detail":
+        st.session_state["detail_return"] = origin
     st.session_state["selected_code"] = code
     st.switch_page(DETAIL_PAGE)
 
@@ -770,6 +801,10 @@ def _render_stock_ai_panel(code: str):
 
 def detail_page():
     selected_date = _render_sidebar()
+    origin = st.session_state.get("detail_return")
+    if origin in NAV_PAGES:
+        if st.button(f"返回{NAV_PAGES[origin].title}", key="detail_back"):
+            st.switch_page(NAV_PAGES[origin])
     ui.page_header("個股詳情", "K 線、籌碼、基本面、新聞與 AI 分析")
 
     col_input, _ = st.columns([1, 3])
@@ -1507,37 +1542,55 @@ def _add_selected_to_watchlist(table_key: str, stocks: list[tuple[str, str]]):
         message += f"（{len(existing)} 檔原本就在名單裡）"
     st.session_state["screen_notice"] = message
     st.session_state["screen_table_version"] = st.session_state.get("screen_table_version", 0) + 1
+    st.session_state["screen_checked_codes"] = []
+
+
+# 篩選條件的 widget key 與預設值；換頁時 Streamlit 會清掉沒畫出來的 widget 狀態，
+# 靠 ui.restore_widgets／remember_widgets 保存，從個股詳情返回時條件還在
+_SCREEN_DEFAULTS = {
+    "scr_signals": [signals.SIGNALS["breakout_20d"]], "scr_mode": "全部符合", "scr_min_lots": 500,
+    "scr_pe_max": None, "scr_yield_min": None, "scr_pb_max": None, "scr_yoy_min": None,
+    "scr_roe_min": None, "scr_gross_min": None, "scr_eps_ttm_min": None, "scr_pe_pct_max": None,
+    "scr_revenue_high": False, "scr_yoy_streak": 0,
+    "scr_big_min": None, "scr_big_change_min": None, "scr_foreign_change_min": None,
+}
 
 
 def _render_screen_tab(signal_df: pd.DataFrame):
+    ui.restore_widgets(_SCREEN_DEFAULTS)
     with ui.panel("篩選條件"):
         labels = {v: k for k, v in signals.SIGNALS.items()}
-        chosen = st.multiselect("訊號條件", list(labels), default=[signals.SIGNALS["breakout_20d"]])
+        chosen = st.multiselect("訊號條件", list(labels), key="scr_signals")
         col1, col2, _ = st.columns([1, 1, 2])
-        mode = col1.segmented_control("條件組合", ["全部符合", "符合任一"], default="全部符合") or "全部符合"
-        min_lots = col2.number_input("20日均量至少（張）", min_value=0, value=500, step=100)
+        mode = col1.segmented_control("條件組合", ["全部符合", "符合任一"], key="scr_mode") or "全部符合"
+        min_lots = col2.number_input("20日均量至少（張）", min_value=0, step=100, key="scr_min_lots")
         with st.expander("基本面條件（留空＝不限制；設了條件時缺資料的股票會被排除）"):
             f1, f2, f3, f4 = st.columns(4)
-            pe_max = f1.number_input("本益比 ≤", min_value=0.0, value=None, step=1.0)
-            yield_min = f2.number_input("殖利率% ≥", min_value=0.0, value=None, step=0.5)
-            pb_max = f3.number_input("淨值比 ≤", min_value=0.0, value=None, step=0.5)
-            yoy_min = f4.number_input("營收年增% ≥", value=None, step=5.0)
+            pe_max = f1.number_input("本益比 ≤", min_value=0.0, value=None, step=1.0, key="scr_pe_max")
+            yield_min = f2.number_input("殖利率% ≥", min_value=0.0, value=None, step=0.5, key="scr_yield_min")
+            pb_max = f3.number_input("淨值比 ≤", min_value=0.0, value=None, step=0.5, key="scr_pb_max")
+            yoy_min = f4.number_input("營收年增% ≥", value=None, step=5.0, key="scr_yoy_min")
         with st.expander("獲利條件（季度財報）"):
             q1, q2, q3, q4 = st.columns([1, 1, 1, 1])
-            roe_min = q1.number_input("ROE（年化）% ≥", value=None, step=5.0)
-            gross_min = q2.number_input("單季毛利率% ≥", value=None, step=5.0)
-            eps_ttm_min = q3.number_input("近四季 EPS ≥（元）", value=None, step=1.0)
+            roe_min = q1.number_input("ROE（年化）% ≥", value=None, step=5.0, key="scr_roe_min")
+            gross_min = q2.number_input("單季毛利率% ≥", value=None, step=5.0, key="scr_gross_min")
+            eps_ttm_min = q3.number_input("近四季 EPS ≥（元）", value=None, step=1.0, key="scr_eps_ttm_min")
             pe_pct_max = q4.number_input("本益比歷史百分位 ≤", min_value=0.0, max_value=100.0, value=None, step=10.0,
+                                         key="scr_pe_pct_max",
                                          help="目前本益比在自己近兩年（或已收集期間）的位置，0＝最便宜；只有上市股")
         with st.expander("營收條件（月營收，需累積歷史資料）"):
             r1, r2, _ = st.columns([1, 1, 2], vertical_alignment="bottom")
-            revenue_high_only = r1.checkbox("營收創 12 個月新高")
-            yoy_streak_min = r2.number_input("年增率連續成長 ≥（月）", min_value=0, value=0, step=1)
+            revenue_high_only = r1.checkbox("營收創 12 個月新高", key="scr_revenue_high")
+            yoy_streak_min = r2.number_input("年增率連續成長 ≥（月）", min_value=0, step=1, key="scr_yoy_streak")
         with st.expander("籌碼集中條件（集保股權分散，每週資料）"):
             s1, s2, s3, _ = st.columns([1, 1, 1, 1])
-            big_min = s1.number_input("千張大戶持股% ≥", min_value=0.0, max_value=100.0, value=None, step=5.0)
-            big_change_min = s2.number_input("大戶週增 ≥（百分點）", value=None, step=0.1, format="%.2f")
-            foreign_change_min = s3.number_input("外資持股 20 日增 ≥（百分點）", value=None, step=0.5, format="%.2f")
+            big_min = s1.number_input("千張大戶持股% ≥", min_value=0.0, max_value=100.0, value=None, step=5.0,
+                                      key="scr_big_min")
+            big_change_min = s2.number_input("大戶週增 ≥（百分點）", value=None, step=0.1, format="%.2f",
+                                             key="scr_big_change_min")
+            foreign_change_min = s3.number_input("外資持股 20 日增 ≥（百分點）", value=None, step=0.5, format="%.2f",
+                                                 key="scr_foreign_change_min")
+    ui.remember_widgets(_SCREEN_DEFAULTS)
 
     result = signals.screen(signal_df, [labels[c] for c in chosen], min_avg_volume_lots=min_lots,
                             mode="all" if mode == "全部符合" else "any")
@@ -1567,7 +1620,7 @@ def _render_screen_tab(signal_df: pd.DataFrame):
             result = result[result["big1000_pct_change"].notna() & (result["big1000_pct_change"] >= big_change_min)]
         result = result.reset_index(drop=True)
 
-    with ui.panel("篩選結果", f"符合 {len(result)} 檔・依相對強弱排序・勾選後可加入觀察名單"):
+    with ui.panel("篩選結果", f"符合 {len(result)} 檔・依相對強弱排序・勾選左邊方框可加入觀察名單・點一下股票開啟個股詳情"):
         notice = st.session_state.pop("screen_notice", None)
         if notice:
             st.success(notice)
@@ -1585,17 +1638,22 @@ def _render_screen_tab(signal_df: pd.DataFrame):
         )
         table_key = f"screen_table_{st.session_state.get('screen_table_version', 0)}"
         stocks = list(zip(result["code"], result["name"]))
-        event = st.dataframe(
-            styler, width="stretch", hide_index=True, height=560, on_select="rerun",
-            selection_mode="multi-row", key=table_key,
+        codes = list(result["code"])
+        checked_codes = st.session_state.get("screen_checked_codes", [])
+        rows, clicked = _checkable_table(
+            styler, table_key, selected_rows=[codes.index(c) for c in checked_codes if c in codes],
+            width="stretch", hide_index=True, height=560,
             column_config={
                 "相對強弱": st.column_config.ProgressColumn("相對強弱", min_value=0, max_value=100, format="%.0f",
                                                         help="同一天全市場 20 日報酬的百分位排名"),
                 "觸發訊號": st.column_config.TextColumn("觸發訊號", width="large"),
             },
         )
+        st.session_state["screen_checked_codes"] = [codes[i] for i in rows if i < len(codes)]
+        if clicked is not None and clicked < len(codes):
+            _go_to_detail(codes[clicked])
         # 按鈕放在表格上方（actions 容器），不用捲到表格底部才按得到
-        selected = result.iloc[event.selection.rows]
+        selected = result.iloc[[i for i in rows if i < len(codes)]]
         with actions:
             col_info, col_group, col_add, col_detail = st.columns([2.2, 1.3, 1.2, 1.2], vertical_alignment="bottom")
             col_info.caption(f"已勾選 {len(selected)} 檔：" + "、".join(selected["name"].head(8))
@@ -1636,13 +1694,16 @@ _WATCH_COLUMNS = {"code": "代號", "name": "名稱", "date": "價格日期", "c
 
 def _watch_group_selector(key: str, label: str = "觀察名單") -> str:
     groups = list(config_watchlist.load_groups())
+    ui.restore_widgets({key: None})  # 換頁回來仍停在上次選的名單
     # 建立／改名／刪除名單後要切換選取，但 selectbox 畫出來之後不能再改它的值，所以先記在 _pending，下次畫之前套用
     pending = st.session_state.pop(f"{key}_pending", None)
     if pending in groups:
         st.session_state[key] = pending
     if st.session_state.get(key) not in groups:
         st.session_state[key] = groups[0]
-    return st.selectbox(label, groups, key=key)
+    chosen = st.selectbox(label, groups, key=key)
+    ui.remember_widgets([key])
+    return chosen
 
 
 def _set_watch_group(name: str | None):
@@ -1709,7 +1770,7 @@ def _render_watchlist_tab(signal_df: pd.DataFrame):
 
     stocks = config_watchlist.load_groups().get(group, {})
     alerts_by_code = {a["code"]: a for a in signals.watchlist_alerts(signal_df, stocks.keys())}
-    with ui.panel(group, f"共 {len(stocks)} 檔・勾選後可移除或開啟個股詳情"):
+    with ui.panel(group, f"共 {len(stocks)} 檔・勾選左邊方框可移除・點一下股票開啟個股詳情"):
         notice = st.session_state.pop("watch_notice", None)
         if notice:
             st.success(notice)
@@ -1731,13 +1792,15 @@ def _render_watchlist_tab(signal_df: pd.DataFrame):
         actions = st.container()
         table_key = f"watch_table_{group}_{st.session_state.get('watch_table_version', 0)}"
         codes = list(stocks)
-        event = st.dataframe(
-            _styled_table(view, signed=["漲跌%"], decimals=["收盤", "漲跌%"]),
-            width="stretch", hide_index=True, on_select="rerun", selection_mode="multi-row", key=table_key,
+        rows_checked, clicked = _checkable_table(
+            _styled_table(view, signed=["漲跌%"], decimals=["收盤", "漲跌%"]), table_key,
+            width="stretch", hide_index=True,
             column_config={"今日新訊號": st.column_config.TextColumn("今日新訊號", width="medium"),
                            "持續中訊號": st.column_config.TextColumn("持續中訊號", width="large")},
         )
-        selected = [codes[i] for i in event.selection.rows if i < len(codes)]
+        if clicked is not None and clicked < len(codes):
+            _go_to_detail(codes[clicked])
+        selected = [codes[i] for i in rows_checked if i < len(codes)]
         with actions:
             col_info, col_remove, col_detail = st.columns([3, 1.2, 1.2], vertical_alignment="center")
             col_info.caption(f"已勾選 {len(selected)} 檔" if selected else "訊號只計算上市股（上櫃資料源無法回補歷史）")
@@ -2473,6 +2536,8 @@ def _render_nav(current_id: str):
     if st.session_state.get("tw_nav_page") != current_id:
         st.session_state["tw_nav_page"] = current_id
         st.session_state["tw_nav_collapsed"] = False
+    if current_id != "detail":
+        st.session_state.pop("detail_return", None)  # 離開個股詳情後就不需要返回按鈕了
     collapsed = st.session_state.get("tw_nav_collapsed", False)
     with st.sidebar, st.container(key="tw_nav"):
         ui.brand()

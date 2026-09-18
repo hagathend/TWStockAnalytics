@@ -197,6 +197,10 @@ Schema 變更走 `db.init_db()` 裡的 `ALTER TABLE ... ADD COLUMN` + `try/excep
 - **不要放圖示**：emoji 和 Material 圖示使用者都覺得醜，導覽列與按鈕一律純文字。
 - **紅漲綠跌**：顏色只從 `ui.UP_COLOR` / `ui.DOWN_COLOR` 取；表格用 `_styled_table()`、圖表用 `ui.style_chart()`。
 - plotly 圖不要放圖內標題（會跟圖例黏在一起），標題交給外面的 panel。
+- **表格互動**：沒有後續動作的表格不要有勾選框。點一下就跳視窗／開頁用 `_clickable_table()`（單格選取）；
+  要複選加按鈕的用 `_checkable_table()`（左邊勾選框＋點其他格開個股詳情）。點擊在回呼裡記錄並清掉選取，
+  所以同一列可以重複點；雙擊會送兩次點擊，只處理 3 秒內的。從別頁用 `_go_to_detail()` 開個股詳情會記住來源頁、
+  顯示「返回」按鈕；換頁回來要保留的輸入條件用 `ui.restore_widgets()`／`ui.remember_widgets()`。
 - 表格一律過 `_styled_table()`：st.dataframe 前端對空值固定顯示「None」、不理會 Styler 的 na_rep，
   所以有缺值的數值欄位會整欄轉成格式化文字（缺值「-」），紅綠色依原始數值判斷。
 - **導覽＝可摺疊的大項目＋子項目**：`app.py` 的 `_render_nav()` 自訂側邊欄（內建導覽 `position="hidden"`），

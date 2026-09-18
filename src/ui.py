@@ -243,6 +243,28 @@ def page_tabs(page_id: str, labels: list[str]):
     return active, containers[labels.index(active)]
 
 
+_KEPT_WIDGETS = "tw_kept_widgets"
+
+
+def restore_widgets(defaults: dict):
+    """在畫 widget 之前呼叫。Streamlit 換頁時會清掉沒畫出來的 widget 狀態，這裡把上次保存的值（沒有就用預設值）放回去；
+    widget 本身不要再傳 value／default（預設值已經放進 session_state），值為 None 的 number_input 維持 value=None"""
+    store = st.session_state.setdefault(_KEPT_WIDGETS, {})
+    for key, default in defaults.items():
+        if key not in st.session_state:
+            value = store.get(key, default)
+            if value is not None:
+                st.session_state[key] = value
+
+
+def remember_widgets(keys):
+    """畫完 widget 之後呼叫：保存目前的值，下次回到這一頁時由 restore_widgets 還原"""
+    store = st.session_state.setdefault(_KEPT_WIDGETS, {})
+    for key in keys:
+        if key in st.session_state:
+            store[key] = st.session_state[key]
+
+
 def sidebar_label(text: str):
     _html(f'<div class="tw-sidebar-label">{escape(text)}</div>')
 
