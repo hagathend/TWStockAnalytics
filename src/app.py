@@ -16,6 +16,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 import os  # noqa: E402
+from functools import partial  # noqa: E402
 import threading  # noqa: E402
 from datetime import date as _date, timedelta  # noqa: E402
 
@@ -152,6 +153,18 @@ def _styled_table(df: pd.DataFrame, signed: list[str] = (), thousands: list[str]
         if cols:
             styler = styler.format(f"{{:{spec}}}", subset=cols)
     return styler
+
+
+def _clickable_table(data, key: str, **kwargs):
+    """點任一格就回傳那一列的位置（沒點回傳 None）。用「單格選取」模式，表格左邊不會出現勾選框；
+    搭配 st.dialog 時，關閉視窗要呼叫 _clear_table_click(key) 清掉選取，同一列才能再點一次"""
+    event = st.dataframe(data, key=key, on_select="rerun", selection_mode="single-cell", **kwargs)
+    cells = event.selection.get("cells", []) if event else []
+    return cells[0][0] if cells else None
+
+
+def _clear_table_click(key: str):
+    st.session_state[key] = {"selection": {"rows": [], "columns": [], "cells": []}}
 
 
 def _md_linebreaks(text: str) -> str:
@@ -1075,7 +1088,7 @@ def _render_positions_table(positions: list[dict], totals: dict):
         active_by_code = {r["code"]: "、".join(signals.SIGNALS[k] for k in signals.active_signals(r))
                           for _, r in held.iterrows()}
 
-    with ui.panel("持倉明細", "點選任一列開啟個股詳情"):
+    with ui.panel("持倉明細", "點一下任一列開啟個股詳情"):
         rows = [{
             **p,
             "holding": portfolio.lots_text(p["shares"]),
@@ -1084,15 +1097,14 @@ def _render_positions_table(positions: list[dict], totals: dict):
             "signals": active_by_code.get(p["code"], ""),
         } for p in positions]
         view = pd.DataFrame(rows)[list(_POSITION_COLUMNS)].rename(columns=_POSITION_COLUMNS)
-        event = st.dataframe(
+        clicked = _clickable_table(
             _styled_table(view, signed=["未實現損益", "報酬率%"], thousands=["市值", "未實現損益", "持有天數"],
                           decimals=["平均成本", "收盤", "報酬率%", "佔比%"]),
-            width="stretch", hide_index=True, on_select="rerun", selection_mode="single-row",
-            key="position_table",
+            "position_table", width="stretch", hide_index=True,
             column_config={"今日訊號": st.column_config.TextColumn("今日訊號", width="large")},
         )
-        if event.selection.rows:
-            _go_to_detail(positions[event.selection.rows[0]]["code"])
+        if clicked is not None:
+            _go_to_detail(positions[clicked]["code"])
 
 
 # ─────────────────────────────── AI 預測追蹤 ───────────────────────────────
@@ -1135,7 +1147,7 @@ def _views_table(views: list[dict], show_stock: bool = True, key: str | None = N
     if key is None:
         st.dataframe(styler, **options)
         return None
-    return st.dataframe(styler, on_select="rerun", selection_mode="single-row", key=key, **options)
+    return _clickable_table(styler, key, **options)
 
 
 def _view_summary_cards(views: list[dict]):
@@ -2065,16 +2077,49 @@ def report_page():
 
 # ─────────────────────────────── 歷史查詢 ───────────────────────────────
 
-_HISTORY_NEWS_COLUMNS = {"date": "日期", "source": "來源", "title": "標題", "url": "原文", "related_code": "關聯代號"}
+_HISTORY_NEWS_COLUMNS = {"date": "日期", "source": "來源", "title": "標題", "related_code": "關聯代號"}
 _HISTORY_PICK_COLUMNS = {"code": "代號", "name": "名稱", "count": "上榜次數", "best_rank": "最佳排名",
                          "first_date": "第一次", "last_date": "最近一次", "last_reason": "最近原因"}
 _HISTORY_ANALYSIS_COLUMNS = {"date": "日期", "code": "代號", "name": "名稱", "created_at": "產生時間"}
 _VIEW_STATUS = {"全部": None, **{label: key for key, label in prediction_views.STATUS_LABELS.items()}}
 
 
-def _selected_row(event, rows: list[dict]) -> dict | None:
-    selected = event.selection.rows if event else []
-    return rows[selected[0]] if selected and selected[0] < len(rows) else None
+def _row_at(rows: list, index: int | None):
+    return rows[index] if index is not None and index < len(rows) else None
+
+
+@st.dialog("新聞", width="large", on_dismiss=partial(_clear_table_click, "history_news_table"))
+def _news_dialog(row: dict):
+    ui.section(row["title"], f"{row['date']}・{row['source']}" + (f"・關聯 {row['related_code']}" if row.get("related_code") else ""))
+    if row.get("excerpt"):
+        ui.section("AI 逐篇摘要")
+        st.markdown(_md_linebreaks(row["excerpt"]))
+    if row.get("summary"):
+        ui.section("原始摘要")
+        st.markdown(ui.strip_html(row["summary"]))
+    if not row.get("excerpt") and not row.get("summary"):
+        st.caption("這則新聞沒有摘要")
+    if row.get("url"):
+        st.link_button("開啟原文", row["url"], type="primary")
+
+
+@st.dialog("個股分析", width="large", on_dismiss=partial(_clear_table_click, "history_stock_table"))
+def _stock_analysis_dialog(row: dict):
+    ui.section(f"{row['code']} {row['name']}", f"{row['date']} 的分析・產生時間 {row['created_at']}")
+    st.markdown(_md_linebreaks(row["analysis"]))
+
+
+@st.dialog("AI 觀點", width="large", on_dismiss=partial(_clear_table_click, "history_pred_table"))
+def _view_dialog(row: dict):
+    dates = row["analysis_dates"]
+    period = f"{row['start_date']} 起・{_view_result_text(row)}"
+    ui.section(f"{row['code']} {row['name']}・{row['direction']}", f"{period}・包含 {len(dates)} 次分析")
+    chosen = st.selectbox("分析日", list(reversed(dates)), key="history_view_dialog_date") if len(dates) > 1 else dates[0]
+    text = history.analysis_text(chosen, row["code"])
+    if text:
+        st.markdown(_md_linebreaks(text))
+    else:
+        st.caption("找不到這天的分析原文")
 
 
 def _limit_note(rows: list[dict]) -> str:
@@ -2086,41 +2131,30 @@ def _render_history_news(start: str, end: str, keyword: str):
     sources = ["全部來源", *db.query_news_sources()]
     source = col_source.selectbox("來源", sources, key="history_news_source")
     rows = db.search_news(start, end, keyword, None if source == "全部來源" else source)
-    with ui.panel("新聞", f"共 {len(rows)} 則{_limit_note(rows)}・點選一則看摘要與原文連結"):
+    with ui.panel("新聞", f"共 {len(rows)} 則{_limit_note(rows)}・點一下任一則看摘要與原文連結"):
         if not rows:
             st.caption("這段期間沒有符合的新聞")
             return
         view = pd.DataFrame(rows)[list(_HISTORY_NEWS_COLUMNS)].fillna("").rename(columns=_HISTORY_NEWS_COLUMNS)
-        event = st.dataframe(view, width="stretch", hide_index=True, height=420, on_select="rerun",
-                             selection_mode="single-row", key="history_news_table",
-                             column_config={"標題": st.column_config.TextColumn("標題", width="large"),
-                                            "原文": st.column_config.LinkColumn("原文", display_text="開啟", width="small")})
-        row = _selected_row(event, rows)
+        clicked = _clickable_table(view, "history_news_table", width="stretch", hide_index=True, height=420,
+                                   column_config={"標題": st.column_config.TextColumn("標題", width="large")})
+    row = _row_at(rows, clicked)
     if row:
-        with ui.panel(row["title"], f"{row['date']}・{row['source']}" + (f"・關聯 {row['related_code']}" if row.get("related_code") else "")):
-            if row.get("excerpt"):
-                ui.section("AI 逐篇摘要")
-                st.markdown(_md_linebreaks(row["excerpt"]))
-            if row.get("summary"):
-                ui.section("原始摘要")
-                st.markdown(ui.strip_html(row["summary"]))
-            if row.get("url"):
-                st.link_button("開啟原文", row["url"])
+        _news_dialog(row)
 
 
 def _render_history_picks(start: str, end: str, keyword: str):
     picks = db.search_ai_picks(start, end, keyword)
     frequency = history.pick_frequency(picks)
-    with ui.panel("上榜次數統計", f"期間內 {frequency.shape[0]} 檔・{len({p['date'] for p in picks})} 天{_limit_note(picks)}・點選一檔開啟個股詳情"):
+    with ui.panel("上榜次數統計", f"期間內 {frequency.shape[0]} 檔・{len({p['date'] for p in picks})} 天{_limit_note(picks)}・點一下任一檔開啟個股詳情"):
         if frequency.empty:
             st.caption("這段期間沒有新聞焦點紀錄")
             return
         view = frequency.rename(columns=_HISTORY_PICK_COLUMNS)
-        event = st.dataframe(view, width="stretch", hide_index=True, height=360, on_select="rerun",
-                             selection_mode="single-row", key="history_pick_freq",
-                             column_config={"最近原因": st.column_config.TextColumn("最近原因", width="large")})
-        if event.selection.rows:
-            _go_to_detail(frequency.iloc[event.selection.rows[0]]["code"])
+        clicked = _clickable_table(view, "history_pick_freq", width="stretch", hide_index=True, height=360,
+                                   column_config={"最近原因": st.column_config.TextColumn("最近原因", width="large")})
+        if clicked is not None and clicked < len(frequency):
+            _go_to_detail(frequency.iloc[clicked]["code"])
 
     summaries = {row["date"]: row for row in db.search_ai_summaries(start, end)}
     by_date: dict[str, list[dict]] = {}
@@ -2142,17 +2176,15 @@ def _render_history_picks(start: str, end: str, keyword: str):
 
 def _render_history_stock_analysis(start: str, end: str, keyword: str):
     rows = db.search_stock_analysis(start, end, keyword)
-    with ui.panel("個股分析紀錄", f"共 {len(rows)} 篇{_limit_note(rows)}・點選一篇看全文；關鍵字也會搜尋分析內文"):
+    with ui.panel("個股分析紀錄", f"共 {len(rows)} 篇{_limit_note(rows)}・點一下任一篇看全文；關鍵字也會搜尋分析內文"):
         if not rows:
             st.caption("這段期間沒有符合的個股分析")
             return
         view = pd.DataFrame(rows)[list(_HISTORY_ANALYSIS_COLUMNS)].rename(columns=_HISTORY_ANALYSIS_COLUMNS)
-        event = st.dataframe(view, width="stretch", hide_index=True, height=320, on_select="rerun",
-                             selection_mode="single-row", key="history_stock_table")
-        row = _selected_row(event, rows)
+        clicked = _clickable_table(view, "history_stock_table", width="stretch", hide_index=True, height=320)
+    row = _row_at(rows, clicked)
     if row:
-        with ui.panel(f"{row['code']} {row['name']}", f"{row['date']} 的分析・產生時間 {row['created_at']}"):
-            st.markdown(_md_linebreaks(row["analysis"]))
+        _stock_analysis_dialog(row)
 
 
 def _render_history_market_analysis(start: str, end: str, keyword: str):
@@ -2171,24 +2203,15 @@ def _render_history_predictions(start: str, end: str, keyword: str):
     direction = col_direction.selectbox("方向", ["全部", *predictions.DIRECTIONS], key="history_pred_direction")
     status = col_status.selectbox("狀態", list(_VIEW_STATUS), key="history_pred_status")
     views = history.search_views(start, end, keyword, None if direction == "全部" else direction, _VIEW_STATUS[status])
-    with ui.panel("AI 觀點紀錄", f"共 {len(views)} 段（依開始日）・{_VIEW_RULE}・點選一段看當時的分析"):
+    with ui.panel("AI 觀點紀錄", f"共 {len(views)} 段（依開始日）・{_VIEW_RULE}・點一下任一段看當時的分析"):
         if not views:
             st.caption("這段期間沒有符合的觀點")
             return
         _view_summary_cards(views)
-        event = _views_table(views, key="history_pred_table", height=380)
-        row = _selected_row(event, views)
+        clicked = _views_table(views, key="history_pred_table", height=380)
+    row = _row_at(views, clicked)
     if row:
-        dates = row["analysis_dates"]
-        with ui.panel(f"{row['code']} {row['name']}・{row['direction']}",
-                      f"這段觀點包含 {len(dates)} 次分析（{dates[0]}～{dates[-1]}）"):
-            chosen = st.selectbox("分析日", list(reversed(dates)), key=f"history_view_date_{row['code']}_{row['start_date']}") \
-                if len(dates) > 1 else dates[0]
-            text = history.analysis_text(chosen, row["code"])
-            if text:
-                st.markdown(_md_linebreaks(text))
-            else:
-                st.caption("找不到這天的分析原文")
+        _view_dialog(row)
 
 
 def history_page():
