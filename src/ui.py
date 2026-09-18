@@ -177,6 +177,8 @@ section[data-testid="stSidebar"] [data-testid="stSelectbox"] [data-baseweb="sele
     color: #17202A !important; -webkit-text-fill-color: #17202A !important;
 }}
 section[data-testid="stSidebar"] [data-testid="stSelectbox"] svg {{ color: #17202A !important; fill: #17202A !important; }}
+/* 滑鼠停留的提示框是白底，但側邊欄的按鈕提示會沿用側邊欄的淺色字，看不到；一律改深色字 */
+[data-testid="stTooltipContent"], [data-testid="stTooltipContent"] * {{ color: #243F60 !important; }}
 </style>
 
 """
