@@ -16,7 +16,9 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 import os  # noqa: E402
+from functools import partial  # noqa: E402
 import threading  # noqa: E402
+import time  # noqa: E402
 from datetime import date as _date, timedelta  # noqa: E402
 
 import pandas as pd  # noqa: E402
@@ -24,7 +26,8 @@ import plotly.express as px  # noqa: E402
 import plotly.graph_objects as go  # noqa: E402
 import streamlit as st  # noqa: E402
 
-from src.ai_analysis import MAX_PICKS, analyze_with_codex_deep, build_prompt, parse_and_save  # noqa: E402
+from src.ai_analysis import (NEWS_TOP_N_OPTIONS, analyze_with_codex_deep, build_prompt,  # noqa: E402
+                             news_top_n, parse_and_save)
 from src.codex_cli import generate_codex_text, check_codex_login, list_codex_models
 from src.charting import build_candlestick
 from src.chip_metrics import metrics_for_code
@@ -35,16 +38,16 @@ from src.config_ai import (
     load_codex_settings,
     load_report_settings,
     load_scraping_settings,
-    save_codex_settings,
+    update_codex_settings,
     save_report_settings,
     save_scraping_settings,
 )
-from src import config_watchlist
+from src import config_watchlist, history, scheduled_ai
 from src.config_watchlist import add_stocks, load_watchlist
 from src.market_analysis import build_market_analysis_prompt, save_market_analysis
 from src.report_pdf import markdown_to_pdf
 from src import (alerts, backtest, calendar_events, desktop, financials, futures, pe_river, fundamentals, heatmap, market_breadth, market_index, notify, portfolio,
-                 ownership, predictions,
+                 ownership, prediction_views, predictions,
                  revenue, shareholding, signals, ui, updater)
 from src.config import IS_INSTALLED
 from src.codex_cli import _executable as find_codex_executable
@@ -53,7 +56,7 @@ from src.version import __version__
 from src.stock_analysis import build_stock_analysis_prompt, save_stock_analysis, strip_holding_section
 from src.storage import db
 
-st.set_page_config(page_title="台股每日資訊收集", layout="wide")
+st.set_page_config(page_title="TWStockAnalytics", page_icon=str(_PROJECT_ROOT / "src/assets/brand.svg"), layout="wide")
 ui.inject_css()
 
 db.init_db()
@@ -120,20 +123,75 @@ def _display_df(rows: list[dict], column_labels: dict[str, str]) -> pd.DataFrame
 
 
 def _styled_table(df: pd.DataFrame, signed: list[str] = (), thousands: list[str] = (), decimals: list[str] = ()):
-    """表格共用樣式：正負數紅漲綠跌、千分位、小數兩位、缺值顯示「-」"""
+    """表格共用樣式：正負數紅漲綠跌、千分位、小數兩位、缺值顯示「-」。
+
+    st.dataframe 的前端對空值一律顯示「None」，不理會 Styler 的 na_rep；混合數字與「-」又會讓 Arrow 序列化失敗。
+    所以有缺值的數值欄位整欄先格式化成文字（缺值「-」），沒有缺值的欄位維持數值、交給 Styler 格式化；
+    紅漲綠跌一律依原始數值判斷。"""
     present = set(df.columns)
-    int_cols = [c for c in thousands if c in present]
-    float_cols = [c for c in decimals if c in present]
-    # 合併基本面後缺值可能是 None（object 欄位），格式化會略過而直接顯示「None」，先轉成數值 NaN
+    specs = {c: ",.0f" for c in thousands if c in present} | {c: ",.2f" for c in decimals if c in present}
+    signed_cols = [c for c in signed if c in present]
     df = df.copy()
-    for column in {*int_cols, *float_cols, *(c for c in signed if c in present)}:
-        df[column] = pd.to_numeric(df[column], errors="coerce")
-    styler = ui.color_signed(df, list(signed))
-    if int_cols:
-        styler = styler.format("{:,.0f}", subset=int_cols, na_rep="-")
-    if float_cols:
-        styler = styler.format("{:,.2f}", subset=float_cols, na_rep="-")
+    numeric = {}
+    for column in {*specs, *signed_cols}:
+        values = pd.to_numeric(df[column], errors="coerce")
+        numeric[column] = values
+        if values.isna().any():
+            spec = specs.get(column)
+            df[column] = ["-" if pd.isna(v) else (f"{v:{spec}}" if spec else f"{v:g}") for v in values]
+        else:
+            df[column] = values
+    styler = df.style
+
+    def _tones(col: pd.Series) -> list[str]:
+        return [f"color: {ui.UP_COLOR}" if ui.tone_of(v) == "up" else f"color: {ui.DOWN_COLOR}" if ui.tone_of(v) == "down" else ""
+                for v in numeric[col.name]]
+
+    if signed_cols:
+        styler = styler.apply(_tones, subset=signed_cols)
+    for spec in (",.0f", ",.2f"):
+        cols = [c for c, s_ in specs.items() if s_ == spec and not numeric[c].isna().any()]
+        if cols:
+            styler = styler.format(f"{{:{spec}}}", subset=cols)
     return styler
+
+
+_CLICK_MAX_AGE = 3.0  # 秒：雙擊會送出兩次點擊，第二次可能在換頁後才到，太舊的點擊不理會
+
+
+def _on_table_click(key: str):
+    """表格選取改變時的回呼：點到儲存格就記下那一列（附時間），並把儲存格選取清掉、勾選框的列選取保留"""
+    selection = (st.session_state.get(key) or {}).get("selection", {})
+    cells = selection.get("cells") or []
+    if cells:
+        st.session_state[f"{key}__click"] = (cells[0][0], time.time())
+        st.session_state[key] = {"selection": {"rows": list(selection.get("rows") or []), "columns": [], "cells": []}}
+
+
+def _take_table_click(key: str) -> int | None:
+    clicked = st.session_state.pop(f"{key}__click", None)
+    if clicked and time.time() - clicked[1] <= _CLICK_MAX_AGE:
+        return clicked[0]
+    return None
+
+
+def _clickable_table(data, key: str, **kwargs):
+    """點任一格（單擊或雙擊）就回傳那一列的位置（沒點回傳 None）。只用「單格選取」，表格左邊不會出現勾選框"""
+    st.dataframe(data, key=key, on_select=partial(_on_table_click, key), selection_mode="single-cell", **kwargs)
+    return _take_table_click(key)
+
+
+def _checkable_table(data, key: str, selected_rows: list[int] | None = None, **kwargs):
+    """左邊有勾選框可以複選（搭配表格上方的按鈕），點其他儲存格則回傳那一列（開個股詳情用）。
+    回傳 (勾選的列, 點到的列或 None)；selected_rows 是這個表格第一次畫出來時要預先勾選的列（換頁回來還原用）"""
+    options = {"selection_default": {"selection": {"rows": selected_rows}}} if selected_rows else {}
+    event = st.dataframe(data, key=key, on_select=partial(_on_table_click, key),
+                         selection_mode=["multi-row", "single-cell"], **options, **kwargs)
+    return list(event.selection.rows), _take_table_click(key)
+
+
+def _clear_table_click(key: str):
+    st.session_state[key] = {"selection": {"rows": [], "columns": [], "cells": []}}
 
 
 def _md_linebreaks(text: str) -> str:
@@ -143,6 +201,10 @@ def _md_linebreaks(text: str) -> str:
 
 
 def _go_to_detail(code: str):
+    """開個股詳情，並記住是從哪一頁來的（個股詳情上方會出現「返回」按鈕）"""
+    origin = st.session_state.get("tw_nav_page")
+    if origin and origin != "detail":
+        st.session_state["detail_return"] = origin
     st.session_state["selected_code"] = code
     st.switch_page(DETAIL_PAGE)
 
@@ -192,7 +254,7 @@ def _render_sidebar() -> str:
                 "查詢日期", value=_date.today().isoformat(), label_visibility="collapsed"
             )
 
-        ui.sidebar_label(f"新聞焦點 Top {MAX_PICKS}")
+        ui.sidebar_label(f"新聞焦點 Top {news_top_n()}")
         ai_picks = db.query_ai_picks(selected_date)
         if ai_picks:
             for pick in ai_picks:
@@ -723,11 +785,12 @@ def _render_stock_ai_panel(code: str):
                 result = save_stock_analysis(code, raw_stock_analysis)
                 (st.success if result["ok"] else st.warning)(result["message"])
 
-        history = predictions.evaluate_all(code)
-        if history:
+        stock_views = prediction_views.build_views(code)
+        if stock_views:
             st.divider()
-            st.caption("這檔過去的 AI 預測與實際結果")
-            _prediction_table(history, show_stock=False)
+            st.caption("這檔的 AI 觀點與實際走勢（底色：紅＝偏多、綠＝偏空、灰＝中性）")
+            _render_view_chart(code, stock_views)
+            _views_table(stock_views, show_stock=False)
 
         existing_analysis = db.query_stock_analysis(_date.today().isoformat(), code)
         if existing_analysis:
@@ -738,6 +801,10 @@ def _render_stock_ai_panel(code: str):
 
 def detail_page():
     selected_date = _render_sidebar()
+    origin = st.session_state.get("detail_return")
+    if origin in NAV_PAGES:
+        if st.button(f"返回{NAV_PAGES[origin].title}", key="detail_back"):
+            st.switch_page(NAV_PAGES[origin])
     ui.page_header("個股詳情", "K 線、籌碼、基本面、新聞與 AI 分析")
 
     col_input, _ = st.columns([1, 3])
@@ -981,20 +1048,16 @@ def _render_realized_panel():
 
 def _analyze_all_positions(positions: list[dict]):
     progress = st.progress(0.0, text="準備中...")
-    failures = []
-    for index, p in enumerate(positions, start=1):
-        progress.progress((index - 1) / len(positions),
-                          text=f"分析 {p['code']} {p['name']}（{index}/{len(positions)}）")
-        ok, text = generate_codex_text(build_stock_analysis_prompt(p["code"]))
-        if ok:
-            save_stock_analysis(p["code"], text)
-        else:
-            failures.append(f"{p['code']}：{text}")
+
+    def _update(done, total, message):
+        progress.progress(done / total if total else 0.0, text=f"{message}（{done + 1}/{total}）")
+
+    outcome = scheduled_ai.analyze_stocks(positions, _date.today().isoformat(), progress=_update, skip_existing=False)
     progress.empty()
-    if failures:
-        st.error("部分分析失敗：\n" + "\n".join(failures))
+    if outcome["failed"]:
+        st.error("部分分析失敗：\n" + "\n".join(f"{code}：{message}" for code, message in outcome["failed"]))
     else:
-        st.success(f"已完成 {len(positions)} 檔持股分析，並收錄到每日報告")
+        st.success(f"已完成 {len(outcome['done'])} 檔持股分析，並收錄到每日報告")
 
 
 def portfolio_page():
@@ -1060,7 +1123,7 @@ def _render_positions_table(positions: list[dict], totals: dict):
         active_by_code = {r["code"]: "、".join(signals.SIGNALS[k] for k in signals.active_signals(r))
                           for _, r in held.iterrows()}
 
-    with ui.panel("持倉明細", "點選任一列開啟個股詳情"):
+    with ui.panel("持倉明細", "點一下任一列開啟個股詳情"):
         rows = [{
             **p,
             "holding": portfolio.lots_text(p["shares"]),
@@ -1069,79 +1132,129 @@ def _render_positions_table(positions: list[dict], totals: dict):
             "signals": active_by_code.get(p["code"], ""),
         } for p in positions]
         view = pd.DataFrame(rows)[list(_POSITION_COLUMNS)].rename(columns=_POSITION_COLUMNS)
-        event = st.dataframe(
+        clicked = _clickable_table(
             _styled_table(view, signed=["未實現損益", "報酬率%"], thousands=["市值", "未實現損益", "持有天數"],
                           decimals=["平均成本", "收盤", "報酬率%", "佔比%"]),
-            width="stretch", hide_index=True, on_select="rerun", selection_mode="single-row",
-            key="position_table",
+            "position_table", width="stretch", hide_index=True,
             column_config={"今日訊號": st.column_config.TextColumn("今日訊號", width="large")},
         )
-        if event.selection.rows:
-            _go_to_detail(positions[event.selection.rows[0]]["code"])
+        if clicked is not None:
+            _go_to_detail(positions[clicked]["code"])
 
 
 # ─────────────────────────────── AI 預測追蹤 ───────────────────────────────
 
-_PREDICTION_COLUMNS = {
-    "date": "分析日", "code": "代號", "name": "名稱", "direction": "方向", "confidence": "信心",
-    "base_close": "基準價", "return_5": "5日報酬%", "return_10": "10日報酬%", "market_return_10": "同期大盤10日%",
-    "support": "支撐", "support_text": "跌破支撐", "resistance": "壓力", "resistance_text": "突破壓力",
-    "result_text": "結果",
+_VIEW_COLUMNS = {
+    "code": "代號", "name": "名稱", "direction": "方向", "start_date": "開始日", "end_date": "結束日",
+    "days": "持續(交易日)", "analyses": "分析次數", "start_close": "開始價", "end_close": "結束／最新價",
+    "return_pct": "報酬%", "market_return": "同期大盤%", "excess": "超額%", "support": "支撐", "resistance": "壓力",
+    "end_reason": "結束原因", "result_text": "結果",
 }
+_FLIP_COLUMNS = {"code": "代號", "name": "名稱", "analyses": "分析次數", "views": "觀點段數", "flips": "方向翻轉",
+                 "flip_rate": "翻轉率%", "scored": "已計分", "hits": "命中"}
+_VIEW_RULE = (f"同方向的連續預測合併成一段觀點，方向改變或滿 {prediction_views.VIEW_MAX_DAYS} 個交易日結算；"
+              f"不到 {prediction_views.MIN_SCORED_DAYS} 天就翻轉的不計分・偏多須漲超過 {predictions.BULL_MIN_PCT:g}%、"
+              f"偏空須跌超過 {abs(predictions.BEAR_MAX_PCT):g}%、中性須在 ±{predictions.NEUTRAL_BAND_PCT:g}% 內")
 
 
-def _prediction_result_text(r: dict) -> str:
-    if r["status"] == "done":
-        return "命中" if r["hit"] else "未命中"
-    if r["status"] == "pending":
-        return f"進行中 {r['days_elapsed']}/{predictions.VERDICT_HORIZON} 天"
-    return "資料不足"
+def _view_result_text(v: dict) -> str:
+    if v["status"] == "done":
+        return "命中" if v["hit"] else "未命中"
+    if v["status"] == "active":
+        return f"進行中 {v['days']}/{prediction_views.VIEW_MAX_DAYS} 天"
+    return prediction_views.STATUS_LABELS[v["status"]]
 
 
-def _yes_no(value) -> str:
-    return "-" if value is None else ("是" if value else "否")
-
-
-def _prediction_table(results: list[dict], show_stock: bool = True):
-    rows = [{**r, "result_text": _prediction_result_text(r), "support_text": _yes_no(r["support_broken"]),
-             "resistance_text": _yes_no(r["resistance_reached"])} for r in results]
-    columns = [c for c in _PREDICTION_COLUMNS if show_stock or c not in ("code", "name")]
-    view = pd.DataFrame(rows)[columns].rename(columns=_PREDICTION_COLUMNS)
-    styler = _styled_table(view, signed=["5日報酬%", "10日報酬%", "同期大盤10日%"],
-                           decimals=["基準價", "5日報酬%", "10日報酬%", "同期大盤10日%", "支撐", "壓力"])
+def _views_table(views: list[dict], show_stock: bool = True, key: str | None = None, height: int | None = None):
+    rows = [{**v, "result_text": _view_result_text(v)} for v in views]
+    columns = [c for c in _VIEW_COLUMNS if show_stock or c not in ("code", "name")]
+    view = pd.DataFrame(rows)[columns].rename(columns=_VIEW_COLUMNS)
+    view["結束日"] = view["結束日"].fillna("")
+    styler = _styled_table(view, signed=["報酬%", "同期大盤%", "超額%"],
+                           decimals=["開始價", "結束／最新價", "報酬%", "同期大盤%", "超額%", "支撐", "壓力"])
     styler = styler.map(lambda v: f"color: {ui.UP_COLOR}" if v == "偏多" else f"color: {ui.DOWN_COLOR}" if v == "偏空" else "",
                         subset=["方向"])
     styler = styler.map(lambda v: "font-weight: 600" if v in ("命中", "未命中") else f"color: {ui.MUTED_COLOR}",
                         subset=["結果"])
-    st.dataframe(styler, width="stretch", hide_index=True)
+    options = {"width": "stretch", "hide_index": True}
+    if height:
+        options["height"] = height
+    if key is None:
+        st.dataframe(styler, **options)
+        return None
+    return _clickable_table(styler, key, **options)
+
+
+def _view_summary_cards(views: list[dict]):
+    summary = prediction_views.summarize(views)
+    directional = summary["directional"]
+    neutral = summary["by_direction"].get("中性")
+    items = [
+        {"label": "觀點段數", "value": f"{summary['total']}", "sub": f"進行中 {summary['active']} 段"},
+        {"label": "偏多＋偏空命中率",
+         "value": "-" if not directional else f"{directional['hit_rate']:.0f}%",
+         "sub": f"已結算 {directional['count'] if directional else 0} 段" + ("・樣本少參考性低" if not directional or directional["count"] < 20 else "")},
+        {"label": "中性命中率（條件寬鬆，另計）",
+         "value": "-" if not neutral else f"{neutral['hit_rate']:.0f}%",
+         "sub": f"已結算 {neutral['count'] if neutral else 0} 段"},
+        {"label": "方向翻轉", "value": f"{summary['flips']} 次", "sub": f"太短不計分 {summary['too_short']} 段"},
+    ]
+    for direction in ("偏多", "偏空"):
+        stats = summary["by_direction"].get(direction)
+        if stats:
+            excess = stats["avg_excess"]
+            items.append({"label": f"{direction}（{stats['count']} 段）", "value": f"平均 {stats['avg_return']:+.1f}%",
+                          "tone": ui.tone_of(stats["avg_return"]),
+                          "sub": "" if excess is None else f"超額 {excess:+.1f}%", "sub_tone": ui.tone_of(excess)})
+    ui.cards(items)
+
+
+_VIEW_BAND_COLORS = {"偏多": "rgba(240, 82, 79, 0.14)", "偏空": "rgba(34, 181, 115, 0.16)", "中性": "rgba(135, 146, 166, 0.14)"}
+
+
+def _render_view_chart(code: str, views: list[dict]):
+    """個股收盤價，底色標出每段觀點的方向（紅＝偏多、綠＝偏空、灰＝中性）"""
+    if not views:
+        return
+    first = min(v["start_date"] for v in views)
+    since = (_date.fromisoformat(first) - timedelta(days=14)).isoformat()
+    prices = db.query_price_range(code, since)
+    if len(prices) < 2:
+        return
+    frame = pd.DataFrame(prices)
+    fig = go.Figure()
+    for v in views:
+        fig.add_vrect(x0=v["start_date"], x1=v["end_date"] or frame["date"].iloc[-1],
+                      fillcolor=_VIEW_BAND_COLORS[v["direction"]], line_width=0, layer="below")
+    fig.add_scatter(x=frame["date"], y=frame["close"], mode="lines", name="收盤價",
+                    line={"color": ui.ACCENT_COLOR, "width": 2})
+    starts = [v for v in views if v["start_date"] in set(frame["date"])]
+    fig.add_scatter(x=[v["start_date"] for v in starts], y=[v["start_close"] for v in starts], mode="markers+text",
+                    text=[v["direction"] for v in starts], textposition="middle left", name="觀點開始",
+                    marker={"size": 8, "color": [ui.UP_COLOR if v["direction"] == "偏多" else ui.DOWN_COLOR
+                                                 if v["direction"] == "偏空" else ui.MUTED_COLOR for v in starts]},
+                    hovertemplate="%{x} 觀點開始：%{text}<extra></extra>")
+    low, high = frame["close"].min(), frame["close"].max()
+    fig.update_yaxes(range=[low - (high - low) * 0.08, high + (high - low) * 0.12])
+    fig.update_xaxes(type="category", nticks=8)
+    st.plotly_chart(ui.style_chart(fig, height=260), width="stretch", key=f"view_chart_{code}")
 
 
 def _render_prediction_tracking():
-    with ui.panel("AI 預測追蹤",
-                  f"個股分析的預測摘要，{predictions.VERDICT_HORIZON} 個交易日後對照實際走勢；"
-                  f"偏多須漲超過 {predictions.BULL_MIN_PCT:g}%、偏空須跌超過 {abs(predictions.BEAR_MAX_PCT):g}%、"
-                  f"中性須在 ±{predictions.NEUTRAL_BAND_PCT:g}% 內才算命中"):
-        results = predictions.evaluate_all()
-        if not results:
+    with ui.panel("AI 預測追蹤", _VIEW_RULE):
+        views = prediction_views.build_views()
+        if not views:
             st.caption("還沒有預測紀錄。之後用 Codex 做個股分析時，會自動記錄 AI 的預測摘要。")
             return
-        summary = predictions.summarize(results)
-        items = [
-            {"label": "預測筆數", "value": f"{summary['total']}", "sub": f"進行中 {summary['pending']} 筆"},
-            {"label": "已到期", "value": f"{summary['done']}"},
-            {"label": "方向命中率", "value": "-" if summary["hit_rate"] is None else f"{summary['hit_rate']:.0f}%",
-             "sub": "樣本少時參考性低" if summary["done"] < 20 else None},
-        ]
-        for direction, stats in summary["by_direction"].items():
-            excess = stats["avg_excess"]
-            items.append({
-                "label": f"{direction}（{stats['count']} 筆）",
-                "value": f"命中 {stats['hit_rate']:.0f}%",
-                "sub": f"平均 {stats['avg_return']:+.1f}%" + ("" if excess is None else f"・超額 {excess:+.1f}%"),
-                "sub_tone": ui.tone_of(stats["avg_return"]),
-            })
-        ui.cards(items)
-        _prediction_table(results)
+        _view_summary_cards(views)
+    with ui.panel("目前觀點", "每檔股票最新的一段觀點；持續中的報酬算到最新收盤"):
+        _views_table(prediction_views.current_views(views))
+    with ui.panel("觀點紀錄", "全部觀點，新到舊"):
+        _views_table(views, height=380)
+    with ui.panel("各股翻轉統計", "翻轉率＝方向改變次數 ÷（分析次數 − 1）；常常翻來翻去的股票，AI 的看法參考價值較低"):
+        stats = prediction_views.flip_stats(views)
+        st.dataframe(_styled_table(pd.DataFrame(stats)[list(_FLIP_COLUMNS)].rename(columns=_FLIP_COLUMNS),
+                                   decimals=["翻轉率%"]), width="stretch", hide_index=True)
 
 
 # ─────────────────────────────── AI 分析 ───────────────────────────────
@@ -1182,7 +1295,10 @@ def ai_analysis_page():
     tab, body = ui.page_tabs("ai", NAV_TABS["ai"])
     with body:
         if tab == "新聞深度分析":
-            with ui.panel("新聞深度分析", f"先取得新聞內文，逐篇摘要後挑出最多 {MAX_PICKS} 檔有新聞依據的焦點個股"):
+            with ui.panel("新聞深度分析", "先取得新聞內文，逐篇摘要後挑出有新聞依據的焦點個股；檔數越多，彙整時用的額度越多"):
+                col_top, _ = st.columns([2, 3])
+                with col_top:
+                    _render_news_top_n("ai_news_top_n")
                 if st.button("用 Codex 分析這天的新聞", type="primary"):
                     progress_bar = st.progress(0.0, text="準備中...")
 
@@ -1295,16 +1411,14 @@ def ai_settings_page():
                 if st.checkbox("手動指定其他模型"):
                     model = st.text_input("模型代號", value=current)
 
-                col3, col4 = st.columns(2)
+                col3, _ = st.columns(2)
                 timeout = col3.number_input("每次分析最長等待秒數", min_value=30, max_value=1800,
                                             value=int(settings["timeout_seconds"]))
-                auto = col4.checkbox("收集後自動用 Codex 分析新聞", value=settings["auto_analyze_after_collect"])
-                edited = {"executable": executable, "model": model, "timeout_seconds": int(timeout),
-                          "auto_analyze_after_collect": auto}
+                edited = {**settings, "executable": executable, "model": model, "timeout_seconds": int(timeout)}
 
                 b1, b2, b3, _ = st.columns([1, 1, 1, 2])
                 if b1.button("儲存設定", type="primary", width="stretch"):
-                    save_codex_settings(edited)
+                    update_codex_settings({k: edited[k] for k in ("executable", "model", "timeout_seconds")})
                     st.success("已儲存")
                 if b2.button("測試所選模型", width="stretch"):
                     with st.spinner("測試模型中..."):
@@ -1313,6 +1427,9 @@ def ai_settings_page():
                 if b3.button("檢查登入", width="stretch"):
                     ok, message = check_codex_login(edited)
                     (st.success if ok else st.error)(message)
+        elif tab == "每日排程":
+            with ui.panel("每日排程", "自動收集的時間，以及收集完要用 Codex 做哪些分析"):
+                _render_schedule_setup()
         elif tab == "Firecrawl":
             with ui.panel("Firecrawl 內文擷取", "選用・免費額度每月 1000 次，沒設定 Key 會自動改用本機 Playwright"):
                 scraping_settings = load_scraping_settings()
@@ -1425,37 +1542,55 @@ def _add_selected_to_watchlist(table_key: str, stocks: list[tuple[str, str]]):
         message += f"（{len(existing)} 檔原本就在名單裡）"
     st.session_state["screen_notice"] = message
     st.session_state["screen_table_version"] = st.session_state.get("screen_table_version", 0) + 1
+    st.session_state["screen_checked_codes"] = []
+
+
+# 篩選條件的 widget key 與預設值；換頁時 Streamlit 會清掉沒畫出來的 widget 狀態，
+# 靠 ui.restore_widgets／remember_widgets 保存，從個股詳情返回時條件還在
+_SCREEN_DEFAULTS = {
+    "scr_signals": [signals.SIGNALS["breakout_20d"]], "scr_mode": "全部符合", "scr_min_lots": 500,
+    "scr_pe_max": None, "scr_yield_min": None, "scr_pb_max": None, "scr_yoy_min": None,
+    "scr_roe_min": None, "scr_gross_min": None, "scr_eps_ttm_min": None, "scr_pe_pct_max": None,
+    "scr_revenue_high": False, "scr_yoy_streak": 0,
+    "scr_big_min": None, "scr_big_change_min": None, "scr_foreign_change_min": None,
+}
 
 
 def _render_screen_tab(signal_df: pd.DataFrame):
+    ui.restore_widgets(_SCREEN_DEFAULTS)
     with ui.panel("篩選條件"):
         labels = {v: k for k, v in signals.SIGNALS.items()}
-        chosen = st.multiselect("訊號條件", list(labels), default=[signals.SIGNALS["breakout_20d"]])
+        chosen = st.multiselect("訊號條件", list(labels), key="scr_signals")
         col1, col2, _ = st.columns([1, 1, 2])
-        mode = col1.segmented_control("條件組合", ["全部符合", "符合任一"], default="全部符合") or "全部符合"
-        min_lots = col2.number_input("20日均量至少（張）", min_value=0, value=500, step=100)
+        mode = col1.segmented_control("條件組合", ["全部符合", "符合任一"], key="scr_mode") or "全部符合"
+        min_lots = col2.number_input("20日均量至少（張）", min_value=0, step=100, key="scr_min_lots")
         with st.expander("基本面條件（留空＝不限制；設了條件時缺資料的股票會被排除）"):
             f1, f2, f3, f4 = st.columns(4)
-            pe_max = f1.number_input("本益比 ≤", min_value=0.0, value=None, step=1.0)
-            yield_min = f2.number_input("殖利率% ≥", min_value=0.0, value=None, step=0.5)
-            pb_max = f3.number_input("淨值比 ≤", min_value=0.0, value=None, step=0.5)
-            yoy_min = f4.number_input("營收年增% ≥", value=None, step=5.0)
+            pe_max = f1.number_input("本益比 ≤", min_value=0.0, value=None, step=1.0, key="scr_pe_max")
+            yield_min = f2.number_input("殖利率% ≥", min_value=0.0, value=None, step=0.5, key="scr_yield_min")
+            pb_max = f3.number_input("淨值比 ≤", min_value=0.0, value=None, step=0.5, key="scr_pb_max")
+            yoy_min = f4.number_input("營收年增% ≥", value=None, step=5.0, key="scr_yoy_min")
         with st.expander("獲利條件（季度財報）"):
             q1, q2, q3, q4 = st.columns([1, 1, 1, 1])
-            roe_min = q1.number_input("ROE（年化）% ≥", value=None, step=5.0)
-            gross_min = q2.number_input("單季毛利率% ≥", value=None, step=5.0)
-            eps_ttm_min = q3.number_input("近四季 EPS ≥（元）", value=None, step=1.0)
+            roe_min = q1.number_input("ROE（年化）% ≥", value=None, step=5.0, key="scr_roe_min")
+            gross_min = q2.number_input("單季毛利率% ≥", value=None, step=5.0, key="scr_gross_min")
+            eps_ttm_min = q3.number_input("近四季 EPS ≥（元）", value=None, step=1.0, key="scr_eps_ttm_min")
             pe_pct_max = q4.number_input("本益比歷史百分位 ≤", min_value=0.0, max_value=100.0, value=None, step=10.0,
+                                         key="scr_pe_pct_max",
                                          help="目前本益比在自己近兩年（或已收集期間）的位置，0＝最便宜；只有上市股")
         with st.expander("營收條件（月營收，需累積歷史資料）"):
             r1, r2, _ = st.columns([1, 1, 2], vertical_alignment="bottom")
-            revenue_high_only = r1.checkbox("營收創 12 個月新高")
-            yoy_streak_min = r2.number_input("年增率連續成長 ≥（月）", min_value=0, value=0, step=1)
+            revenue_high_only = r1.checkbox("營收創 12 個月新高", key="scr_revenue_high")
+            yoy_streak_min = r2.number_input("年增率連續成長 ≥（月）", min_value=0, step=1, key="scr_yoy_streak")
         with st.expander("籌碼集中條件（集保股權分散，每週資料）"):
             s1, s2, s3, _ = st.columns([1, 1, 1, 1])
-            big_min = s1.number_input("千張大戶持股% ≥", min_value=0.0, max_value=100.0, value=None, step=5.0)
-            big_change_min = s2.number_input("大戶週增 ≥（百分點）", value=None, step=0.1, format="%.2f")
-            foreign_change_min = s3.number_input("外資持股 20 日增 ≥（百分點）", value=None, step=0.5, format="%.2f")
+            big_min = s1.number_input("千張大戶持股% ≥", min_value=0.0, max_value=100.0, value=None, step=5.0,
+                                      key="scr_big_min")
+            big_change_min = s2.number_input("大戶週增 ≥（百分點）", value=None, step=0.1, format="%.2f",
+                                             key="scr_big_change_min")
+            foreign_change_min = s3.number_input("外資持股 20 日增 ≥（百分點）", value=None, step=0.5, format="%.2f",
+                                                 key="scr_foreign_change_min")
+    ui.remember_widgets(_SCREEN_DEFAULTS)
 
     result = signals.screen(signal_df, [labels[c] for c in chosen], min_avg_volume_lots=min_lots,
                             mode="all" if mode == "全部符合" else "any")
@@ -1485,7 +1620,7 @@ def _render_screen_tab(signal_df: pd.DataFrame):
             result = result[result["big1000_pct_change"].notna() & (result["big1000_pct_change"] >= big_change_min)]
         result = result.reset_index(drop=True)
 
-    with ui.panel("篩選結果", f"符合 {len(result)} 檔・依相對強弱排序・勾選後可加入觀察名單"):
+    with ui.panel("篩選結果", f"符合 {len(result)} 檔・依相對強弱排序・勾選左邊方框可加入觀察名單・點一下股票開啟個股詳情"):
         notice = st.session_state.pop("screen_notice", None)
         if notice:
             st.success(notice)
@@ -1503,17 +1638,22 @@ def _render_screen_tab(signal_df: pd.DataFrame):
         )
         table_key = f"screen_table_{st.session_state.get('screen_table_version', 0)}"
         stocks = list(zip(result["code"], result["name"]))
-        event = st.dataframe(
-            styler, width="stretch", hide_index=True, height=560, on_select="rerun",
-            selection_mode="multi-row", key=table_key,
+        codes = list(result["code"])
+        checked_codes = st.session_state.get("screen_checked_codes", [])
+        rows, clicked = _checkable_table(
+            styler, table_key, selected_rows=[codes.index(c) for c in checked_codes if c in codes],
+            width="stretch", hide_index=True, height=560,
             column_config={
                 "相對強弱": st.column_config.ProgressColumn("相對強弱", min_value=0, max_value=100, format="%.0f",
                                                         help="同一天全市場 20 日報酬的百分位排名"),
                 "觸發訊號": st.column_config.TextColumn("觸發訊號", width="large"),
             },
         )
+        st.session_state["screen_checked_codes"] = [codes[i] for i in rows if i < len(codes)]
+        if clicked is not None and clicked < len(codes):
+            _go_to_detail(codes[clicked])
         # 按鈕放在表格上方（actions 容器），不用捲到表格底部才按得到
-        selected = result.iloc[event.selection.rows]
+        selected = result.iloc[[i for i in rows if i < len(codes)]]
         with actions:
             col_info, col_group, col_add, col_detail = st.columns([2.2, 1.3, 1.2, 1.2], vertical_alignment="bottom")
             col_info.caption(f"已勾選 {len(selected)} 檔：" + "、".join(selected["name"].head(8))
@@ -1554,13 +1694,16 @@ _WATCH_COLUMNS = {"code": "代號", "name": "名稱", "date": "價格日期", "c
 
 def _watch_group_selector(key: str, label: str = "觀察名單") -> str:
     groups = list(config_watchlist.load_groups())
+    ui.restore_widgets({key: None})  # 換頁回來仍停在上次選的名單
     # 建立／改名／刪除名單後要切換選取，但 selectbox 畫出來之後不能再改它的值，所以先記在 _pending，下次畫之前套用
     pending = st.session_state.pop(f"{key}_pending", None)
     if pending in groups:
         st.session_state[key] = pending
     if st.session_state.get(key) not in groups:
         st.session_state[key] = groups[0]
-    return st.selectbox(label, groups, key=key)
+    chosen = st.selectbox(label, groups, key=key)
+    ui.remember_widgets([key])
+    return chosen
 
 
 def _set_watch_group(name: str | None):
@@ -1627,7 +1770,7 @@ def _render_watchlist_tab(signal_df: pd.DataFrame):
 
     stocks = config_watchlist.load_groups().get(group, {})
     alerts_by_code = {a["code"]: a for a in signals.watchlist_alerts(signal_df, stocks.keys())}
-    with ui.panel(group, f"共 {len(stocks)} 檔・勾選後可移除或開啟個股詳情"):
+    with ui.panel(group, f"共 {len(stocks)} 檔・勾選左邊方框可移除・點一下股票開啟個股詳情"):
         notice = st.session_state.pop("watch_notice", None)
         if notice:
             st.success(notice)
@@ -1649,13 +1792,15 @@ def _render_watchlist_tab(signal_df: pd.DataFrame):
         actions = st.container()
         table_key = f"watch_table_{group}_{st.session_state.get('watch_table_version', 0)}"
         codes = list(stocks)
-        event = st.dataframe(
-            _styled_table(view, signed=["漲跌%"], decimals=["收盤", "漲跌%"]),
-            width="stretch", hide_index=True, on_select="rerun", selection_mode="multi-row", key=table_key,
+        rows_checked, clicked = _checkable_table(
+            _styled_table(view, signed=["漲跌%"], decimals=["收盤", "漲跌%"]), table_key,
+            width="stretch", hide_index=True,
             column_config={"今日新訊號": st.column_config.TextColumn("今日新訊號", width="medium"),
                            "持續中訊號": st.column_config.TextColumn("持續中訊號", width="large")},
         )
-        selected = [codes[i] for i in event.selection.rows if i < len(codes)]
+        if clicked is not None and clicked < len(codes):
+            _go_to_detail(codes[clicked])
+        selected = [codes[i] for i in rows_checked if i < len(codes)]
         with actions:
             col_info, col_remove, col_detail = st.columns([3, 1.2, 1.2], vertical_alignment="center")
             col_info.caption(f"已勾選 {len(selected)} 檔" if selected else "訊號只計算上市股（上櫃資料源無法回補歷史）")
@@ -1993,6 +2138,177 @@ def report_page():
         st.markdown(report_text)
 
 
+# ─────────────────────────────── 歷史查詢 ───────────────────────────────
+
+_HISTORY_NEWS_COLUMNS = {"date": "日期", "source": "來源", "title": "標題", "related_code": "關聯代號"}
+_HISTORY_PICK_COLUMNS = {"code": "代號", "name": "名稱", "count": "上榜次數", "best_rank": "最佳排名",
+                         "first_date": "第一次", "last_date": "最近一次", "last_reason": "最近原因"}
+_HISTORY_ANALYSIS_COLUMNS = {"date": "日期", "code": "代號", "name": "名稱", "created_at": "產生時間"}
+_VIEW_STATUS = {"全部": None, **{label: key for key, label in prediction_views.STATUS_LABELS.items()}}
+
+
+def _row_at(rows: list, index: int | None):
+    return rows[index] if index is not None and index < len(rows) else None
+
+
+@st.dialog("新聞", width="large", on_dismiss=partial(_clear_table_click, "history_news_table"))
+def _news_dialog(row: dict):
+    ui.section(row["title"], f"{row['date']}・{row['source']}" + (f"・關聯 {row['related_code']}" if row.get("related_code") else ""))
+    if row.get("excerpt"):
+        ui.section("AI 逐篇摘要")
+        st.markdown(_md_linebreaks(row["excerpt"]))
+    if row.get("summary"):
+        ui.section("原始摘要")
+        st.markdown(ui.strip_html(row["summary"]))
+    if not row.get("excerpt") and not row.get("summary"):
+        st.caption("這則新聞沒有摘要")
+    if row.get("url"):
+        st.link_button("開啟原文", row["url"], type="primary")
+
+
+@st.dialog("個股分析", width="large", on_dismiss=partial(_clear_table_click, "history_stock_table"))
+def _stock_analysis_dialog(row: dict):
+    ui.section(f"{row['code']} {row['name']}", f"{row['date']} 的分析・產生時間 {row['created_at']}")
+    st.markdown(_md_linebreaks(row["analysis"]))
+
+
+@st.dialog("AI 觀點", width="large", on_dismiss=partial(_clear_table_click, "history_pred_table"))
+def _view_dialog(row: dict):
+    dates = row["analysis_dates"]
+    period = f"{row['start_date']} 起・{_view_result_text(row)}"
+    ui.section(f"{row['code']} {row['name']}・{row['direction']}", f"{period}・包含 {len(dates)} 次分析")
+    chosen = st.selectbox("分析日", list(reversed(dates)), key="history_view_dialog_date") if len(dates) > 1 else dates[0]
+    text = history.analysis_text(chosen, row["code"])
+    if text:
+        st.markdown(_md_linebreaks(text))
+    else:
+        st.caption("找不到這天的分析原文")
+
+
+def _limit_note(rows: list[dict]) -> str:
+    return f"・只顯示最新 {db.HISTORY_LIMIT} 筆，請縮小期間或加上關鍵字" if len(rows) >= db.HISTORY_LIMIT else ""
+
+
+def _render_history_news(start: str, end: str, keyword: str):
+    col_source, _ = st.columns([1, 3])
+    sources = ["全部來源", *db.query_news_sources()]
+    source = col_source.selectbox("來源", sources, key="history_news_source")
+    rows = db.search_news(start, end, keyword, None if source == "全部來源" else source)
+    with ui.panel("新聞", f"共 {len(rows)} 則{_limit_note(rows)}・點一下任一則看摘要與原文連結"):
+        if not rows:
+            st.caption("這段期間沒有符合的新聞")
+            return
+        view = pd.DataFrame(rows)[list(_HISTORY_NEWS_COLUMNS)].fillna("").rename(columns=_HISTORY_NEWS_COLUMNS)
+        clicked = _clickable_table(view, "history_news_table", width="stretch", hide_index=True, height=420,
+                                   column_config={"標題": st.column_config.TextColumn("標題", width="large")})
+    row = _row_at(rows, clicked)
+    if row:
+        _news_dialog(row)
+
+
+def _render_history_picks(start: str, end: str, keyword: str):
+    picks = db.search_ai_picks(start, end, keyword)
+    frequency = history.pick_frequency(picks)
+    with ui.panel("上榜次數統計", f"期間內 {frequency.shape[0]} 檔・{len({p['date'] for p in picks})} 天{_limit_note(picks)}・點一下任一檔開啟個股詳情"):
+        if frequency.empty:
+            st.caption("這段期間沒有新聞焦點紀錄")
+            return
+        view = frequency.rename(columns=_HISTORY_PICK_COLUMNS)
+        clicked = _clickable_table(view, "history_pick_freq", width="stretch", hide_index=True, height=360,
+                                   column_config={"最近原因": st.column_config.TextColumn("最近原因", width="large")})
+        if clicked is not None and clicked < len(frequency):
+            _go_to_detail(frequency.iloc[clicked]["code"])
+
+    summaries = {row["date"]: row for row in db.search_ai_summaries(start, end)}
+    by_date: dict[str, list[dict]] = {}
+    for pick in picks:
+        by_date.setdefault(pick["date"], []).append(pick)
+    with ui.panel("每日新聞焦點", "每天的新聞總結與焦點個股"):
+        # 有關鍵字時只列出有符合個股的日子；沒有關鍵字時，只有總結沒有個股的日子也列出來
+        dates = set(by_date) if keyword else set(by_date) | set(summaries)
+        for index, date in enumerate(sorted(dates, reverse=True)):
+            day_picks = by_date.get(date, [])
+            with st.expander(f"{date}・{len(day_picks)} 檔", expanded=index == 0):
+                summary = summaries.get(date)
+                if summary and not keyword:
+                    st.markdown(_md_linebreaks(summary["summary"]))
+                if day_picks:
+                    st.dataframe(_display_df(day_picks, _PICK_COLUMNS), width="stretch", hide_index=True,
+                                 column_config={"原因": st.column_config.TextColumn("原因", width="large")})
+
+
+def _render_history_stock_analysis(start: str, end: str, keyword: str):
+    rows = db.search_stock_analysis(start, end, keyword)
+    with ui.panel("個股分析紀錄", f"共 {len(rows)} 篇{_limit_note(rows)}・點一下任一篇看全文；關鍵字也會搜尋分析內文"):
+        if not rows:
+            st.caption("這段期間沒有符合的個股分析")
+            return
+        view = pd.DataFrame(rows)[list(_HISTORY_ANALYSIS_COLUMNS)].rename(columns=_HISTORY_ANALYSIS_COLUMNS)
+        clicked = _clickable_table(view, "history_stock_table", width="stretch", hide_index=True, height=320)
+    row = _row_at(rows, clicked)
+    if row:
+        _stock_analysis_dialog(row)
+
+
+def _render_history_market_analysis(start: str, end: str, keyword: str):
+    rows = db.search_market_analysis(start, end, keyword)
+    with ui.panel("大盤分析紀錄", f"共 {len(rows)} 篇{_limit_note(rows)}"):
+        if not rows:
+            st.caption("這段期間沒有符合的大盤分析")
+            return
+        for index, row in enumerate(rows):
+            with st.expander(f"{row['date']}・產生時間 {row['created_at']}", expanded=index == 0):
+                st.markdown(_md_linebreaks(row["analysis"]))
+
+
+def _render_history_predictions(start: str, end: str, keyword: str):
+    col_direction, col_status, _ = st.columns([1, 1, 2])
+    direction = col_direction.selectbox("方向", ["全部", *predictions.DIRECTIONS], key="history_pred_direction")
+    status = col_status.selectbox("狀態", list(_VIEW_STATUS), key="history_pred_status")
+    views = history.search_views(start, end, keyword, None if direction == "全部" else direction, _VIEW_STATUS[status])
+    with ui.panel("AI 觀點紀錄", f"共 {len(views)} 段（依開始日）・{_VIEW_RULE}・點一下任一段看當時的分析"):
+        if not views:
+            st.caption("這段期間沒有符合的觀點")
+            return
+        _view_summary_cards(views)
+        clicked = _views_table(views, key="history_pred_table", height=380)
+    row = _row_at(views, clicked)
+    if row:
+        _view_dialog(row)
+
+
+def history_page():
+    ui.page_header("歷史查詢", "查詢過去的新聞、新聞焦點、個股與大盤分析，以及 AI 預測的檢驗結果")
+    first, last = db.query_history_date_bounds()
+    if not first:
+        st.info("還沒有任何新聞或 AI 分析紀錄")
+        return
+    first_date, last_date = _date.fromisoformat(first), max(_date.fromisoformat(last), _date.today())
+    default_start = max(first_date, last_date - timedelta(days=30))
+    col_range, col_keyword = st.columns([1.2, 2], vertical_alignment="bottom")
+    picked = col_range.date_input("期間", value=(default_start, last_date), min_value=first_date, max_value=last_date,
+                                  key="history_range", format="YYYY-MM-DD")
+    keyword = col_keyword.text_input("關鍵字", placeholder="股票代號、名稱或內文關鍵字，留空＝全部",
+                                     key="history_keyword").strip()
+    if not isinstance(picked, (tuple, list)) or len(picked) != 2:
+        st.caption("請選擇起訖兩個日期")
+        return
+    start, end = (d.isoformat() for d in picked)
+
+    tab, body = ui.page_tabs("history", NAV_TABS["history"])
+    with body:
+        if tab == "新聞":
+            _render_history_news(start, end, keyword)
+        elif tab == "新聞焦點":
+            _render_history_picks(start, end, keyword)
+        elif tab == "個股分析":
+            _render_history_stock_analysis(start, end, keyword)
+        elif tab == "大盤分析":
+            _render_history_market_analysis(start, end, keyword)
+        elif tab == "AI 預測":
+            _render_history_predictions(start, end, keyword)
+
+
 # ─────────────────────────────── 開始使用 ───────────────────────────────
 
 _DISCLAIMER = """本工具整理證交所、櫃買中心與新聞等公開資料，並用 AI 產生分析文字，**僅供資訊整理與研究參考，不構成任何投資建議**。
@@ -2052,16 +2368,66 @@ def _render_codex_setup():
         st.rerun()
 
 
+_SCHEDULE_TIMES = [f"{hour:02d}:{minute:02d}" for hour in range(24) for minute in (0, 30)]
+
+
+def _render_news_top_n(key: str):
+    """新聞焦點要挑出前幾檔（存 codex_settings.json，手動分析與排程共用）"""
+    current = news_top_n()
+    chosen = st.segmented_control("新聞焦點檔數", NEWS_TOP_N_OPTIONS, default=current, key=key,
+                                  format_func=lambda n: f"前 {n} 檔")
+    if chosen and chosen != current:
+        update_codex_settings({"news_top_n": chosen})
+
+
 def _render_schedule_setup():
     if "daily_task_status" not in st.session_state:
         st.session_state["daily_task_status"] = desktop.daily_task_status()
     status = st.session_state["daily_task_status"]
-    enabled = st.toggle(f"每天 {desktop.DEFAULT_TASK_TIME} 自動收集資料並執行 AI 分析", value=status["exists"])
-    if enabled != status["exists"]:
-        ok, message = desktop.register_daily_task() if enabled else desktop.unregister_daily_task()
+    app_settings = load_app_settings()
+    current_time = status["time"] or app_settings["daily_task_time"]
+    times = _SCHEDULE_TIMES if current_time in _SCHEDULE_TIMES else sorted([*_SCHEDULE_TIMES, current_time])
+
+    col_time, col_toggle = st.columns([1, 2.4], vertical_alignment="bottom")
+    chosen_time = col_time.selectbox("執行時間", times, index=times.index(current_time), key="schedule_time",
+                                     help="建議傍晚以後：三大法人、融資融券等盤後資料大約下午 4 點後才會公布齊全")
+    enabled = col_toggle.toggle(f"每天 {chosen_time} 自動收集資料並執行分析", value=status["exists"], key="schedule_enabled")
+    if chosen_time != app_settings["daily_task_time"]:
+        save_app_settings({"daily_task_time": chosen_time})
+    if enabled and (not status["exists"] or status["time"] != chosen_time):
+        ok, message = desktop.register_daily_task(chosen_time)
+        (st.success if ok else st.error)(message)
+        st.session_state["daily_task_status"] = desktop.daily_task_status()
+    elif not enabled and status["exists"]:
+        ok, message = desktop.unregister_daily_task()
         (st.success if ok else st.error)(message)
         st.session_state["daily_task_status"] = desktop.daily_task_status()
     st.caption("需要電腦開著並連上網路；如果那個時間電腦沒開，下次開機後會自動補做。")
+
+    st.divider()
+    ui.section("收集完之後的 AI 分析", "都會使用 Codex 帳號額度；個股分析每檔各呼叫一次，檔數多時建議只開需要的項目，同一天已分析過的個股不會重複分析")
+    settings = load_codex_settings()
+    changes = {}
+    col_news, col_top = st.columns([1.2, 1], vertical_alignment="bottom")
+    news = col_news.checkbox("分析當日新聞並挑出焦點個股", value=settings["auto_analyze_after_collect"], key="schedule_news",
+                             help="側邊欄「立即收集今日資料」也會依這個設定決定要不要分析新聞")
+    with col_top:
+        _render_news_top_n("schedule_news_top_n")
+    holdings_count = len(portfolio.load_positions())
+    holdings = st.checkbox(f"分析所有持股（目前 {holdings_count} 檔）", value=settings["auto_analyze_holdings"],
+                           key="schedule_holdings")
+    watch_codes = set(load_watchlist())
+    watch = st.checkbox(f"分析所有觀察名單（目前 {len(watch_codes)} 檔，與持股重複的只分析一次）",
+                        value=settings["auto_analyze_watchlist"], key="schedule_watchlist")
+    for field, value in (("auto_analyze_after_collect", news), ("auto_analyze_holdings", holdings),
+                         ("auto_analyze_watchlist", watch)):
+        if value != settings[field]:
+            changes[field] = value
+    if changes:
+        settings = update_codex_settings(changes)
+    count = len(scheduled_ai.stock_targets(settings))
+    if count:
+        st.caption(f"每天會做 {count} 檔個股分析（{count} 次 Codex 呼叫）")
 
 
 def onboarding_page():
@@ -2135,7 +2501,8 @@ NAV_TABS = {
     "alerts": ["最近觸發", "提醒規則", "新增提醒"],
     "calendar": ["持股與觀察名單", "其他提醒", "全市場除權息"],
     "ai": ["新聞深度分析", "大盤籌碼分析", "預測追蹤", "手動貼上"],
-    "ai_settings": ["Codex CLI", "Firecrawl"],
+    "history": ["新聞", "新聞焦點", "個股分析", "大盤分析", "AI 預測"],
+    "ai_settings": ["Codex CLI", "每日排程", "Firecrawl"],
 }
 
 ONBOARDING_NEEDED = _onboarding_needed()
@@ -2148,12 +2515,13 @@ ALERTS_PAGE = st.Page(alerts_page, title="條件提醒", url_path="alerts")
 CALENDAR_PAGE = st.Page(calendar_page, title="行事曆", url_path="calendar")
 AI_ANALYSIS_PAGE = st.Page(ai_analysis_page, title="AI 分析", url_path="ai")
 REPORT_PAGE = st.Page(report_page, title="每日報告", url_path="report")
+HISTORY_PAGE = st.Page(history_page, title="歷史查詢", url_path="history")
 AI_SETTINGS_PAGE = st.Page(ai_settings_page, title="AI 設定", url_path="ai_settings")
 
 NAV_PAGES = {
     "onboarding": ONBOARDING_PAGE, "home": HOME_PAGE, "portfolio": PORTFOLIO_PAGE, "detail": DETAIL_PAGE,
     "screener": SCREENER_PAGE, "alerts": ALERTS_PAGE, "calendar": CALENDAR_PAGE, "ai": AI_ANALYSIS_PAGE,
-    "report": REPORT_PAGE, "ai_settings": AI_SETTINGS_PAGE,
+    "report": REPORT_PAGE, "history": HISTORY_PAGE, "ai_settings": AI_SETTINGS_PAGE,
 }
 
 
@@ -2168,8 +2536,11 @@ def _render_nav(current_id: str):
     if st.session_state.get("tw_nav_page") != current_id:
         st.session_state["tw_nav_page"] = current_id
         st.session_state["tw_nav_collapsed"] = False
+    if current_id != "detail":
+        st.session_state.pop("detail_return", None)  # 離開個股詳情後就不需要返回按鈕了
     collapsed = st.session_state.get("tw_nav_collapsed", False)
     with st.sidebar, st.container(key="tw_nav"):
+        ui.brand()
         for page_id, page in NAV_PAGES.items():
             active = page_id == current_id
             has_tabs = page_id in NAV_TABS

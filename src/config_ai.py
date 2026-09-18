@@ -71,7 +71,13 @@ def save_scraping_settings(settings: dict):
 
 _CODEX_CONFIG_PATH = DATA_DIR / "codex_settings.json"
 _CODEX_DEFAULT = {"executable": "codex", "model": "", "timeout_seconds": 300,
-                  "auto_analyze_after_collect": True}
+                  # 收集後自動分析新聞（每日排程與側邊欄「立即收集」都會執行）
+                  "auto_analyze_after_collect": True,
+                  # 新聞焦點最多挑幾檔（10／20／30／50）
+                  "news_top_n": 50,
+                  # 每日排程順便用 Codex 分析持股／觀察名單個股（每檔一次呼叫，預設關閉避免額度用光）
+                  "auto_analyze_holdings": False,
+                  "auto_analyze_watchlist": False}
 
 
 def load_codex_settings() -> dict:
@@ -83,6 +89,13 @@ def load_codex_settings() -> dict:
 def save_codex_settings(settings: dict):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     _CODEX_CONFIG_PATH.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def update_codex_settings(changes: dict) -> dict:
+    """只改指定欄位，其他既有設定保留（不同頁面各自存自己的欄位，不會互相覆蓋）"""
+    settings = {**load_codex_settings(), **changes}
+    save_codex_settings(settings)
+    return settings
 
 
 # 每日報告要不要包含「我的持股」。預設不包含：報告會被下載成 PDF／Markdown 分享出去，

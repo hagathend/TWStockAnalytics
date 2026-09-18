@@ -4,24 +4,26 @@
 - 整個 app 只有四種字級：頁面標題、區塊標題、內文、輔助說明。頁面不要再直接用
   st.title / st.subheader / st.header / 「**粗體**當標題」，一律走 page_header() / section()，
   字級才不會大大小小（側邊欄原本用 st.header，比導覽列大一倍就是這樣來的）。
-- 不放圖示：導覽列、按鈕都用純文字（使用者明確覺得 emoji 與圖示都很醜），狀態與訊號用純色標籤。
+- 品牌區使用藍銀上升葉片標誌；導覽列與按鈕維持純文字，不放宣傳標語。
 - 台股慣例紅漲綠跌：UP_COLOR／DOWN_COLOR 是唯一的漲跌色來源，圖表、表格、卡片都用這兩個。
 """
 
 from html import escape
+from pathlib import Path
+import base64
 
 from bs4 import BeautifulSoup
 
 import pandas as pd
 import streamlit as st
 
-UP_COLOR = "#F0524F"
-DOWN_COLOR = "#22B573"
-ACCENT_COLOR = "#4C8DF6"
-MUTED_COLOR = "#8792A6"
-CARD_BG = "#121823"
-BORDER_COLOR = "#232B39"
-CHART_BG = "#0B0F17"
+UP_COLOR = "#D83C48"
+DOWN_COLOR = "#16845B"
+ACCENT_COLOR = "#2864C5"
+MUTED_COLOR = "#64758B"
+CARD_BG = "#FFFFFF"
+BORDER_COLOR = "#DCE5EF"
+CHART_BG = "#FFFFFF"
 
 _CSS = f"""
 <style>
@@ -35,12 +37,12 @@ _CSS = f"""
 
 /* 頁首 */
 .tw-page-header {{ margin: 0 0 1.25rem 0; padding-bottom: 0.9rem; border-bottom: 1px solid {BORDER_COLOR}; }}
-.tw-page-title {{ font-size: 1.6rem; font-weight: 700; line-height: 1.3; margin: 0; color: #F2F4F8; }}
+.tw-page-title {{ font-size: 1.85rem; font-weight: 700; line-height: 1.3; margin: 0; color: #172E4D; }}
 .tw-page-subtitle {{ font-size: 0.9rem; color: {MUTED_COLOR}; margin-top: 0.3rem; }}
 
 /* 區塊標題：左側細色條 */
 .tw-section {{ display: flex; align-items: baseline; flex-wrap: wrap; gap: 0.3rem 0.6rem; margin: 0.1rem 0 0.7rem 0; }}
-.tw-section-title {{ font-size: 1.05rem; font-weight: 600; color: #F2F4F8;
+.tw-section-title {{ font-size: 1.05rem; font-weight: 600; color: #172E4D;
                      border-left: 3px solid {ACCENT_COLOR}; padding-left: 0.55rem; line-height: 1.2; }}
 .tw-section-caption {{ font-size: 0.8rem; color: {MUTED_COLOR}; }}
 
@@ -48,8 +50,8 @@ _CSS = f"""
 section[data-testid="stSidebar"] [class*="st-key-navg_"] button {{
     justify-content: flex-start; width: 100%; padding: 0.45rem 0.75rem; min-height: 0; margin: 0.05rem 0;
     border-radius: 0.5rem; border: none; background: transparent; }}
-section[data-testid="stSidebar"] [class*="st-key-navg_"] button p {{ font-size: 1.02rem; font-weight: 500; color: #C9D1DE; }}
-section[data-testid="stSidebar"] [class*="st-key-navg_"] button:hover {{ background: #1A2231; }}
+section[data-testid="stSidebar"] [class*="st-key-navg_"] button p {{ font-size: 1.02rem; font-weight: 500; color: #334F70; }}
+section[data-testid="stSidebar"] [class*="st-key-navg_"] button:hover {{ background: #E2ECF8; }}
 /* 可摺疊的大項目：右側細箭頭（CSS 畫的線，不是圖示字型）；展開朝下、摺疊朝右 */
 section[data-testid="stSidebar"] [class*="st-key-navg_"] button {{ position: relative; }}
 section[data-testid="stSidebar"] [class*="st-key-navg_"][class*="open_"] button::after,
@@ -58,8 +60,8 @@ section[data-testid="stSidebar"] [class*="st-key-navg_"][class*="shut_"] button:
     border-right: 1.5px solid {MUTED_COLOR}; border-bottom: 1.5px solid {MUTED_COLOR}; }}
 section[data-testid="stSidebar"] [class*="st-key-navg_"][class*="open_"] button::after {{ transform: translateY(-70%) rotate(45deg); }}
 section[data-testid="stSidebar"] [class*="st-key-navg_"][class*="shut_"] button::after {{ transform: translateY(-50%) rotate(-45deg); }}
-section[data-testid="stSidebar"] [class*="st-key-navg_on_"] button {{ background: #1F2633; }}
-section[data-testid="stSidebar"] [class*="st-key-navg_on_"] button p {{ color: #FFFFFF; font-weight: 600; }}
+section[data-testid="stSidebar"] [class*="st-key-navg_on_"] button {{ background: #D6E5F8; }}
+section[data-testid="stSidebar"] [class*="st-key-navg_on_"] button p {{ color: #173D6C; font-weight: 600; }}
 section[data-testid="stSidebar"] [class*="st-key-navs_"] button {{
     justify-content: flex-start; width: 100%; min-height: 0; padding: 0.28rem 0.75rem 0.28rem 0.85rem;
     margin: 0 0 0 1.1rem; width: calc(100% - 1.1rem); border-radius: 0 0.4rem 0.4rem 0; border: none;
@@ -68,9 +70,9 @@ section[data-testid="stSidebar"] [class*="st-key-nav"] button > div,
 section[data-testid="stSidebar"] [class*="st-key-nav"] button [data-testid="stMarkdownContainer"] {{
     justify-content: flex-start; text-align: left; width: 100%; }}
 section[data-testid="stSidebar"] [class*="st-key-navs_"] button p {{ font-size: 0.88rem; color: {MUTED_COLOR}; }}
-section[data-testid="stSidebar"] [class*="st-key-navs_"] button:hover p {{ color: #FFFFFF; }}
-section[data-testid="stSidebar"] [class*="st-key-navs_on_"] button {{ border-left-color: {ACCENT_COLOR}; background: #161D29; }}
-section[data-testid="stSidebar"] [class*="st-key-navs_on_"] button p {{ color: #FFFFFF; font-weight: 500; }}
+section[data-testid="stSidebar"] [class*="st-key-navs_"] button:hover p {{ color: #173D6C; }}
+section[data-testid="stSidebar"] [class*="st-key-navs_on_"] button {{ border-left-color: {ACCENT_COLOR}; background: #EDF3FA; }}
+section[data-testid="stSidebar"] [class*="st-key-navs_on_"] button p {{ color: #173D6C; font-weight: 500; }}
 .st-key-tw_nav [data-testid="stVerticalBlock"] {{ gap: 0; }}
 .st-key-tw_nav {{ gap: 0; padding-top: 0.4rem; }}
 .tw-sidebar-label {{ font-size: 0.75rem; font-weight: 600; letter-spacing: 0.06em; color: {MUTED_COLOR};
@@ -78,51 +80,51 @@ section[data-testid="stSidebar"] [class*="st-key-navs_on_"] button p {{ color: #
 section[data-testid="stSidebar"] hr {{ margin: 0.9rem 0; }}
 section[data-testid="stSidebar"] .stButton button[kind="tertiary"] {{
     justify-content: flex-start; width: 100%; padding: 0.3rem 0.5rem; min-height: 0;
-    font-size: 0.875rem; color: #C9D1DE; border-radius: 0.4rem; }}
+    font-size: 0.875rem; color: #334F70; border-radius: 0.4rem; }}
 section[data-testid="stSidebar"] .stButton button[kind="tertiary"] > div,
 section[data-testid="stSidebar"] .stButton button[kind="tertiary"] [data-testid="stMarkdownContainer"] {{
     justify-content: flex-start; text-align: left; width: 100%; }}
-section[data-testid="stSidebar"] .stButton button[kind="tertiary"]:hover {{ background: #1A2231; color: #FFFFFF; }}
+section[data-testid="stSidebar"] .stButton button[kind="tertiary"]:hover {{ background: #E2ECF8; color: #FFFFFF; }}
 
 /* 卡片 */
-.tw-card-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.75rem;
+.tw-card-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(min(210px, 100%), 1fr)); gap: 0.75rem;
                  margin: 0.2rem 0 0.4rem 0; }}
 .tw-card {{ background: {CARD_BG}; border: 1px solid {BORDER_COLOR}; border-radius: 0.6rem; padding: 0.8rem 1rem; }}
-.tw-card-label {{ font-size: 0.78rem; color: {MUTED_COLOR}; margin-bottom: 0.25rem; }}
-.tw-card-value {{ font-size: 1.3rem; font-weight: 600; color: #F2F4F8; line-height: 1.3; }}
-.tw-card-sub {{ font-size: 0.78rem; color: {MUTED_COLOR}; margin-top: 0.2rem; }}
+.tw-card-label {{ font-size: 0.85rem; color: {MUTED_COLOR}; margin-bottom: 0.25rem; }}
+.tw-card-value {{ white-space: nowrap; font-size: 1.55rem; font-weight: 600; color: #172E4D; line-height: 1.3; }}
+.tw-card-sub {{ font-size: 0.85rem; color: {MUTED_COLOR}; margin-top: 0.2rem; }}
 .tw-up {{ color: {UP_COLOR} !important; }}
 .tw-down {{ color: {DOWN_COLOR} !important; }}
 
 /* 個股報價列 */
 .tw-quote {{ display: flex; align-items: baseline; flex-wrap: wrap; gap: 0.35rem 1rem; margin: 0.1rem 0 1rem 0; }}
-.tw-quote-name {{ font-size: 1.35rem; font-weight: 700; color: #F2F4F8; }}
+.tw-quote-name {{ font-size: 1.35rem; font-weight: 700; color: #172E4D; }}
 .tw-quote-code {{ font-size: 0.95rem; color: {MUTED_COLOR}; }}
 .tw-quote-price {{ font-size: 1.35rem; font-weight: 600; }}
 .tw-quote-meta {{ font-size: 0.8rem; color: {MUTED_COLOR}; }}
 
 /* 標籤 */
 .tw-chips {{ display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0.3rem 0 0.6rem 0; }}
-.tw-chip {{ display: inline-block; font-size: 0.78rem; padding: 0.18rem 0.6rem; border-radius: 999px;
-            border: 1px solid {BORDER_COLOR}; background: #161D29; color: #C9D1DE; white-space: nowrap; }}
+.tw-chip {{ display: inline-block; font-size: 0.85rem; padding: 0.18rem 0.6rem; border-radius: 999px;
+            border: 1px solid {BORDER_COLOR}; background: #EDF3FA; color: #334F70; white-space: nowrap; }}
 .tw-chip.up {{ color: {UP_COLOR}; background: rgba(240, 82, 79, 0.12); border-color: rgba(240, 82, 79, 0.35); }}
 .tw-chip.down {{ color: {DOWN_COLOR}; background: rgba(34, 181, 115, 0.12); border-color: rgba(34, 181, 115, 0.35); }}
-.tw-chip.accent {{ color: #9CC0FF; background: rgba(76, 141, 246, 0.12); border-color: rgba(76, 141, 246, 0.35); }}
-.tw-chip.warn {{ color: #F5B942; background: rgba(245, 185, 66, 0.12); border-color: rgba(245, 185, 66, 0.35); }}
+.tw-chip.accent {{ color: #285FAC; background: rgba(76, 141, 246, 0.12); border-color: rgba(76, 141, 246, 0.35); }}
+.tw-chip.warn {{ color: #966215; background: rgba(245, 185, 66, 0.12); border-color: rgba(245, 185, 66, 0.35); }}
 
 /* 新聞卡片 */
 .tw-news {{ padding: 0.75rem 0; border-bottom: 1px solid {BORDER_COLOR}; }}
-.tw-news a {{ font-size: 0.95rem; font-weight: 500; color: #E3E7EE; text-decoration: none; }}
-.tw-news a:hover {{ color: #7AAEFF; }}
+.tw-news a {{ font-size: 0.95rem; font-weight: 500; color: #243F60; text-decoration: none; }}
+.tw-news a:hover {{ color: #2459A6; }}
 .tw-news-meta {{ font-size: 0.76rem; color: {MUTED_COLOR}; margin: 0.2rem 0; }}
-.tw-news-body {{ font-size: 0.85rem; color: #AEB7C6; line-height: 1.6; white-space: pre-line; }}
+.tw-news-body {{ font-size: 0.85rem; color: #52657C; line-height: 1.6; white-space: pre-line; }}
 
 /* 面板（有邊框的區塊）：區塊之間拉開距離，內距一致 */
 [data-testid="stVerticalBlockBorderWrapper"] {{ background: {CARD_BG}; }}
 .stMainBlockContainer [data-testid="stVerticalBlockBorderWrapper"] {{ margin-bottom: 0.4rem; }}
 
-/* 面板裡的卡片用比面板再深一階的底色，才分得出層次 */
-[data-testid="stVerticalBlockBorderWrapper"] .tw-card {{ background: #0E131C; }}
+/* 面板裡的卡片使用淡藍底色區分層次 */
+[data-testid="stVerticalBlockBorderWrapper"] .tw-card {{ background: #F5F8FC; }}
 
 /* 分頁籤 */
 .stTabs [data-baseweb="tab-list"] {{ gap: 1.4rem; border-bottom: 1px solid {BORDER_COLOR}; }}
@@ -132,7 +134,53 @@ section[data-testid="stSidebar"] .stButton button[kind="tertiary"]:hover {{ back
 .st-key-tw_report h1 {{ font-size: 1.35rem; }}
 .st-key-tw_report h2 {{ font-size: 1.05rem; border-left: 3px solid {ACCENT_COLOR}; padding-left: 0.55rem; margin-top: 1.6rem; }}
 .st-key-tw_report h3 {{ font-size: 0.95rem; }}
+
+/* 霧藍銀主題：品牌、淺色內容區與藍色導覽 */
+.stApp {{ background: #F1F5FA; color: #172E4D; }}
+/* 頂列不再覆蓋內容，保留窄視窗的側欄展開按鈕。 */
+[data-testid="stHeader"] {{ background: transparent; height: 0; pointer-events: none; }}
+[data-testid="stHeader"] button {{ pointer-events: auto; }}
+[data-testid="stSidebarHeader"] {{ height: 2rem; min-height: 2rem; padding: 0.25rem 1rem; }}
+[data-testid="stSidebarUserContent"] {{ padding-top: 0 !important; }}
+.st-key-tw_nav {{ padding-top: 0; }}
+@media (max-width: 768px) {{
+    .block-container {{ padding-top: 3.25rem; }}
+}}
+section[data-testid="stSidebar"] {{ background: #365575; border-right: 1px solid #CAD8E8; }}
+section[data-testid="stSidebar"] .tw-sidebar-label {{ color: #D2DFF0; }}
+section[data-testid="stSidebar"] [class*="st-key-navg_"] button p {{ color: #F2F6FC; }}
+section[data-testid="stSidebar"] [class*="st-key-navs_"] button p {{ color: #D6E3F3; }}
+section[data-testid="stSidebar"] [class*="st-key-nav"] button:hover {{ background: #46698F; }}
+section[data-testid="stSidebar"] [class*="st-key-navg_on_"] button {{ background: #496F9B; box-shadow: inset 3px 0 #BCD5F8; }}
+section[data-testid="stSidebar"] [class*="st-key-navs_on_"] button {{ background: #3E628A; border-left-color: #C1D9FA; }}
+section[data-testid="stSidebar"] [class*="st-key-navs_on_"] button p {{ color: #FFFFFF; }}
+.tw-brand {{ display:flex; align-items:center; gap:12px; padding:0 0 22px; margin-bottom:14px; border-bottom:1px solid #64809D; }}
+.tw-brand img {{ width:48px; height:48px; flex-shrink:0; }}
+.tw-brand-name {{ color:#FFFFFF; font-size:1.08rem; font-weight:700; letter-spacing:-0.3px; line-height:1.35; }}
+.tw-brand-name span {{ display:block; color:#D1DEED; font-size:0.82rem; font-weight:400; letter-spacing:1.5px; }}
+.tw-card {{ padding:1.1rem 1.15rem; border-radius:12px; box-shadow:0 3px 12px rgba(28,60,100,.035); }}
+.tw-card-grid {{ gap:1rem; margin-bottom:1rem; }}
+[data-testid="stVerticalBlockBorderWrapper"], [data-testid="stVerticalBlock"][style*="border:"] {{ border-radius:14px; background:#FFFFFF; }}
+.stMain button[kind="secondary"] {{ background:#FFFFFF; border-color:#CAD8E8; color:#23476F; }}
+.stMain button[kind="secondary"]:hover {{ border-color:#2864C5; background:#F0F5FC; }}
+[data-testid="stDataFrame"] {{ border-radius:10px; overflow:hidden; }}
+.tw-news {{ padding:1rem 0; }}
+.tw-news-body {{ line-height:1.85; }}
+.stTabs [data-baseweb="tab-list"] {{ gap:1.15rem; }}
+section[data-testid="stSidebar"] .stButton button[kind="tertiary"] {{ color:#E5EEF9; }}
+section[data-testid="stSidebar"] .stButton button[kind="tertiary"]:hover {{ background:#46698F; }}
+section[data-testid="stSidebar"] [class*="st-key-navg_"] button::after {{ border-color:#B7CCE5; }}
+/* 側欄白底日期選單：不繼承側欄的白色文字。 */
+section[data-testid="stSidebar"] [data-testid="stSelectbox"] [role="combobox"],
+section[data-testid="stSidebar"] [data-testid="stSelectbox"] input,
+section[data-testid="stSidebar"] [data-testid="stSelectbox"] [data-baseweb="select"] {{
+    color: #17202A !important; -webkit-text-fill-color: #17202A !important;
+}}
+section[data-testid="stSidebar"] [data-testid="stSelectbox"] svg {{ color: #17202A !important; fill: #17202A !important; }}
+/* 滑鼠停留的提示框是白底，但側邊欄的按鈕提示會沿用側邊欄的淺色字，看不到；一律改深色字 */
+[data-testid="stTooltipContent"], [data-testid="stTooltipContent"] * {{ color: #243F60 !important; }}
 </style>
+
 """
 
 
@@ -193,6 +241,28 @@ def page_tabs(page_id: str, labels: list[str]):
     active = st.session_state[key]
     store[page_id] = active
     return active, containers[labels.index(active)]
+
+
+_KEPT_WIDGETS = "tw_kept_widgets"
+
+
+def restore_widgets(defaults: dict):
+    """在畫 widget 之前呼叫。Streamlit 換頁時會清掉沒畫出來的 widget 狀態，這裡把上次保存的值（沒有就用預設值）放回去；
+    widget 本身不要再傳 value／default（預設值已經放進 session_state），值為 None 的 number_input 維持 value=None"""
+    store = st.session_state.setdefault(_KEPT_WIDGETS, {})
+    for key, default in defaults.items():
+        if key not in st.session_state:
+            value = store.get(key, default)
+            if value is not None:
+                st.session_state[key] = value
+
+
+def remember_widgets(keys):
+    """畫完 widget 之後呼叫：保存目前的值，下次回到這一頁時由 restore_widgets 還原"""
+    store = st.session_state.setdefault(_KEPT_WIDGETS, {})
+    for key in keys:
+        if key in st.session_state:
+            store[key] = st.session_state[key]
 
 
 def sidebar_label(text: str):
@@ -270,18 +340,26 @@ def color_signed(styler_or_df, columns: list[str]):
 
 
 def style_chart(fig, height: int | None = None):
-    """plotly 圖表套用跟頁面一致的深色底、格線與字型"""
+    """plotly 圖表套用跟頁面一致的淺色底、格線與字型"""
     fig.update_layout(
-        template="plotly_dark",
+        template="plotly_white",
         paper_bgcolor=CHART_BG,
         plot_bgcolor=CHART_BG,
-        font={"family": "Noto Sans TC, Microsoft JhengHei, sans-serif", "size": 12, "color": "#C9D1DE"},
+        font={"family": "Noto Sans TC, Microsoft JhengHei, sans-serif", "size": 12, "color": "#334F70"},
         margin={"l": 10, "r": 10, "t": 30, "b": 10},
-        hoverlabel={"bgcolor": "#151B26", "bordercolor": BORDER_COLOR},
+        hoverlabel={"bgcolor": "#FFFFFF", "bordercolor": BORDER_COLOR},
         legend={"orientation": "h", "yanchor": "bottom", "y": 1.01, "x": 0, "bgcolor": "rgba(0,0,0,0)"},
     )
-    fig.update_xaxes(gridcolor="#1A2130", zeroline=False, linecolor=BORDER_COLOR)
-    fig.update_yaxes(gridcolor="#1A2130", zeroline=False, linecolor=BORDER_COLOR)
+    fig.update_xaxes(gridcolor="#E7EDF5", zeroline=False, linecolor=BORDER_COLOR)
+    fig.update_yaxes(gridcolor="#E7EDF5", zeroline=False, linecolor=BORDER_COLOR)
     if height:
         fig.update_layout(height=height)
     return fig
+
+
+def brand():
+    """只顯示品牌識別，不放口號。"""
+    logo = Path(__file__).resolve().parent / "assets" / "brand.svg"
+    encoded = base64.b64encode(logo.read_bytes()).decode("ascii")
+    _html(f'<div class="tw-brand"><img src="data:image/svg+xml;base64,{encoded}" alt="TWStockAnalytics 標誌">'
+          '<div class="tw-brand-name">TWStock<span>Analytics</span></div></div>')

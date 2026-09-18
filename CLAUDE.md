@@ -69,15 +69,18 @@ AI 回覆通常一行一個重點，但 CommonMark 規則裡單一 `\n` 會被�
 
 ```
 src/
-├── app.py                 Streamlit 入口（市場總覽／我的持股／個股詳情／選股工具／條件提醒／行事曆／AI 分析／每日報告／AI 設定／開始使用）
+├── app.py                 Streamlit 入口（開始使用／市場總覽／我的持股／個股詳情／選股工具／條件提醒／行事曆／AI 分析／每日報告／歷史查詢／AI 設定）
 ├── ui.py                  共用樣式元件（頁首、面板、卡片、標籤、紅漲綠跌）
 ├── codex_cli.py           Codex CLI 非互動呼叫、登入檢查、JSON Schema
 ├── ai_analysis.py         新聞深度分析：抓內文→逐篇摘要→分批挑股（Codex；Ollama 函式保留未使用）
+├── news_relevance.py      摘要前用本地公司名稱／代號過濾與個股無關的新聞（省 Codex 額度）
 ├── stock_analysis.py      個股分析提示詞（技術＋籌碼＋基本面＋持股）
 ├── market_analysis.py     大盤籌碼分析提示詞
 ├── indicators.py / chip_metrics.py / signals.py / backtest.py / fundamentals.py   程式計算的指標、訊號、回測
 ├── portfolio.py           交易紀錄重播：平均成本、稅費、未實現／已實現損益、覆盤提示詞
-├── predictions.py         AI 預測追蹤（解析「預測摘要」→ 5／10 日後檢驗）
+├── predictions.py         AI 預測摘要解析與儲存（每次個股分析一筆）
+├── prediction_views.py    預測改以「觀點」計分：同方向連續預測合併，方向改變或滿 10 個交易日結算；中性另計、翻轉次數
+├── history.py             歷史查詢：新聞焦點上榜次數統計、依期間／方向／狀態篩選 AI 預測（查詢 SQL 在 db.search_*）
 ├── alerts.py / notify.py  條件提醒與 Windows 通知；calendar_events.py 行事曆
 ├── market_breadth.py / market_index.py / heatmap.py / futures.py   市場溫度計、加權指數與相對強弱、產業熱力圖、期貨法人
 ├── revenue.py / financials.py / pe_river.py   月營收趨勢、季度財報、本益比河流圖
@@ -85,6 +88,7 @@ src/
 ├── charting.py            個股 K 線圖（plotly + FinMind）
 ├── report_pdf.py          報告 Markdown → PDF（Playwright）
 ├── collect_all.py         每日收集流程；backfill.py 歷史補收集
+├── scheduled_ai.py        收集後的 AI 分析（新聞／持股／觀察名單，各自在 codex_settings.json 開關，預設只分析新聞）
 ├── desktop.py             安裝版：背景工作、工作排程、Codex 登入
 ├── updater.py             安裝版：檢查 GitHub Releases 並更新
 ├── config.py / config_ai.py / config_app.py / config_watchlist.py   設定讀寫；version.py 版本號
@@ -102,11 +106,11 @@ launcher.pyw               安裝版啟動器；packaging/ 安裝程式打包；
 
 ```
 收集：TWSE/TPEx/FinMind → stock_price / institutional / margin / valuation / month_revenue
-     鉅亨網API(含全文) + Google News RSS → news
+     鉅亨網API(含全文，逐頁抓完一天約 125 則) + Google News RSS → news
         ↓
 AI 新聞分析（Codex CLI，收集後自動觸發）：
      缺內文的用 Firecrawl→Playwright 補 → 逐篇摘要存 news.excerpt
-     → 分批找候選 → 去重+代號校正 → 彙整挑 Top50 → ai_picks / ai_analysis_summary
+     → 分批找候選 → 去重+代號校正 → 彙整挑 Top N → ai_picks / ai_analysis_summary
         ↓
 個股/大盤分析（Codex CLI 按鈕，或產生提示詞手動貼到網頁版 AI 再貼回）→ stock_analysis / market_analysis
         ↓
@@ -121,7 +125,7 @@ AI 新聞分析（Codex CLI，收集後自動觸發）：
 | `institutional` | date+market+code | 三大法人買賣超 |
 | `margin` | date+market+code | 融資融券 |
 | `news` | id | `content`=全文、`excerpt`=AI逐篇摘要 |
-| `ai_picks` | date+rank | AI 挑的當日焦點個股 Top50（`ai_analysis.MAX_PICKS`） |
+| `ai_picks` | date+rank | AI 挑的當日焦點個股（檔數 `news_top_n` 可選 10／20／30／50） |
 | `ai_analysis_summary` | date | 當日新聞總結 |
 | `stock_analysis` | date+code | 個股分析（Codex 或手動貼回） |
 | `market_analysis` | date | 大盤籌碼分析（Codex 或手動貼回） |
@@ -147,7 +151,9 @@ Schema 變更走 `db.init_db()` 裡的 `ALTER TABLE ... ADD COLUMN` + `try/excep
 ## AI 分析：Codex CLI
 
 目前所有 AI 分析都走 **Codex CLI**（`src/codex_cli.py`），使用這台電腦已登入的帳號與額度，不需要 API Key：
-- 新聞深度分析：收集後依 `data/codex_settings.json` 的 `auto_analyze_after_collect` 自動觸發（UI 與排程腳本都是）
+- 新聞深度分析：收集後依 `data/codex_settings.json` 的 `auto_analyze_after_collect` 自動觸發（UI 與排程腳本都是）；
+  排程另可開 `auto_analyze_holdings`／`auto_analyze_watchlist` 逐檔分析個股（**每檔一次 Codex 呼叫，預設關閉**，
+  使用者在意額度）。設定 UI 在「AI 設定 › 每日排程」與「開始使用」第 4 步，排程時間存 `app_settings.json` 的 `daily_task_time`
 - 個股／大盤：頁面上「用 Codex 分析並儲存」；也保留「產生提示詞 → 貼到網頁版 AI → 貼回儲存」的手動流程
 - 以 `exec --ignore-user-config --ephemeral --sandbox read-only` 在暫存目錄執行，新聞內文中的指令一律視為資料
 - 需要結構化輸出時傳 `--output-schema`（JSON Schema），光靠文字要求 JSON 會自創格式
@@ -191,6 +197,12 @@ Schema 變更走 `db.init_db()` 裡的 `ALTER TABLE ... ADD COLUMN` + `try/excep
 - **不要放圖示**：emoji 和 Material 圖示使用者都覺得醜，導覽列與按鈕一律純文字。
 - **紅漲綠跌**：顏色只從 `ui.UP_COLOR` / `ui.DOWN_COLOR` 取；表格用 `_styled_table()`、圖表用 `ui.style_chart()`。
 - plotly 圖不要放圖內標題（會跟圖例黏在一起），標題交給外面的 panel。
+- **表格互動**：沒有後續動作的表格不要有勾選框。點一下就跳視窗／開頁用 `_clickable_table()`（單格選取）；
+  要複選加按鈕的用 `_checkable_table()`（左邊勾選框＋點其他格開個股詳情）。點擊在回呼裡記錄並清掉選取，
+  所以同一列可以重複點；雙擊會送兩次點擊，只處理 3 秒內的。從別頁用 `_go_to_detail()` 開個股詳情會記住來源頁、
+  顯示「返回」按鈕；換頁回來要保留的輸入條件用 `ui.restore_widgets()`／`ui.remember_widgets()`。
+- 表格一律過 `_styled_table()`：st.dataframe 前端對空值固定顯示「None」、不理會 Styler 的 na_rep，
+  所以有缺值的數值欄位會整欄轉成格式化文字（缺值「-」），紅綠色依原始數值判斷。
 - **導覽＝可摺疊的大項目＋子項目**：`app.py` 的 `_render_nav()` 自訂側邊欄（內建導覽 `position="hidden"`），
   子項目對應頁內分頁，清單在 `NAV_TABS`。頁面用 `ui.page_tabs(page_id, NAV_TABS[page_id])` 取得目前分頁，
   **只執行目前分頁的內容**（不要一頁從頭畫到尾一直往下拉）。新增區塊時放進適當分頁，或在 `NAV_TABS` 加子項目。
