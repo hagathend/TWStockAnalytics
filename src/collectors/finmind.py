@@ -30,8 +30,12 @@ def _request(dataset: str, data_id: str, start_date: str, end_date: str) -> list
 
 
 def fetch_stock_price(stock_id: str, start_date: str, end_date: str) -> list[dict]:
-    """個股每日收盤價量，欄位: date, stock_id, open, max, min, close, Trading_Volume ..."""
-    return _request("TaiwanStockPrice", stock_id, start_date, end_date)
+    """個股每日收盤價量，欄位: date, stock_id, open, max, min, close, Trading_Volume ...
+
+    暫停交易的日子 FinMind 會回傳開高低收全是 0 的列（例如 3665 貿聯-KY 2026-06-10），
+    留著會讓均線、K 線被拉到 0、支撐壓力計算除以 0，所以直接去掉"""
+    rows = _request("TaiwanStockPrice", stock_id, start_date, end_date)
+    return [r for r in rows if all((r.get(k) or 0) > 0 for k in ("max", "min", "close"))]
 
 
 def fetch_institutional_investors(stock_id: str, start_date: str, end_date: str) -> list[dict]:

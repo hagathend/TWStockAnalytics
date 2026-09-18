@@ -26,7 +26,9 @@ def from_finmind(rows: list[dict]) -> pd.DataFrame:
     df = df.rename(columns={"max": "high", "min": "low", "Trading_Volume": "volume"})
     for column in ("high", "low", "close", "volume"):
         df[column] = pd.to_numeric(df[column], errors="coerce")
-    return df[["date", "high", "low", "close", "volume"]].dropna().sort_values("date").reset_index(drop=True)
+    df = df[["date", "high", "low", "close", "volume"]].dropna()
+    df = df[(df["high"] > 0) & (df["low"] > 0) & (df["close"] > 0)]
+    return df.sort_values("date").reset_index(drop=True)
 
 
 def _swing_points(df: pd.DataFrame, window: int = SWING_WINDOW) -> list[tuple[float, str, str]]:
@@ -46,6 +48,8 @@ def _swing_points(df: pd.DataFrame, window: int = SWING_WINDOW) -> list[tuple[fl
 def _cluster(points: list[tuple[float, str, str]], tolerance: float = MERGE_TOLERANCE) -> list[dict]:
     levels = []
     for price, day, _ in sorted(points):
+        if not price or price <= 0:  # 沒成交的日子價格是 0，不是有意義的價位
+            continue
         if levels and abs(price - levels[-1]["price"]) / levels[-1]["price"] <= tolerance:
             level = levels[-1]
             level["prices"].append(price)

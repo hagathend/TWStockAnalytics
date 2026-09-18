@@ -44,6 +44,24 @@ class SupportResistanceTests(unittest.TestCase):
     def test_short_history(self):
         self.assertEqual(price_levels.support_resistance(_frame([100.0] * 5))["supports"], [])
 
+    def test_zero_price_points_skipped(self):
+        # 暫停交易日價格為 0，曾經讓合併價位時除以 0（3665 貿聯-KY 2026-06-10）
+        clusters = price_levels._cluster([(0.0, "d0", "low"), (100.0, "d1", "low"), (101.0, "d2", "low")])
+        self.assertEqual([(100.5, 2)], [(c["price"], c["touches"]) for c in clusters])
+
+    def test_from_finmind_drops_zero_rows(self):
+        rows = [{"date": "2026-06-09", "max": 10.0, "min": 9.0, "close": 9.5, "Trading_Volume": 100},
+                {"date": "2026-06-10", "max": 0.0, "min": 0.0, "close": 0.0, "Trading_Volume": 0},
+                {"date": "2026-06-11", "max": 11.0, "min": 10.0, "close": 10.5, "Trading_Volume": 200}]
+        self.assertEqual(["2026-06-09", "2026-06-11"], list(price_levels.from_finmind(rows)["date"]))
+
+    def test_finmind_fetch_drops_suspended_days(self):
+        from src.collectors import finmind
+        rows = [{"date": "2026-06-10", "open": 0, "max": 0, "min": 0, "close": 0},
+                {"date": "2026-06-11", "open": 10, "max": 11, "min": 9, "close": 10}]
+        with patch.object(finmind, "_request", return_value=rows):
+            self.assertEqual(["2026-06-11"], [r["date"] for r in finmind.fetch_stock_price("3665", "a", "b")])
+
 
 class VolumeProfileTests(unittest.TestCase):
     def test_poc_and_value_area(self):
