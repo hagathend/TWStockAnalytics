@@ -556,6 +556,15 @@ def lookup_stock_name(code: str) -> str | None:
         return row["name"] if row else None
 
 
+def query_stock_names() -> dict[str, str]:
+    """{代號: 名稱}：最近一個交易日有股價的上市櫃個股（排除 ETF、權證），新聞比對公司名稱用"""
+    with get_conn() as conn:
+        cur = conn.execute(
+            f"""SELECT code, name FROM stock_price
+                WHERE date = (SELECT MAX(date) FROM stock_price) AND {STOCK_CODE_SQL} AND name IS NOT NULL""")
+        return {r["code"]: r["name"].strip() for r in cur.fetchall()}
+
+
 def lookup_stock_code_by_name(name: str) -> str | None:
     """從最近一次收集到的股價資料，用名稱反查股票代號。
 

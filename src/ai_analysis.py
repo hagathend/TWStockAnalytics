@@ -18,6 +18,7 @@ from src.ai_providers import generate_ollama_json, generate_ollama_text, generat
 from src.collectors import firecrawl_fetcher
 from src.collectors.article_fetcher import ArticleFetcher
 from src.config_ai import load_codex_settings, load_scraping_settings
+from src import news_relevance
 from src.storage import db
 
 _MAX_NEWS_ITEMS = 60
@@ -27,7 +28,8 @@ MAX_PICKS = max(NEWS_TOP_N_OPTIONS)
 
 _SUMMARY_TRUNCATE = 150
 
-_MAX_CNYES_FOR_DEEP = 40  # 鉅亨網一般市場新聞：涵蓋整個大盤，篇數多才能覆蓋到夠多不同的公司
+# 鉅亨網一天約 125 則，先過濾掉沒提到公司的（見 news_relevance），再取最相關的前 50 則摘要
+_MAX_CNYES_FOR_DEEP = 50
 _MAX_RSS_FOR_DEEP = 15  # Google News RSS 個股延伸新聞（只涵蓋watchlist那幾檔，篇數增加不太會擴大公司覆蓋範圍，保留少量即可）
 
 _ARTICLE_SUMMARY_PROMPT = """請閱讀以下台股新聞內文，用不超過100字的繁體中文摘要重點，
@@ -405,7 +407,10 @@ def _gather_and_summarize(
 
     # 分開取鉅亨網一般新聞 + RSS 個股延伸新聞，避免其中一種來源（通常是較多筆的鉅亨網）
     # 把另一種排擠掉——RSS 雖然筆數少，但是針對觀察名單個股的精準新聞，很重要
-    cnyes_rows = [r for r in news_rows if r["source"] == "cnyes"][:_MAX_CNYES_FOR_DEEP]
+    # 鉅亨網台股分類一天約 125 則，大半是總經／保險／生活新聞；先用本地公司名稱比對，
+    # 只把有提到上市櫃公司的送去摘要（標題就點名公司的優先），省下的 Codex 額度留給真正的個股新聞
+    cnyes_rows = news_relevance.select_stock_news(
+        [r for r in news_rows if r["source"] == "cnyes"], news_relevance.build_company_index(), _MAX_CNYES_FOR_DEEP)
     rss_rows = [r for r in news_rows if r["source"] != "cnyes"][:_MAX_RSS_FOR_DEEP]
     articles = cnyes_rows + rss_rows
     total = len(articles)

@@ -5,6 +5,7 @@
 
 import html
 import re
+import time
 from datetime import datetime, timedelta
 
 import requests
@@ -15,6 +16,8 @@ _TIMEOUT = 20
 _CATEGORY = "tw_stock"  # 台股分類
 _CODE_IN_TITLE = re.compile(r"\((\d{4,6}[A-Z]?)\)")
 _MAX_CONTENT_LENGTH = 4000
+_PAGE_SIZE = 30  # API 一頁最多 30 則
+_MAX_PAGES = 10  # 保險上限：一天 300 則已遠超過實際量
 
 
 def _extract_code(title: str) -> str | None:
@@ -34,45 +37,52 @@ def _extract_content_text(raw_content: str) -> str:
     return text[:_MAX_CONTENT_LENGTH]
 
 
-def fetch_cnyes_news(hours: int = 26, limit: int = 100) -> list[dict]:
-    """抓取最近 N 小時內的鉅亨網台股新聞列表。
+def _to_row(item: dict, today: str, collected_at: str) -> dict:
+    news_id = item.get("newsId")
+    published_at = None
+    if item.get("publishAt"):
+        published_at = datetime.fromtimestamp(item["publishAt"]).isoformat(timespec="seconds")
+    title = item.get("title")
+    return {
+        "date": today,
+        "source": "cnyes",
+        "title": title,
+        "url": f"https://news.cnyes.com/news/id/{news_id}" if news_id else None,
+        "summary": (item.get("summary") or "")[:500],
+        "content": _extract_content_text(item.get("content", "")),
+        "related_code": _extract_code(title),
+        "published_at": published_at,
+        "collected_at": collected_at,
+    }
 
-    hours 預設 26 小時，確保晚上 8 點執行時能涵蓋「今天整個交易日」的新聞。
+
+def fetch_cnyes_news(hours: int = 26, max_pages: int = _MAX_PAGES, page_delay: float = 0.5) -> list[dict]:
+    """抓取最近 N 小時內的鉅亨網台股新聞（逐頁抓到最後一頁）。
+
+    hours 預設 26 小時，確保晚上執行時能涵蓋「今天整個交易日」的新聞。
+    API 一頁固定最多 30 則（limit 設更大也沒用），一天約 100～150 則。以前只抓第一頁，
+    晚上收集時第一頁剛好都是收盤後的總經／生活新聞，白天的個股新聞全部漏掉。
     """
     now = datetime.now()
-    start_at = int((now - timedelta(hours=hours)).timestamp())
-    end_at = int(now.timestamp())
-
+    params = {"startAt": int((now - timedelta(hours=hours)).timestamp()), "endAt": int(now.timestamp()),
+              "limit": _PAGE_SIZE}
     url = f"https://news.cnyes.com/api/v3/news/category/{_CATEGORY}"
-    params = {"startAt": start_at, "endAt": end_at, "limit": min(limit, 100)}
-    resp = requests.get(url, headers=_HEADERS, params=params, timeout=_TIMEOUT)
-    resp.raise_for_status()
-    payload = resp.json()
-
-    items = payload.get("items", {}).get("data", [])
     today = now.strftime("%Y-%m-%d")
     collected_at = now.isoformat(timespec="seconds")
 
-    rows = []
-    for item in items:
-        news_id = item.get("newsId")
-        published_at = None
-        if item.get("publishAt"):
-            published_at = datetime.fromtimestamp(item["publishAt"]).isoformat(
-                timespec="seconds"
-            )
-        title = item.get("title")
-        rows.append(
-            {
-                "date": today,
-                "source": "cnyes",
-                "title": title,
-                "url": f"https://news.cnyes.com/news/id/{news_id}" if news_id else None,
-                "summary": (item.get("summary") or "")[:500],
-                "content": _extract_content_text(item.get("content", "")),
-                "related_code": _extract_code(title),
-                "published_at": published_at,
-                "collected_at": collected_at,
-            }
-        )
+    rows, seen = [], set()
+    page, last_page = 1, 1
+    while page <= min(last_page, max_pages):
+        resp = requests.get(url, headers=_HEADERS, params={**params, "page": page}, timeout=_TIMEOUT)
+        resp.raise_for_status()
+        items = resp.json().get("items", {})
+        last_page = items.get("last_page") or 1
+        for item in items.get("data", []):
+            if item.get("newsId") in seen:  # 翻頁期間有新新聞進來時，前一頁的最後幾則會被擠到下一頁
+                continue
+            seen.add(item.get("newsId"))
+            rows.append(_to_row(item, today, collected_at))
+        page += 1
+        if page_delay and page <= min(last_page, max_pages):
+            time.sleep(page_delay)
     return rows
