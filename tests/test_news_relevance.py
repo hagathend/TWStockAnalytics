@@ -103,6 +103,44 @@ class GatherSkipsNonStockNewsTest(unittest.TestCase):
                 "2026-09-17", lambda title, content: summarized.append(title) or "摘要")
             self.assertIsNone(error)
             self.assertEqual(["台積電擴產", "大盤上漲"], summarized)
+            codes = {r["title"]: r["related_code"] for r in db.query_news("2026-09-17")}
+            self.assertEqual("2330", codes["台積電擴產"])  # 摘要後把標題點名的公司寫進關聯代號
+            self.assertIsNone(codes["央行利率不變"])
+        finally:
+            case.tearDown()
+
+
+class RelatedCodesTest(unittest.TestCase):
+    def test_title_and_excerpt(self):
+        self.assertEqual("4991", nr.related_codes("200G PD量產 環宇-KY Q3業績有望逐季加溫", None, INDEX))
+        self.assertEqual("4991,2330", nr.related_codes("環宇-KY 業績加溫", "環宇-KY(4991)…客戶含台積電", INDEX))
+        self.assertIsNone(nr.related_codes("央行理監事會", "利率不變", INDEX))
+
+    def test_limit_and_merge(self):
+        many = "台積電、聯發科、和碩、南亞科、大立光、環宇、榮剛"
+        self.assertEqual(nr.MAX_RELATED_CODES, len(nr.related_codes(many, None, INDEX).split(",")))
+        self.assertEqual("2330,4991", nr.merge_related("2330", "4991,2330"))
+        self.assertEqual("4991", nr.merge_related(None, "4991"))
+        self.assertIsNone(nr.merge_related(None, None))
+
+
+class FillMissingRelatedCodesTest(unittest.TestCase):
+    def test_fills_only_empty(self):
+        from src.storage import db
+        from tests._db_fixture import TempDBTestCase, price_row
+
+        case = TempDBTestCase()
+        case.setUp()
+        try:
+            db.save_stock_price([price_row("2026-09-18", "4991", "環宇-KY"), price_row("2026-09-18", "2330", "台積電")])
+            db.save_news([{"date": "2026-09-18", "source": "cnyes", "title": t, "url": u, "summary": "", "content": "",
+                           "related_code": code, "published_at": "2026-09-18T10:00:00", "collected_at": "x"}
+                          for t, u, code in [("環宇-KY Q3 加溫", "u1", None), ("台積電擴產", "u2", "9999"),
+                                             ("央行利率不變", "u3", None)]])
+            self.assertEqual(1, nr.fill_missing_related_codes())
+            codes = {r["url"]: r["related_code"] for r in db.query_news("2026-09-18")}
+            self.assertEqual({"u1": "4991", "u2": "9999", "u3": None}, codes)
+            self.assertEqual(["u1"], [r["url"] for r in db.query_news("2026-09-18", "4991")])
         finally:
             case.tearDown()
 

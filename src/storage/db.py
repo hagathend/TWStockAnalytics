@@ -1392,3 +1392,16 @@ def query_history_date_bounds() -> tuple[str | None, str | None]:
                    UNION ALL SELECT date FROM predictions)"""
         ).fetchone()
         return row["first"], row["last"]
+
+
+def query_news_without_related_code(limit: int = 5000) -> list[dict]:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "SELECT id, title, excerpt FROM news WHERE related_code IS NULL OR related_code = '' ORDER BY id DESC LIMIT ?",
+            (limit,))
+        return [dict(r) for r in cur.fetchall()]
+
+
+def update_news_related_code(news_id: int, related_code: str | None):
+    with get_conn() as conn:
+        conn.execute("UPDATE news SET related_code = ? WHERE id = ?", (related_code, news_id))

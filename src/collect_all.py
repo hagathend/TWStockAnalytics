@@ -79,7 +79,21 @@ def collect_news() -> dict:
         lambda: news_rss.fetch_watchlist_news(load_watchlist()),
         db.save_news,
     )
+    fill_news_related_codes()
     return {"cnyes": len(cnyes_rows), "rss": len(rss_rows)}
+
+
+def fill_news_related_codes() -> int:
+    """新聞標題（與 AI 摘要）點名的公司寫進關聯代號；鉅亨網標題多半只寫公司名稱、不寫代號"""
+    from src import news_relevance  # 延遲匯入：需要讀股價表的公司名稱
+
+    try:
+        filled = news_relevance.fill_missing_related_codes()
+    except Exception as exc:  # noqa: BLE001
+        db.log_step("新聞關聯代號", "failed", str(exc))
+        return 0
+    db.log_step("新聞關聯代號", "success", f"補上 {filled} 則")
+    return filled
 
 
 def collect_fundamentals() -> dict:

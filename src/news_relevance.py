@@ -92,3 +92,33 @@ def select_stock_news(rows: list[dict], index: dict[str, str], limit: int) -> li
             scored.append((-min(title_count, 1), -total, order, row))
     scored.sort(key=lambda item: item[:3])
     return [row for *_, row in scored[:limit]]
+
+
+MAX_RELATED_CODES = 5
+
+
+def related_codes(title: str, excerpt: str | None, index: dict[str, str]) -> str | None:
+    """新聞的「關聯代號」：標題點名的公司，加上 AI 逐篇摘要點名的公司（摘要通常寫成「環宇-KY(4991)」）。
+    不看全文：盤勢新聞的內文會列出一大串公司，全部算關聯反而失去意義。多檔用逗號分隔，最多 5 檔"""
+    codes = mentioned_companies(title or "", index) + mentioned_companies(excerpt or "", index)
+    codes = list(dict.fromkeys(codes))[:MAX_RELATED_CODES]
+    return ",".join(codes) or None
+
+
+def merge_related(existing: str | None, extra: str | None) -> str | None:
+    codes = [c for c in (existing or "").split(",") + (extra or "").split(",") if c]
+    return ",".join(list(dict.fromkeys(codes))[:MAX_RELATED_CODES]) or None
+
+
+def fill_missing_related_codes() -> int:
+    """把還沒有關聯代號的新聞補上（每日收集時呼叫，只補空的、不覆蓋既有值）。回傳補了幾則"""
+    index = build_company_index()
+    if not index:
+        return 0
+    filled = 0
+    for row in db.query_news_without_related_code():
+        codes = related_codes(row["title"], row["excerpt"], index)
+        if codes:
+            db.update_news_related_code(row["id"], codes)
+            filled += 1
+    return filled

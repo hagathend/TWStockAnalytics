@@ -421,6 +421,7 @@ def _gather_and_summarize(
 
     summaries = []
     article_excerpts = []
+    company_index = news_relevance.build_company_index()
     for i, article in enumerate(articles, start=1):
         content = (
             article.get("content")
@@ -431,6 +432,10 @@ def _gather_and_summarize(
         excerpt = summarize_fn(article["title"], content) if content else article["title"]
         summaries.append(f"{i}. {article['title']} — {excerpt}")
         db.save_news_excerpt(article["id"], excerpt)
+        related = news_relevance.merge_related(article.get("related_code"),
+                                               news_relevance.related_codes(article["title"], excerpt, company_index))
+        if related != article.get("related_code"):
+            db.update_news_related_code(article["id"], related)
         article_excerpts.append(
             {
                 "title": article["title"],
