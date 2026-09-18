@@ -179,6 +179,9 @@ section[data-testid="stSidebar"] [data-testid="stSelectbox"] [data-baseweb="sele
 section[data-testid="stSidebar"] [data-testid="stSelectbox"] svg {{ color: #17202A !important; fill: #17202A !important; }}
 /* 滑鼠停留的提示框是白底，但側邊欄的按鈕提示會沿用側邊欄的淺色字，看不到；一律改深色字 */
 [data-testid="stTooltipContent"], [data-testid="stTooltipContent"] * {{ color: #243F60 !important; }}
+/* 下拉選單的選項清單也是白底，側邊欄的下拉（查詢日期等）會沿用淺色字；一律改深色字。
+   選項多的下拉會用 stSelectboxVirtualDropdown，不在 popover 裡面，所以直接比對 listbox */
+[role="listbox"] [role="option"], [role="listbox"] [role="option"] * {{ color: #243F60 !important; }}
 </style>
 
 """
