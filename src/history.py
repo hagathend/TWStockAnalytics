@@ -2,7 +2,7 @@
 
 import pandas as pd
 
-from src import predictions
+from src import prediction_views
 from src.storage import db
 
 
@@ -29,12 +29,12 @@ def _matches(result: dict, keyword: str) -> bool:
     return not keyword or keyword in result["code"] or keyword in (result.get("name") or "")
 
 
-def search_predictions(start: str, end: str, keyword: str | None = None, direction: str | None = None,
-                       status: str | None = None) -> list[dict]:
-    """期間內（依分析日）的 AI 預測與檢驗結果。status：done／pending／no_data；direction：偏多／偏空／中性"""
+def search_views(start: str, end: str, keyword: str | None = None, direction: str | None = None,
+                 status: str | None = None, views: list[dict] | None = None) -> list[dict]:
+    """期間內（依觀點開始日）的 AI 觀點與成績。status：active／done／too_short／no_data；direction：偏多／偏空／中性"""
     results = []
-    for result in predictions.evaluate_all():
-        if not start <= result["date"] <= end or not _matches(result, keyword or ""):
+    for result in prediction_views.build_views() if views is None else views:
+        if not start <= result["start_date"] <= end or not _matches(result, keyword or ""):
             continue
         if direction and result["direction"] != direction:
             continue
@@ -44,7 +44,7 @@ def search_predictions(start: str, end: str, keyword: str | None = None, directi
     return results
 
 
-def analysis_for_prediction(result: dict) -> str | None:
-    """預測對應的那一篇個股分析全文"""
-    rows = db.query_stock_analysis(result["date"], result["code"])
+def analysis_text(date: str, code: str) -> str | None:
+    """某天某檔的個股分析全文"""
+    rows = db.query_stock_analysis(date, code)
     return rows[0]["analysis"] if rows else None

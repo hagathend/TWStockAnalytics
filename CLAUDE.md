@@ -73,11 +73,13 @@ src/
 ├── ui.py                  共用樣式元件（頁首、面板、卡片、標籤、紅漲綠跌）
 ├── codex_cli.py           Codex CLI 非互動呼叫、登入檢查、JSON Schema
 ├── ai_analysis.py         新聞深度分析：抓內文→逐篇摘要→分批挑股（Codex；Ollama 函式保留未使用）
+├── news_relevance.py      摘要前用本地公司名稱／代號過濾與個股無關的新聞（省 Codex 額度）
 ├── stock_analysis.py      個股分析提示詞（技術＋籌碼＋基本面＋持股）
 ├── market_analysis.py     大盤籌碼分析提示詞
 ├── indicators.py / chip_metrics.py / signals.py / backtest.py / fundamentals.py   程式計算的指標、訊號、回測
 ├── portfolio.py           交易紀錄重播：平均成本、稅費、未實現／已實現損益、覆盤提示詞
-├── predictions.py         AI 預測追蹤（解析「預測摘要」→ 5／10 日後檢驗）
+├── predictions.py         AI 預測摘要解析與儲存（每次個股分析一筆）
+├── prediction_views.py    預測改以「觀點」計分：同方向連續預測合併，方向改變或滿 10 個交易日結算；中性另計、翻轉次數
 ├── history.py             歷史查詢：新聞焦點上榜次數統計、依期間／方向／狀態篩選 AI 預測（查詢 SQL 在 db.search_*）
 ├── alerts.py / notify.py  條件提醒與 Windows 通知；calendar_events.py 行事曆
 ├── market_breadth.py / market_index.py / heatmap.py / futures.py   市場溫度計、加權指數與相對強弱、產業熱力圖、期貨法人
@@ -104,7 +106,7 @@ launcher.pyw               安裝版啟動器；packaging/ 安裝程式打包；
 
 ```
 收集：TWSE/TPEx/FinMind → stock_price / institutional / margin / valuation / month_revenue
-     鉅亨網API(含全文) + Google News RSS → news
+     鉅亨網API(含全文，逐頁抓完一天約 125 則) + Google News RSS → news
         ↓
 AI 新聞分析（Codex CLI，收集後自動觸發）：
      缺內文的用 Firecrawl→Playwright 補 → 逐篇摘要存 news.excerpt
@@ -195,6 +197,8 @@ Schema 變更走 `db.init_db()` 裡的 `ALTER TABLE ... ADD COLUMN` + `try/excep
 - **不要放圖示**：emoji 和 Material 圖示使用者都覺得醜，導覽列與按鈕一律純文字。
 - **紅漲綠跌**：顏色只從 `ui.UP_COLOR` / `ui.DOWN_COLOR` 取；表格用 `_styled_table()`、圖表用 `ui.style_chart()`。
 - plotly 圖不要放圖內標題（會跟圖例黏在一起），標題交給外面的 panel。
+- 表格一律過 `_styled_table()`：st.dataframe 前端對空值固定顯示「None」、不理會 Styler 的 na_rep，
+  所以有缺值的數值欄位會整欄轉成格式化文字（缺值「-」），紅綠色依原始數值判斷。
 - **導覽＝可摺疊的大項目＋子項目**：`app.py` 的 `_render_nav()` 自訂側邊欄（內建導覽 `position="hidden"`），
   子項目對應頁內分頁，清單在 `NAV_TABS`。頁面用 `ui.page_tabs(page_id, NAV_TABS[page_id])` 取得目前分頁，
   **只執行目前分頁的內容**（不要一頁從頭畫到尾一直往下拉）。新增區塊時放進適當分頁，或在 `NAV_TABS` 加子項目。

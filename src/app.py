@@ -45,7 +45,7 @@ from src.config_watchlist import add_stocks, load_watchlist
 from src.market_analysis import build_market_analysis_prompt, save_market_analysis
 from src.report_pdf import markdown_to_pdf
 from src import (alerts, backtest, calendar_events, desktop, financials, futures, pe_river, fundamentals, heatmap, market_breadth, market_index, notify, portfolio,
-                 ownership, predictions,
+                 ownership, prediction_views, predictions,
                  revenue, shareholding, signals, ui, updater)
 from src.config import IS_INSTALLED
 from src.codex_cli import _executable as find_codex_executable
@@ -121,19 +121,36 @@ def _display_df(rows: list[dict], column_labels: dict[str, str]) -> pd.DataFrame
 
 
 def _styled_table(df: pd.DataFrame, signed: list[str] = (), thousands: list[str] = (), decimals: list[str] = ()):
-    """表格共用樣式：正負數紅漲綠跌、千分位、小數兩位、缺值顯示「-」"""
+    """表格共用樣式：正負數紅漲綠跌、千分位、小數兩位、缺值顯示「-」。
+
+    st.dataframe 的前端對空值一律顯示「None」，不理會 Styler 的 na_rep；混合數字與「-」又會讓 Arrow 序列化失敗。
+    所以有缺值的數值欄位整欄先格式化成文字（缺值「-」），沒有缺值的欄位維持數值、交給 Styler 格式化；
+    紅漲綠跌一律依原始數值判斷。"""
     present = set(df.columns)
-    int_cols = [c for c in thousands if c in present]
-    float_cols = [c for c in decimals if c in present]
-    # 合併基本面後缺值可能是 None（object 欄位），格式化會略過而直接顯示「None」，先轉成數值 NaN
+    specs = {c: ",.0f" for c in thousands if c in present} | {c: ",.2f" for c in decimals if c in present}
+    signed_cols = [c for c in signed if c in present]
     df = df.copy()
-    for column in {*int_cols, *float_cols, *(c for c in signed if c in present)}:
-        df[column] = pd.to_numeric(df[column], errors="coerce")
-    styler = ui.color_signed(df, list(signed))
-    if int_cols:
-        styler = styler.format("{:,.0f}", subset=int_cols, na_rep="-")
-    if float_cols:
-        styler = styler.format("{:,.2f}", subset=float_cols, na_rep="-")
+    numeric = {}
+    for column in {*specs, *signed_cols}:
+        values = pd.to_numeric(df[column], errors="coerce")
+        numeric[column] = values
+        if values.isna().any():
+            spec = specs.get(column)
+            df[column] = ["-" if pd.isna(v) else (f"{v:{spec}}" if spec else f"{v:g}") for v in values]
+        else:
+            df[column] = values
+    styler = df.style
+
+    def _tones(col: pd.Series) -> list[str]:
+        return [f"color: {ui.UP_COLOR}" if ui.tone_of(v) == "up" else f"color: {ui.DOWN_COLOR}" if ui.tone_of(v) == "down" else ""
+                for v in numeric[col.name]]
+
+    if signed_cols:
+        styler = styler.apply(_tones, subset=signed_cols)
+    for spec in (",.0f", ",.2f"):
+        cols = [c for c, s_ in specs.items() if s_ == spec and not numeric[c].isna().any()]
+        if cols:
+            styler = styler.format(f"{{:{spec}}}", subset=cols)
     return styler
 
 
@@ -724,11 +741,12 @@ def _render_stock_ai_panel(code: str):
                 result = save_stock_analysis(code, raw_stock_analysis)
                 (st.success if result["ok"] else st.warning)(result["message"])
 
-        history = predictions.evaluate_all(code)
-        if history:
+        stock_views = prediction_views.build_views(code)
+        if stock_views:
             st.divider()
-            st.caption("這檔過去的 AI 預測與實際結果")
-            _prediction_table(history, show_stock=False)
+            st.caption("這檔的 AI 觀點與實際走勢（底色：紅＝偏多、綠＝偏空、灰＝中性）")
+            _render_view_chart(code, stock_views)
+            _views_table(stock_views, show_stock=False)
 
         existing_analysis = db.query_stock_analysis(_date.today().isoformat(), code)
         if existing_analysis:
@@ -1079,69 +1097,117 @@ def _render_positions_table(positions: list[dict], totals: dict):
 
 # ─────────────────────────────── AI 預測追蹤 ───────────────────────────────
 
-_PREDICTION_COLUMNS = {
-    "date": "分析日", "code": "代號", "name": "名稱", "direction": "方向", "confidence": "信心",
-    "base_close": "基準價", "return_5": "5日報酬%", "return_10": "10日報酬%", "market_return_10": "同期大盤10日%",
-    "support": "支撐", "support_text": "跌破支撐", "resistance": "壓力", "resistance_text": "突破壓力",
-    "result_text": "結果",
+_VIEW_COLUMNS = {
+    "code": "代號", "name": "名稱", "direction": "方向", "start_date": "開始日", "end_date": "結束日",
+    "days": "持續(交易日)", "analyses": "分析次數", "start_close": "開始價", "end_close": "結束／最新價",
+    "return_pct": "報酬%", "market_return": "同期大盤%", "excess": "超額%", "support": "支撐", "resistance": "壓力",
+    "end_reason": "結束原因", "result_text": "結果",
 }
+_FLIP_COLUMNS = {"code": "代號", "name": "名稱", "analyses": "分析次數", "views": "觀點段數", "flips": "方向翻轉",
+                 "flip_rate": "翻轉率%", "scored": "已計分", "hits": "命中"}
+_VIEW_RULE = (f"同方向的連續預測合併成一段觀點，方向改變或滿 {prediction_views.VIEW_MAX_DAYS} 個交易日結算；"
+              f"不到 {prediction_views.MIN_SCORED_DAYS} 天就翻轉的不計分・偏多須漲超過 {predictions.BULL_MIN_PCT:g}%、"
+              f"偏空須跌超過 {abs(predictions.BEAR_MAX_PCT):g}%、中性須在 ±{predictions.NEUTRAL_BAND_PCT:g}% 內")
 
 
-def _prediction_result_text(r: dict) -> str:
-    if r["status"] == "done":
-        return "命中" if r["hit"] else "未命中"
-    if r["status"] == "pending":
-        return f"進行中 {r['days_elapsed']}/{predictions.VERDICT_HORIZON} 天"
-    return "資料不足"
+def _view_result_text(v: dict) -> str:
+    if v["status"] == "done":
+        return "命中" if v["hit"] else "未命中"
+    if v["status"] == "active":
+        return f"進行中 {v['days']}/{prediction_views.VIEW_MAX_DAYS} 天"
+    return prediction_views.STATUS_LABELS[v["status"]]
 
 
-def _yes_no(value) -> str:
-    return "-" if value is None else ("是" if value else "否")
-
-
-def _prediction_table(results: list[dict], show_stock: bool = True, key: str | None = None):
-    rows = [{**r, "result_text": _prediction_result_text(r), "support_text": _yes_no(r["support_broken"]),
-             "resistance_text": _yes_no(r["resistance_reached"])} for r in results]
-    columns = [c for c in _PREDICTION_COLUMNS if show_stock or c not in ("code", "name")]
-    view = pd.DataFrame(rows)[columns].rename(columns=_PREDICTION_COLUMNS)
-    styler = _styled_table(view, signed=["5日報酬%", "10日報酬%", "同期大盤10日%"],
-                           decimals=["基準價", "5日報酬%", "10日報酬%", "同期大盤10日%", "支撐", "壓力"])
+def _views_table(views: list[dict], show_stock: bool = True, key: str | None = None, height: int | None = None):
+    rows = [{**v, "result_text": _view_result_text(v)} for v in views]
+    columns = [c for c in _VIEW_COLUMNS if show_stock or c not in ("code", "name")]
+    view = pd.DataFrame(rows)[columns].rename(columns=_VIEW_COLUMNS)
+    view["結束日"] = view["結束日"].fillna("")
+    styler = _styled_table(view, signed=["報酬%", "同期大盤%", "超額%"],
+                           decimals=["開始價", "結束／最新價", "報酬%", "同期大盤%", "超額%", "支撐", "壓力"])
     styler = styler.map(lambda v: f"color: {ui.UP_COLOR}" if v == "偏多" else f"color: {ui.DOWN_COLOR}" if v == "偏空" else "",
                         subset=["方向"])
     styler = styler.map(lambda v: "font-weight: 600" if v in ("命中", "未命中") else f"color: {ui.MUTED_COLOR}",
                         subset=["結果"])
+    options = {"width": "stretch", "hide_index": True}
+    if height:
+        options["height"] = height
     if key is None:
-        st.dataframe(styler, width="stretch", hide_index=True)
+        st.dataframe(styler, **options)
         return None
-    return st.dataframe(styler, width="stretch", hide_index=True, on_select="rerun", selection_mode="single-row", key=key)
+    return st.dataframe(styler, on_select="rerun", selection_mode="single-row", key=key, **options)
+
+
+def _view_summary_cards(views: list[dict]):
+    summary = prediction_views.summarize(views)
+    directional = summary["directional"]
+    neutral = summary["by_direction"].get("中性")
+    items = [
+        {"label": "觀點段數", "value": f"{summary['total']}", "sub": f"進行中 {summary['active']} 段"},
+        {"label": "偏多＋偏空命中率",
+         "value": "-" if not directional else f"{directional['hit_rate']:.0f}%",
+         "sub": f"已結算 {directional['count'] if directional else 0} 段" + ("・樣本少參考性低" if not directional or directional["count"] < 20 else "")},
+        {"label": "中性命中率（條件寬鬆，另計）",
+         "value": "-" if not neutral else f"{neutral['hit_rate']:.0f}%",
+         "sub": f"已結算 {neutral['count'] if neutral else 0} 段"},
+        {"label": "方向翻轉", "value": f"{summary['flips']} 次", "sub": f"太短不計分 {summary['too_short']} 段"},
+    ]
+    for direction in ("偏多", "偏空"):
+        stats = summary["by_direction"].get(direction)
+        if stats:
+            excess = stats["avg_excess"]
+            items.append({"label": f"{direction}（{stats['count']} 段）", "value": f"平均 {stats['avg_return']:+.1f}%",
+                          "tone": ui.tone_of(stats["avg_return"]),
+                          "sub": "" if excess is None else f"超額 {excess:+.1f}%", "sub_tone": ui.tone_of(excess)})
+    ui.cards(items)
+
+
+_VIEW_BAND_COLORS = {"偏多": "rgba(240, 82, 79, 0.14)", "偏空": "rgba(34, 181, 115, 0.16)", "中性": "rgba(135, 146, 166, 0.14)"}
+
+
+def _render_view_chart(code: str, views: list[dict]):
+    """個股收盤價，底色標出每段觀點的方向（紅＝偏多、綠＝偏空、灰＝中性）"""
+    if not views:
+        return
+    first = min(v["start_date"] for v in views)
+    since = (_date.fromisoformat(first) - timedelta(days=14)).isoformat()
+    prices = db.query_price_range(code, since)
+    if len(prices) < 2:
+        return
+    frame = pd.DataFrame(prices)
+    fig = go.Figure()
+    for v in views:
+        fig.add_vrect(x0=v["start_date"], x1=v["end_date"] or frame["date"].iloc[-1],
+                      fillcolor=_VIEW_BAND_COLORS[v["direction"]], line_width=0, layer="below")
+    fig.add_scatter(x=frame["date"], y=frame["close"], mode="lines", name="收盤價",
+                    line={"color": ui.ACCENT_COLOR, "width": 2})
+    starts = [v for v in views if v["start_date"] in set(frame["date"])]
+    fig.add_scatter(x=[v["start_date"] for v in starts], y=[v["start_close"] for v in starts], mode="markers+text",
+                    text=[v["direction"] for v in starts], textposition="middle left", name="觀點開始",
+                    marker={"size": 8, "color": [ui.UP_COLOR if v["direction"] == "偏多" else ui.DOWN_COLOR
+                                                 if v["direction"] == "偏空" else ui.MUTED_COLOR for v in starts]},
+                    hovertemplate="%{x} 觀點開始：%{text}<extra></extra>")
+    low, high = frame["close"].min(), frame["close"].max()
+    fig.update_yaxes(range=[low - (high - low) * 0.08, high + (high - low) * 0.12])
+    fig.update_xaxes(type="category", nticks=8)
+    st.plotly_chart(ui.style_chart(fig, height=260), width="stretch", key=f"view_chart_{code}")
 
 
 def _render_prediction_tracking():
-    with ui.panel("AI 預測追蹤",
-                  f"個股分析的預測摘要，{predictions.VERDICT_HORIZON} 個交易日後對照實際走勢；"
-                  f"偏多須漲超過 {predictions.BULL_MIN_PCT:g}%、偏空須跌超過 {abs(predictions.BEAR_MAX_PCT):g}%、"
-                  f"中性須在 ±{predictions.NEUTRAL_BAND_PCT:g}% 內才算命中"):
-        results = predictions.evaluate_all()
-        if not results:
+    with ui.panel("AI 預測追蹤", _VIEW_RULE):
+        views = prediction_views.build_views()
+        if not views:
             st.caption("還沒有預測紀錄。之後用 Codex 做個股分析時，會自動記錄 AI 的預測摘要。")
             return
-        summary = predictions.summarize(results)
-        items = [
-            {"label": "預測筆數", "value": f"{summary['total']}", "sub": f"進行中 {summary['pending']} 筆"},
-            {"label": "已到期", "value": f"{summary['done']}"},
-            {"label": "方向命中率", "value": "-" if summary["hit_rate"] is None else f"{summary['hit_rate']:.0f}%",
-             "sub": "樣本少時參考性低" if summary["done"] < 20 else None},
-        ]
-        for direction, stats in summary["by_direction"].items():
-            excess = stats["avg_excess"]
-            items.append({
-                "label": f"{direction}（{stats['count']} 筆）",
-                "value": f"命中 {stats['hit_rate']:.0f}%",
-                "sub": f"平均 {stats['avg_return']:+.1f}%" + ("" if excess is None else f"・超額 {excess:+.1f}%"),
-                "sub_tone": ui.tone_of(stats["avg_return"]),
-            })
-        ui.cards(items)
-        _prediction_table(results)
+        _view_summary_cards(views)
+    with ui.panel("目前觀點", "每檔股票最新的一段觀點；持續中的報酬算到最新收盤"):
+        _views_table(prediction_views.current_views(views))
+    with ui.panel("觀點紀錄", "全部觀點，新到舊"):
+        _views_table(views, height=380)
+    with ui.panel("各股翻轉統計", "翻轉率＝方向改變次數 ÷（分析次數 − 1）；常常翻來翻去的股票，AI 的看法參考價值較低"):
+        stats = prediction_views.flip_stats(views)
+        st.dataframe(_styled_table(pd.DataFrame(stats)[list(_FLIP_COLUMNS)].rename(columns=_FLIP_COLUMNS),
+                                   decimals=["翻轉率%"]), width="stretch", hide_index=True)
 
 
 # ─────────────────────────────── AI 分析 ───────────────────────────────
@@ -2003,7 +2069,7 @@ _HISTORY_NEWS_COLUMNS = {"date": "日期", "source": "來源", "title": "標題"
 _HISTORY_PICK_COLUMNS = {"code": "代號", "name": "名稱", "count": "上榜次數", "best_rank": "最佳排名",
                          "first_date": "第一次", "last_date": "最近一次", "last_reason": "最近原因"}
 _HISTORY_ANALYSIS_COLUMNS = {"date": "日期", "code": "代號", "name": "名稱", "created_at": "產生時間"}
-_PREDICTION_STATUS = {"全部": None, "已到期": "done", "進行中": "pending", "資料不足": "no_data"}
+_VIEW_STATUS = {"全部": None, **{label: key for key, label in prediction_views.STATUS_LABELS.items()}}
 
 
 def _selected_row(event, rows: list[dict]) -> dict | None:
@@ -2103,29 +2169,26 @@ def _render_history_market_analysis(start: str, end: str, keyword: str):
 def _render_history_predictions(start: str, end: str, keyword: str):
     col_direction, col_status, _ = st.columns([1, 1, 2])
     direction = col_direction.selectbox("方向", ["全部", *predictions.DIRECTIONS], key="history_pred_direction")
-    status = col_status.selectbox("檢驗狀態", list(_PREDICTION_STATUS), key="history_pred_status")
-    results = history.search_predictions(start, end, keyword, None if direction == "全部" else direction,
-                                         _PREDICTION_STATUS[status])
-    with ui.panel("AI 預測紀錄", f"共 {len(results)} 筆・{predictions.VERDICT_HORIZON} 個交易日後對照實際走勢・點選一筆看當時的完整分析"):
-        if not results:
-            st.caption("這段期間沒有符合的預測")
+    status = col_status.selectbox("狀態", list(_VIEW_STATUS), key="history_pred_status")
+    views = history.search_views(start, end, keyword, None if direction == "全部" else direction, _VIEW_STATUS[status])
+    with ui.panel("AI 觀點紀錄", f"共 {len(views)} 段（依開始日）・{_VIEW_RULE}・點選一段看當時的分析"):
+        if not views:
+            st.caption("這段期間沒有符合的觀點")
             return
-        summary = predictions.summarize(results)
-        ui.cards([
-            {"label": "預測筆數", "value": f"{summary['total']}", "sub": f"進行中 {summary['pending']} 筆"},
-            {"label": "已到期", "value": f"{summary['done']}"},
-            {"label": "方向命中率", "value": "-" if summary["hit_rate"] is None else f"{summary['hit_rate']:.0f}%",
-             "sub": "樣本少時參考性低" if summary["done"] < 20 else None},
-        ])
-        event = _prediction_table(results, key="history_pred_table")
-        row = _selected_row(event, results)
+        _view_summary_cards(views)
+        event = _views_table(views, key="history_pred_table", height=380)
+        row = _selected_row(event, views)
     if row:
-        text = history.analysis_for_prediction(row)
-        with ui.panel(f"{row['code']} {row['name']}", f"{row['date']} 的分析原文"):
+        dates = row["analysis_dates"]
+        with ui.panel(f"{row['code']} {row['name']}・{row['direction']}",
+                      f"這段觀點包含 {len(dates)} 次分析（{dates[0]}～{dates[-1]}）"):
+            chosen = st.selectbox("分析日", list(reversed(dates)), key=f"history_view_date_{row['code']}_{row['start_date']}") \
+                if len(dates) > 1 else dates[0]
+            text = history.analysis_text(chosen, row["code"])
             if text:
                 st.markdown(_md_linebreaks(text))
             else:
-                st.caption("找不到這筆預測對應的分析原文")
+                st.caption("找不到這天的分析原文")
 
 
 def history_page():

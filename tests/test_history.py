@@ -55,22 +55,26 @@ class SearchQueriesTest(TempDBTestCase):
         self.assertEqual(("2026-09-01", "2026-09-20"), db.query_history_date_bounds())
 
 
-class SearchPredictionsTest(unittest.TestCase):
-    RESULTS = [
-        {"date": "2026-09-01", "code": "2330", "name": "台積電", "direction": "偏多", "status": "done"},
-        {"date": "2026-09-05", "code": "2603", "name": "長榮", "direction": "偏空", "status": "pending"},
-        {"date": "2026-09-20", "code": "2330", "name": "台積電", "direction": "中性", "status": "pending"},
+class SearchViewsTest(unittest.TestCase):
+    VIEWS = [
+        {"start_date": "2026-09-01", "code": "2330", "name": "台積電", "direction": "偏多", "status": "done"},
+        {"start_date": "2026-09-05", "code": "2603", "name": "長榮", "direction": "偏空", "status": "active"},
+        {"start_date": "2026-09-20", "code": "2330", "name": "台積電", "direction": "中性", "status": "active"},
     ]
 
     def search(self, *args, **kwargs):
-        with patch.object(history.predictions, "evaluate_all", return_value=self.RESULTS):
-            return [(r["date"], r["code"]) for r in history.search_predictions(*args, **kwargs)]
+        return [(v["start_date"], v["code"]) for v in history.search_views(*args, views=self.VIEWS, **kwargs)]
 
     def test_filters(self):
         self.assertEqual([("2026-09-01", "2330"), ("2026-09-05", "2603")], self.search("2026-09-01", "2026-09-10"))
         self.assertEqual([("2026-09-05", "2603")], self.search("2026-09-01", "2026-09-30", "長榮"))
         self.assertEqual([("2026-09-01", "2330")], self.search("2026-09-01", "2026-09-30", direction="偏多"))
-        self.assertEqual([("2026-09-05", "2603"), ("2026-09-20", "2330")], self.search("2026-09-01", "2026-09-30", status="pending"))
+        self.assertEqual([("2026-09-05", "2603"), ("2026-09-20", "2330")], self.search("2026-09-01", "2026-09-30", status="active"))
+
+    def test_default_reads_views_from_db(self):
+        with patch.object(history.prediction_views, "build_views", return_value=self.VIEWS) as build:
+            self.assertEqual(3, len(history.search_views("2026-09-01", "2026-09-30")))
+        build.assert_called_once()
 
 
 if __name__ == "__main__":

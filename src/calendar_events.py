@@ -3,20 +3,46 @@
 事件種類：
 - 除權息：證交所／櫃買中心預告；持股會附上預估現金股利（股數 × 每股現金股利，未扣補充保費與匯費）
 - 月營收公布期限：依規定每月 10 日前公布上月營收
-- AI 預測檢驗日：個股分析的預測在第 10 個交易日對照實際走勢（以平日推估，遇國定假日會晚幾天）
+- AI 觀點到期日：同方向的連續預測合併成一段觀點（見 prediction_views），觀點開始後第 10 個交易日結算
+  （以平日推估，遇國定假日會晚幾天）；已經因為方向改變而結束的觀點不列
 """
 
 from datetime import date as _date, timedelta
 
 import pandas as pd
 
-from src import portfolio, predictions
+from src import portfolio, prediction_views
 from src.config_watchlist import load_watchlist
 from src.storage import db
 
 KIND_DIVIDEND = "除權息"
 KIND_REVENUE = "月營收公布期限"
-KIND_PREDICTION = "AI 預測檢驗"
+KIND_PREDICTION = "AI 觀點到期"
+
+
+def _prediction_views(until: _date) -> list[dict]:
+    """用「平日」當交易日曆把預測合併成觀點（未來的交易日還沒有股價資料），回傳還沒因方向改變而結束的觀點與到期日"""
+    rows = db.query_predictions()
+    if not rows:
+        return []
+    first = _date.fromisoformat(min(r["date"] for r in rows)) - timedelta(days=7)
+    calendar, current = [], first
+    while current <= until + timedelta(days=30):
+        if current.weekday() < 5:
+            calendar.append(current.isoformat())
+        current += timedelta(days=1)
+    by_code: dict[str, list[dict]] = {}
+    for row in rows:
+        by_code.setdefault(row["code"], []).append(row)
+    result = []
+    for code_rows in by_code.values():
+        for view in prediction_views.group_views(code_rows, calendar):
+            if view["end_reason"] == prediction_views.REASON_CHANGED or view["end_idx"] is None:
+                continue
+            result.append({"code": view["code"], "name": view["name"], "direction": view["direction"],
+                           "start": calendar[view["start_idx"]], "due": calendar[view["end_idx"]],
+                           "analyses": len(view["analyses"])})
+    return result
 
 
 def _add_weekdays(start: _date, n: int) -> _date:
@@ -60,12 +86,13 @@ def upcoming_events(start: _date | None = None, days: int = 30, include_holdings
                            "title": f"{previous} 月營收公布期限", "detail": "上市櫃公司最晚在這天前公布上月營收",
                            "in_holdings": False, "in_watchlist": False})
 
-    for p in db.query_predictions():
-        due = _add_weekdays(_date.fromisoformat(p["date"]), predictions.VERDICT_HORIZON)
+    for view in _prediction_views(end):
+        due = _date.fromisoformat(view["due"])
         if start <= due <= end:
-            events.append({"date": due.isoformat(), "kind": KIND_PREDICTION, "code": p["code"], "name": p["name"],
-                           "title": f"AI 預測（{p['direction']}）到期", "detail": f"{p['date']} 的分析，約這天可以檢驗結果",
-                           "in_holdings": p["code"] in positions, "in_watchlist": p["code"] in watchlist})
+            events.append({"date": view["due"], "kind": KIND_PREDICTION, "code": view["code"], "name": view["name"],
+                           "title": f"AI 觀點（{view['direction']}）滿 {prediction_views.VIEW_MAX_DAYS} 日",
+                           "detail": f"{view['start']} 起的觀點（{view['analyses']} 次分析），約這天結算",
+                           "in_holdings": view["code"] in positions, "in_watchlist": view["code"] in watchlist})
 
     columns = ["date", "kind", "code", "name", "title", "detail", "in_holdings", "in_watchlist"]
     if not events:
