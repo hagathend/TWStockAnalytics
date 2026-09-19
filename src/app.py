@@ -361,6 +361,37 @@ def _render_adl(selected_date: str):
         st.plotly_chart(ui.style_chart(fig, height=300), width="stretch", key="adl_chart")
 
 
+def _lots_change(frame: pd.DataFrame, column: str, n: int) -> int | None:
+    return int(frame[column].iloc[-1] - frame[column].iloc[-1 - n]) if len(frame) > n else None
+
+
+def _render_margin_trend(selected_date: str):
+    """大盤（上市個股）融資、融券餘額合計的走勢；融資大增而指數沒漲，代表散戶追價、籌碼變亂"""
+    since = (_date.fromisoformat(selected_date) - timedelta(days=180)).isoformat()
+    frame = pd.DataFrame(db.query_margin_totals(since, selected_date))
+    if len(frame) < 2:
+        return
+    last = frame.iloc[-1]
+    ratio = last["short_balance"] / last["margin_balance"] * 100 if last["margin_balance"] else None
+    with ui.panel("大盤融資融券", f"上市個股合計・資料日 {last['date']}・單位：張"):
+        cards = []
+        for label, column in (("融資餘額", "margin_balance"), ("融券餘額", "short_balance")):
+            day, week = _lots_change(frame, column, 1), _lots_change(frame, column, 5)
+            sub = "較前一日 " + ("-" if day is None else f"{day:+,}") + "・5 日 " + ("-" if week is None else f"{week:+,}")
+            cards.append({"label": label, "value": f"{int(last[column]):,}", "sub": sub, "sub_tone": ui.tone_of(day or 0)})
+        cards.append({"label": "券資比", "value": "-" if ratio is None else f"{ratio:.2f}%", "sub": "融券 ÷ 融資"})
+        ui.cards(cards)
+        fig = make_subplots(specs=[[{"secondary_y": True}]])
+        fig.add_scatter(x=frame["date"], y=frame["margin_balance"], mode="lines", name="融資餘額",
+                        line={"color": ui.UP_COLOR, "width": 2}, secondary_y=False)
+        fig.add_scatter(x=frame["date"], y=frame["short_balance"], mode="lines", name="融券餘額",
+                        line={"color": ui.DOWN_COLOR, "width": 1.6}, secondary_y=True)
+        fig.update_xaxes(type="category", nticks=10)
+        fig.update_yaxes(title_text="融資（張）", secondary_y=False)
+        fig.update_yaxes(title_text="融券（張）", secondary_y=True, showgrid=False)
+        st.plotly_chart(ui.style_chart(fig, height=280), width="stretch", key="margin_trend_chart")
+
+
 def _render_futures_panel(selected_date: str):
     frame = futures.net_oi_frame(selected_date)
     summary = futures.summary(selected_date)
@@ -490,6 +521,7 @@ def home_page():
                 st.info("此日期尚無三大法人資料")
 
         elif tab == "融資融券":
+            _render_margin_trend(selected_date)
             filter_code = st.text_input("搜尋", placeholder="依代號或名稱搜尋", key="margin_code",
                                         label_visibility="collapsed")
             rows = db.query_margin(selected_date, filter_code or None)

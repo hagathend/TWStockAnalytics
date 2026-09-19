@@ -1440,3 +1440,16 @@ def query_close_series(codes: list[str], since: str) -> dict[str, list[float]]:
             for row in cur.fetchall():
                 result[row["code"]].append(float(row["close"]))
     return result
+
+
+def query_margin_totals(since: str, until: str, market: str = "TWSE") -> list[dict]:
+    """每天全市場個股的融資、融券餘額合計（張）；只算個股，排除 ETF"""
+    with get_conn() as conn:
+        cur = conn.execute(
+            f"""SELECT date, SUM(margin_balance) AS margin_balance, SUM(short_balance) AS short_balance,
+                       COUNT(*) AS stocks
+                FROM margin WHERE market = ? AND date >= ? AND date <= ? AND {STOCK_CODE_SQL}
+                GROUP BY date ORDER BY date""",
+            (market, since, until),
+        )
+        return [dict(r) for r in cur.fetchall()]
