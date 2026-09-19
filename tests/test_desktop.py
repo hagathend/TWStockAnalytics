@@ -50,6 +50,44 @@ class ScheduleScriptTests(unittest.TestCase):
         self.assertEqual(desktop.expected_trading_days(7, today=date(2026, 9, 7)), 5)
 
 
+class PidAliveTests(unittest.TestCase):
+    """tasklist 輸出系統編碼（繁中 Windows 是 Big5），曾因 UTF-8 解碼失敗讓 stdout 變成 None 而 TypeError"""
+
+    def _run(self, stdout):
+        from unittest.mock import MagicMock, patch
+        from src import desktop
+
+        with patch.object(desktop.os, "name", "nt"),                 patch.object(desktop.subprocess, "run", return_value=MagicMock(stdout=stdout)):
+            return desktop._pid_alive(1234)
+
+    def test_big5_no_match_output(self):
+        self.assertFalse(self._run("資訊: 沒有執行中的工作符合指定的準則。".encode("cp950")))
+
+    def test_running_process(self):
+        self.assertTrue(self._run('"python.exe","1234","Console","1","50,000 K"'.encode("cp950")))
+
+    def test_none_stdout_or_failure(self):
+        from unittest.mock import patch
+        from src import desktop
+
+        self.assertFalse(self._run(None))
+        with patch.object(desktop.os, "name", "nt"), patch.object(desktop.subprocess, "run", side_effect=OSError("x")):
+            self.assertFalse(desktop._pid_alive(1234))
+
+    def test_backfill_status_with_stale_pid(self):
+        import json
+        import tempfile
+        from pathlib import Path as _Path
+        from unittest.mock import patch
+        from src import desktop
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state = _Path(tmp) / "backfill_job.json"
+            state.write_text(json.dumps({"pid": 999999, "started_at": "x"}), encoding="utf-8")
+            with patch.object(desktop, "_BACKFILL_STATE", state):
+                self.assertFalse(desktop.backfill_status()["running"])
+
+
 class LauncherTests(unittest.TestCase):
     def test_choose_port_skips_occupied(self):
         with socket.socket() as sock:
