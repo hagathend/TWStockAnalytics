@@ -139,6 +139,21 @@ def collect_ownership_gaps() -> dict:
     return {"filled": stats["filled"], "failed": len(stats["failed"])}
 
 
+def collect_day_trading() -> dict:
+    """現股當沖：補近兩週缺的日子（含今天；今天尚未公布就下次再補）"""
+    from src import day_trading
+
+    try:
+        stats = day_trading.backfill(days=14)
+    except Exception as exc:  # noqa: BLE001
+        db.log_step("現股當沖", "failed", str(exc))
+        return {"filled": 0, "failed": 1}
+    status = "failed" if stats["failed"] else "success"
+    detail = f"補齊 {stats['filled']} 份、失敗 {len(stats['failed'])} 份" if stats["filled"] or stats["failed"] else "近期無缺漏"
+    db.log_step("現股當沖", status, detail)
+    return {"filled": stats["filled"], "failed": len(stats["failed"])}
+
+
 def collect_dividends() -> int:
     """除權除息預告（上市＋上櫃）"""
     twse = _run_step("TWSE 除權息預告", dividends.fetch_twse_dividends, db.save_dividend_events)
@@ -199,6 +214,7 @@ def run_daily_collect() -> dict:
         "financials": collect_financials(),
         "ownership": collect_ownership(),
         "futures": collect_futures(),
+        "day_trading": collect_day_trading(),
         "gap_fill": collect_recent_gaps(),
         "ownership_gap_fill": collect_ownership_gaps(),
     }

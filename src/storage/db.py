@@ -200,6 +200,18 @@ CREATE TABLE IF NOT EXISTS foreign_holding (
     PRIMARY KEY (date, code)
 );
 
+-- 現股當沖（上市 TWTB4U、上櫃 intraday/stat；股數、金額元）
+CREATE TABLE IF NOT EXISTS day_trading (
+    date TEXT NOT NULL,
+    market TEXT NOT NULL,
+    code TEXT NOT NULL,
+    name TEXT,
+    volume INTEGER,
+    buy_value INTEGER,
+    sell_value INTEGER,
+    PRIMARY KEY (date, market, code)
+);
+
 -- 借券賣出餘額（證交所 TWT93U 後半段，只存上市個股；股數）
 CREATE TABLE IF NOT EXISTS sbl_short (
     date TEXT NOT NULL,
@@ -1183,6 +1195,42 @@ def save_sbl_short(rows: list[dict]):
                VALUES (:date, :code, :name, :prev_balance, :sold, :returned, :adjusted, :balance, :next_limit)""",
             rows,
         )
+
+
+def save_day_trading(rows: list[dict]):
+    if not rows:
+        return
+    with get_conn() as conn:
+        conn.executemany(
+            """INSERT OR REPLACE INTO day_trading (date, market, code, name, volume, buy_value, sell_value)
+               VALUES (:date, :market, :code, :name, :volume, :buy_value, :sell_value)""", rows)
+
+
+def query_day_trading_dates(market: str) -> set[str]:
+    with get_conn() as conn:
+        cur = conn.execute("SELECT DISTINCT date FROM day_trading WHERE market = ?", (market,))
+        return {r["date"] for r in cur.fetchall()}
+
+
+def query_day_trading_history(code: str, since: str) -> list[dict]:
+    """單一股票的當沖量與當天總成交量（當沖比＝當沖量 ÷ 成交量）"""
+    with get_conn() as conn:
+        cur = conn.execute(
+            """SELECT d.date, d.volume AS day_trade_volume, d.buy_value, d.sell_value, p.volume AS total_volume
+               FROM day_trading d JOIN stock_price p ON p.date = d.date AND p.market = d.market AND p.code = d.code
+               WHERE d.code = ? AND d.date >= ? ORDER BY d.date""", (code, since))
+        return [dict(r) for r in cur.fetchall()]
+
+
+def query_day_trading_ratio(date: str) -> list[dict]:
+    """某一天每檔個股的當沖比%（這一天沒有當沖資料的市場就不會出現）"""
+    with get_conn() as conn:
+        cur = conn.execute(
+            f"""SELECT d.code, d.volume AS day_trade_volume, p.volume AS total_volume,
+                       100.0 * d.volume / p.volume AS day_trade_pct
+                FROM day_trading d JOIN stock_price p ON p.date = d.date AND p.market = d.market AND p.code = d.code
+                WHERE d.date = ? AND p.volume > 0 AND {STOCK_CODE_SQL.replace("code", "d.code")}""", (date,))
+        return [dict(r) for r in cur.fetchall()]
 
 
 def query_dates_in(table: str) -> set[str]:

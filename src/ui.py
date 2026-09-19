@@ -93,6 +93,12 @@ section[data-testid="stSidebar"] .stButton button[kind="tertiary"]:hover {{ back
 .tw-card-label {{ font-size: 0.85rem; color: {MUTED_COLOR}; margin-bottom: 0.25rem; }}
 .tw-card-value {{ white-space: nowrap; font-size: 1.55rem; font-weight: 600; color: #172E4D; line-height: 1.3; }}
 .tw-card-sub {{ font-size: 0.85rem; color: {MUTED_COLOR}; margin-top: 0.2rem; }}
+.tw-info-grid {{ display: grid; grid-template-columns: max-content 1fr max-content 1fr; gap: 0.45rem 1rem;
+                 font-size: 0.92rem; margin: 0.2rem 0 0.6rem 0; }}
+.tw-info-label {{ color: {MUTED_COLOR}; white-space: nowrap; }}
+.tw-info-value {{ color: #172E4D; overflow-wrap: anywhere; }}
+.tw-info-wide {{ grid-column: 2 / -1; }}
+@media (max-width: 720px) {{ .tw-info-grid {{ grid-template-columns: max-content 1fr; }} }}
 .tw-up {{ color: {UP_COLOR} !important; }}
 .tw-down {{ color: {DOWN_COLOR} !important; }}
 
@@ -293,6 +299,16 @@ def cards(items: list[dict]):
             f'<div class="tw-card-value{tone}">{escape(str(item["value"]))}</div>{sub}</div>'
         )
     _html(f'<div class="tw-card-grid">{"".join(blocks)}</div>')
+
+
+def info_grid(items: list[tuple]):
+    """標題／內容的資料表（公司基本資料這類），一列兩組；空值不顯示。
+    items: [(標題, 內容)] 或 [(標題, 內容, True)]＝內容佔滿整列（長文字用）"""
+    blocks = "".join(
+        f'<div class="tw-info-label">{escape(item[0])}</div>'
+        f'<div class="tw-info-value{" tw-info-wide" if len(item) > 2 and item[2] else ""}">{escape(item[1])}</div>'
+        for item in items if item[1])
+    _html(f'<div class="tw-info-grid">{blocks}</div>')
 
 
 def chips(items: list[tuple[str, str]], empty_text: str = "無"):

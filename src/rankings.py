@@ -4,6 +4,7 @@
 - 週轉率＝成交股數 ÷ 發行股數，發行股數來自外資持股資料（只有上市股有），上櫃股沒有週轉率
 - 法人買賣超以「張」顯示（原始資料是股）
 - 殖利率取這一天或之前最新一筆估值資料
+- 當沖比＝當沖成交股數 ÷ 成交股數；當沖比排行只列成交量 1000 張以上，避免冷門股幾張成交就 100%
 """
 
 import pandas as pd
@@ -21,11 +22,13 @@ METRICS = {
     "投信買超": ("trust_lots", False),
     "投信賣超": ("trust_lots", True),
     "殖利率": ("dividend_yield", False),
+    "當沖比": ("day_trade_pct", False),
 }
 MARKETS = {"全部": ("TWSE", "TPEx"), "上市": ("TWSE",), "上櫃": ("TPEx",)}
 MAX_YIELD = 40.0
+MIN_DAY_TRADE_LOTS = 1000
 COLUMNS = ["code", "name", "market", "close", "change_pct", "volume_lots", "turnover_billion", "turnover_rate",
-           "foreign_lots", "trust_lots", "dividend_yield"]
+           "foreign_lots", "trust_lots", "dividend_yield", "day_trade_pct"]
 
 
 def daily_table(date: str) -> pd.DataFrame:
@@ -60,6 +63,8 @@ def daily_table(date: str) -> pd.DataFrame:
         df["dividend_yield"] = None
     else:
         df = df.merge(valuation[["code", "dividend_yield"]].drop_duplicates("code"), on="code", how="left")
+    day_trade = pd.DataFrame(db.query_day_trading_ratio(date), columns=["code", "day_trade_pct"])
+    df = df.merge(day_trade[["code", "day_trade_pct"]].drop_duplicates("code"), on="code", how="left")
     return df[COLUMNS].reset_index(drop=True)
 
 
@@ -73,6 +78,8 @@ def rank(table: pd.DataFrame, metric: str, market: str = "全部", limit: int = 
         df = df[(pd.to_numeric(df[column], errors="coerce") > 0) & (pd.to_numeric(df[column], errors="coerce") < MAX_YIELD)]
     elif metric in ("外資買超", "投信買超", "漲幅"):
         df = df[pd.to_numeric(df[column], errors="coerce") > 0]
+    elif metric == "當沖比":
+        df = df[pd.to_numeric(df["volume_lots"], errors="coerce") >= MIN_DAY_TRADE_LOTS]
     elif metric in ("外資賣超", "投信賣超", "跌幅"):
         df = df[pd.to_numeric(df[column], errors="coerce") < 0]
     return df.sort_values(column, ascending=ascending).head(limit).reset_index(drop=True)

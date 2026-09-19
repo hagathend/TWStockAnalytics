@@ -34,6 +34,7 @@ from src import charting
 from src.chip_metrics import metrics_for_code
 from src.chip_metrics import summarize_for_prompt as summarize_chip_metrics
 from src.collect_all import run_daily_collect
+from src.collectors import company_profile
 from src.collectors.firecrawl_fetcher import test_connection as firecrawl_test_connection
 from src.config_ai import (
     load_codex_settings,
@@ -43,7 +44,7 @@ from src.config_ai import (
     save_report_settings,
     save_scraping_settings,
 )
-from src import config_screener, config_watchlist, dividend_history, history, scheduled_ai
+from src import compare, config_screener, config_watchlist, day_trading, dividend_history, history, scheduled_ai
 from src.config_watchlist import add_stocks, load_watchlist
 from src.market_analysis import build_market_analysis_prompt, save_market_analysis
 from src.report_pdf import markdown_to_pdf
@@ -432,7 +433,7 @@ def _cached_ranking_table(date: str) -> pd.DataFrame:
 _RANK_COLUMNS = {
     "rank": "名次", "code": "代號", "name": "名稱", "market": "市場", "close": "收盤", "change_pct": "漲跌%",
     "volume_lots": "成交量(張)", "turnover_billion": "成交值(億)", "turnover_rate": "週轉率%",
-    "foreign_lots": "外資(張)", "trust_lots": "投信(張)", "dividend_yield": "殖利率%",
+    "foreign_lots": "外資(張)", "trust_lots": "投信(張)", "dividend_yield": "殖利率%", "day_trade_pct": "當沖比%",
 }
 
 
@@ -442,7 +443,8 @@ def _render_rankings(selected_date: str):
     market = col_market.segmented_control("市場", list(rankings.MARKETS), default="全部", key="rank_market") or "全部"
     table = _cached_ranking_table(selected_date)
     result = rankings.rank(table, metric, market)
-    note = "週轉率只有上市股（需要發行股數）" if metric == "週轉率" else "只算個股，不含 ETF 與權證"
+    note = {"週轉率": "週轉率只有上市股（需要發行股數）",
+            "當沖比": f"只列成交量 {rankings.MIN_DAY_TRADE_LOTS:,} 張以上"}.get(metric, "只算個股，不含 ETF 與權證")
     with ui.panel(f"{metric}排行", f"{selected_date}・{market}・前 {len(result)} 名・{note}・點一下股票開啟個股詳情"):
         if result.empty:
             st.caption("這天沒有資料")
@@ -451,7 +453,7 @@ def _render_rankings(selected_date: str):
         view = view[list(_RANK_COLUMNS)].rename(columns=_RANK_COLUMNS)
         styler = _styled_table(view, signed=["漲跌%", "外資(張)", "投信(張)"],
                                thousands=["成交量(張)", "外資(張)", "投信(張)"],
-                               decimals=["收盤", "漲跌%", "成交值(億)", "週轉率%", "殖利率%"])
+                               decimals=["收盤", "漲跌%", "成交值(億)", "週轉率%", "殖利率%", "當沖比%"])
         clicked = _clickable_table(styler, "rank_table", width="stretch", hide_index=True, height=600)
         if clicked is not None and clicked < len(result):
             _go_to_detail(result.iloc[clicked]["code"])
@@ -910,6 +912,65 @@ def _render_dividend_panel(code: str):
         st.caption("填息：除權息日起算的交易日數，收盤回到除權息前股價即算填息。盈餘分配率只在有該年度季報 EPS 時計算")
 
 
+def _render_day_trading_panel(code: str):
+    frame = day_trading.code_history(code)
+    ratio = frame["day_trade_pct"].dropna() if not frame.empty else pd.Series(dtype=float)
+    if ratio.empty:
+        return
+    last = frame.iloc[-1]
+    net = (last["sell_value"] or 0) - (last["buy_value"] or 0)
+    with ui.panel("現股當沖", f"資料日 {last['date']}・當沖比＝當沖成交股數 ÷ 成交股數・比例高代表短線客多、波動大"):
+        ui.cards([
+            {"label": "當沖比", "value": f"{ratio.iloc[-1]:.1f}%", "sub": f"當沖 {int(last['day_trade_volume']) // 1000:,} 張"},
+            {"label": "5 日平均", "value": f"{ratio.tail(5).mean():.1f}%"},
+            {"label": "20 日平均", "value": f"{ratio.tail(20).mean():.1f}%"},
+            {"label": "當沖價差（估）", "value": f"{net / 1e4:+,.0f} 萬", "tone": ui.tone_of(net),
+             "sub": "當天當沖賣出 − 買進金額，未扣稅費"},
+        ])
+        if len(frame) >= 2:
+            fig = make_subplots(specs=[[{"secondary_y": True}]])
+            fig.add_bar(x=frame["date"], y=frame["day_trade_volume"] / 1000, name="當沖量（張）",
+                        marker_color="rgba(135, 146, 166, 0.55)", secondary_y=False)
+            fig.add_scatter(x=frame["date"], y=frame["day_trade_pct"], name="當沖比%", mode="lines+markers",
+                            line={"color": "#F5B942", "width": 2}, secondary_y=True)
+            fig.update_xaxes(type="category", nticks=10)
+            fig.update_yaxes(title_text="張", secondary_y=False)
+            fig.update_yaxes(title_text="%", secondary_y=True, showgrid=False)
+            st.plotly_chart(ui.style_chart(fig, height=260), width="stretch", key=f"day_trade_chart_{code}")
+
+
+@st.cache_data(ttl=7 * 86400, show_spinner=False)
+def _cached_company_profile(code: str) -> dict | None:
+    """查無公司（ETF 等）快取 None；連線失敗丟例外，不會被快取住，下次再試"""
+    ok, profile = company_profile.fetch(code)
+    if ok:
+        return profile
+    if "連線失敗" in profile:
+        raise RuntimeError(profile)
+    return None
+
+
+def _render_company_profile_panel(code: str):
+    try:
+        profile = _cached_company_profile(code)
+    except RuntimeError:
+        return
+    if not profile:
+        return
+    listed = " ".join(f"{label} {profile[key]}" for key, label in
+                      (("listed_twse", "上市"), ("listed_tpex", "上櫃"), ("listed_emerging", "興櫃")) if profile[key])
+    with ui.panel("公司資料", "資料來源 公開資訊觀測站"):
+        ui.info_grid([
+            ("主要業務", profile["business"], True),
+            ("公司名稱", profile["full_name"]), ("產業", profile["industry"]),
+            ("董事長", profile["chairman"]), ("總經理", profile["president"]),
+            ("成立日期", profile["founded"]), ("掛牌", listed),
+            ("實收資本額", profile["capital"]), ("發行股數", profile["shares"]),
+            ("配息頻率", profile["dividend_frequency"]), ("簽證會計師", profile["auditor"]),
+            ("發言人", profile["spokesman"]), ("網站", profile["website"]),
+        ])
+
+
 _RIVER_COLORS = {10: "rgba(34, 181, 115, 0.22)", 25: "rgba(34, 181, 115, 0.12)", 50: "rgba(135, 146, 166, 0.10)",
                  75: "rgba(240, 82, 79, 0.12)", 90: "rgba(240, 82, 79, 0.22)"}
 
@@ -1064,8 +1125,10 @@ def detail_page():
             _render_chip_panel(code)
             _render_shareholding_panel(code)
             _render_ownership_panel(code)
+            _render_day_trading_panel(code)
             _render_history_panel(code)
         elif tab == "基本面":
+            _render_company_profile_panel(code)
             _render_fundamentals_panel(code)
             _render_revenue_panel(code)
             _render_financials_panel(code)
@@ -1708,6 +1771,7 @@ def _cached_screen_tables() -> dict[str, pd.DataFrame]:
         "pe_percentile": pe_river.latest_percentiles(),
         "industry": pd.DataFrame(list(db.query_industry_map().items()), columns=["code", "industry"]),
         "issued": pd.DataFrame(db.query_issued_shares(_date.today().isoformat()), columns=["code", "issued_shares"]),
+        "day_trade": day_trading.latest_table(),
     }
 
 
@@ -1783,7 +1847,8 @@ _SCREEN_COLUMNS = {
     "code": "代號", "name": "名稱", "industry": "產業", "trend": _TREND_COLUMN, "close": "收盤", "change_pct": "漲跌%",
     "return_20d": "20日報酬%", "rs_rank_pct": "相對強弱",
     "foreign_streak": "外資連買賣", "trust_streak": "投信連買賣",
-    "vol_ma20_lots": "20日均量(張)", "turnover_rate": "週轉率%", "pe_ratio": "本益比", "dividend_yield": "殖利率%",
+    "vol_ma20_lots": "20日均量(張)", "turnover_rate": "週轉率%", "day_trade_pct": "當沖比%", "pe_ratio": "本益比",
+    "dividend_yield": "殖利率%",
     "pb_ratio": "淨值比", "yoy_pct": "營收年增%", "revenue_high_text": "營收創高", "yoy_growth_streak": "年增連續月",
     "big1000_pct": "千張大戶%", "big1000_pct_change": "大戶週增(百分點)", "foreign_pct": "外資持股%",
     "foreign_change_20": "外資20日增(百分點)", "roe_annualized": "ROE年化%", "gross_margin": "毛利率%",
@@ -1822,6 +1887,7 @@ _SCREEN_DEFAULTS = {
     "scr_revenue_high": False, "scr_yoy_streak": 0,
     "scr_big_min": None, "scr_big_change_min": None, "scr_foreign_change_min": None,
     "scr_price_min": None, "scr_price_max": None, "scr_turnover_min": None, "scr_industries": [],
+    "scr_day_trade_max": None,
 }
 
 
@@ -1908,12 +1974,15 @@ def _render_screen_tab(signal_df: pd.DataFrame):
                                              key="scr_big_change_min")
             foreign_change_min = s3.number_input("外資持股 20 日增 ≥（百分點）", value=None, step=0.5, format="%.2f",
                                                  key="scr_foreign_change_min")
-        with st.expander("價格、產業與週轉率"):
-            p1, p2, p3 = st.columns([1, 1, 1])
+        with st.expander("價格、產業、週轉率與當沖"):
+            p1, p2, p3, p4 = st.columns([1, 1, 1, 1])
             price_min = p1.number_input("股價 ≥（元）", min_value=0.0, value=None, step=10.0, key="scr_price_min")
             price_max = p2.number_input("股價 ≤（元）", min_value=0.0, value=None, step=10.0, key="scr_price_max")
             turnover_min = p3.number_input("週轉率% ≥", min_value=0.0, value=None, step=0.5, key="scr_turnover_min",
                                            help="當天成交股數 ÷ 發行股數；數字越高代表換手越熱絡")
+            day_trade_max = p4.number_input("當沖比% ≤", min_value=0.0, max_value=100.0, value=None, step=5.0,
+                                            key="scr_day_trade_max",
+                                            help="當沖成交股數 ÷ 成交股數；太高代表短線客主導、股價容易暴漲暴跌")
             industry_options = sorted(set(_cached_screen_tables()["industry"]["industry"]))
             industries = st.multiselect("產業（不選＝全部）", industry_options, key="scr_industries")
     ui.remember_widgets(_SCREEN_DEFAULTS)
@@ -1955,6 +2024,9 @@ def _render_screen_tab(signal_df: pd.DataFrame):
             result = result[result["turnover_rate"].notna() & (result["turnover_rate"] >= turnover_min)]
         if industries:
             result = result[result["industry"].isin(industries)]
+        result = result.merge(tables["day_trade"], on="code", how="left")
+        if day_trade_max is not None:
+            result = result[result["day_trade_pct"].notna() & (result["day_trade_pct"] <= day_trade_max)]
         result = result.reset_index(drop=True)
 
     _render_screen_results(result)
@@ -1980,7 +2052,7 @@ def _render_screen_results(result: pd.DataFrame):
         styler = _styled_table(
             view, signed=["漲跌%", "20日報酬%", "外資連買賣", "投信連買賣", "營收年增%", "大戶週增(百分點)", "外資20日增(百分點)"],
             thousands=["20日均量(張)", "外資連買賣", "投信連買賣", "年增連續月"],
-            decimals=["收盤", "漲跌%", "20日報酬%", "週轉率%", "本益比", "殖利率%", "淨值比", "營收年增%", "千張大戶%",
+            decimals=["收盤", "漲跌%", "20日報酬%", "週轉率%", "當沖比%", "本益比", "殖利率%", "淨值比", "營收年增%", "千張大戶%",
                       "大戶週增(百分點)", "外資持股%", "外資20日增(百分點)", "ROE年化%", "毛利率%", "近四季EPS", "本益比百分位"],
         )
         stocks = list(zip(result["code"], result["name"]))
@@ -2098,6 +2170,91 @@ def _render_watch_group_manager(group: str):
                 st.error(str(exc))
 
 
+_COMPARE_DEFAULTS = {"cmp_codes": [], "cmp_period": "6 個月"}
+_COMPARE_COLORS = ["#2864C5", "#D83C48", "#16845B", "#F5B942", "#A78BFA", "#0EA5B7"]
+
+
+def _open_compare(codes: list[str]):
+    """觀察名單「比較勾選的」：帶著勾選的股票切到個股比較分頁（回呼在重跑前執行，可以直接設定 widget 值）"""
+    codes = list(codes)[:compare.MAX_STOCKS]
+    st.session_state["cmp_codes"] = codes
+    st.session_state.setdefault(ui._KEPT_WIDGETS, {})["cmp_codes"] = codes
+    ui.remember_tab("screener", "個股比較")
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _cached_compare_tables() -> list[pd.DataFrame]:
+    return [
+        pd.DataFrame(list(db.query_industry_map().items()), columns=["code", "industry"]),
+        fundamentals.latest_fundamentals(), financials.latest_table(), ownership.latest_table(),
+        shareholding.latest_table()[["code", "big1000_pct"]], day_trading.latest_table(),
+    ]
+
+
+def _render_compare_tab():
+    ui.restore_widgets(_COMPARE_DEFAULTS)
+    names = db.query_stock_names()
+    for code in st.session_state.get("cmp_codes", []):  # 名單裡可能有今天沒交易的，選項要包含才不會報錯
+        names.setdefault(code, db.lookup_stock_name(code) or code)
+    with ui.panel("比較條件", f"最多 {compare.MAX_STOCKS} 檔・也可以在觀察名單勾選後按「比較勾選的」"):
+        col_codes, col_period = st.columns([3, 1.4], vertical_alignment="bottom")
+        codes = col_codes.multiselect("股票", sorted(names), key="cmp_codes", max_selections=compare.MAX_STOCKS,
+                                      format_func=lambda c: f"{c} {names.get(c, '')}", placeholder="輸入代號或名稱搜尋")
+        period = col_period.segmented_control("期間", list(compare.PERIODS), key="cmp_period") or "6 個月"
+    ui.remember_widgets(_COMPARE_DEFAULTS)
+    if len(codes) < 2:
+        st.info("選兩檔以上股票開始比較")
+        return
+
+    days = compare.PERIODS[period]
+    today = _date.today()
+    since = (today - timedelta(days=days)).isoformat()
+    closes, latest = {}, {}
+    with st.spinner("讀取股價中..."):
+        for code in codes:
+            try:
+                rows = _cached_chart_rows(code, days + 10, today.isoformat())
+            except Exception:  # noqa: BLE001 - 單檔抓不到就不畫，其他照常比較
+                rows = []
+            frame = pd.DataFrame(rows, columns=["date", "close"]) if rows else pd.DataFrame(columns=["date", "close"])
+            closes[code] = frame[frame["date"] >= since][["date", "close"]]
+            if not frame.empty:
+                latest[code] = float(frame["close"].iloc[-1])
+    trend = compare.normalize(closes)
+    missing = [c for c in codes if c not in trend.columns]
+
+    with ui.panel("相對走勢", f"{period}・共同起點＝100・未含股利・加權指數為虛線・資料來源 FinMind"):
+        if trend.empty:
+            st.warning("抓不到股價資料")
+        else:
+            fig = go.Figure()
+            for index, code in enumerate(trend.columns):
+                fig.add_scatter(x=trend.index, y=trend[code], mode="lines", name=f"{code} {names.get(code, '')}",
+                                line={"width": 2, "color": _COMPARE_COLORS[index % len(_COMPARE_COLORS)]},
+                                hovertemplate="%{x}<br>%{y:.1f}<extra>" + code + "</extra>")
+            taiex = pd.DataFrame(db.query_market_index(trend.index[0]))
+            if not taiex.empty:
+                taiex = taiex.set_index("date")["taiex"].astype(float)
+                fig.add_scatter(x=taiex.index, y=taiex / taiex.iloc[0] * 100, mode="lines", name="加權指數",
+                                line={"width": 1.5, "color": "#8792A6", "dash": "dash"})
+            fig.add_hline(y=100, line={"color": "rgba(135, 146, 166, 0.5)", "width": 1})
+            fig.update_xaxes(type="category", nticks=10)
+            fig.update_yaxes(title_text="起點＝100")
+            st.plotly_chart(ui.style_chart(fig, height=380), width="stretch", key="compare_chart")
+        if missing:
+            st.caption("抓不到股價：" + "、".join(missing))
+
+    table = compare.metrics_table(codes, names, trend, latest, _cached_compare_tables())
+    with ui.panel("指標比較", "本地資料庫最新值（各指標資料日不同）・點一下股票開啟個股詳情"):
+        view = table.rename(columns={"code": "代號", **compare.METRIC_LABELS})
+        styler = _styled_table(view, signed=["期間報酬%", "期間最大回檔%", "營收年增%"],
+                               decimals=["收盤", "期間報酬%", "期間最大回檔%", "本益比", "淨值比", "殖利率%", "營收年增%",
+                                         "近四季EPS", "ROE年化%", "毛利率%", "負債比%", "外資持股%", "千張大戶%", "當沖比%"])
+        clicked = _clickable_table(styler, "compare_table", width="stretch", hide_index=True)
+        if clicked is not None and clicked < len(table):
+            _go_to_detail(table.iloc[clicked]["code"])
+
+
 def _render_watchlist_tab(signal_df: pd.DataFrame):
     col_group, col_manage, col_add, _ = st.columns([1.4, 0.8, 1.6, 1.2], vertical_alignment="bottom")
     with col_group:
@@ -2156,13 +2313,18 @@ def _render_watchlist_tab(signal_df: pd.DataFrame):
         ai_targets = [{"code": c, "name": stocks[c]} for c in (selected or codes)]
         ai_label = f"AI 分析勾選的 {len(selected)} 檔" if selected else f"AI 分析全部 {len(codes)} 檔"
         with actions:
-            col_info, col_remove, col_detail, col_ai = st.columns([2.4, 1.1, 1.1, 1.3], vertical_alignment="center")
+            col_info, col_remove, col_detail, col_compare, col_ai = st.columns([2.2, 1.1, 1.1, 1.1, 1.3],
+                                                                              vertical_alignment="center")
             col_info.caption(f"已勾選 {len(selected)} 檔" if selected else "訊號只計算上市股（上櫃資料源無法回補歷史）")
             col_remove.button("從名單移除", width="stretch", disabled=not selected, key="watch_remove",
                               on_click=_remove_selected_from_group, args=(table_key, group, codes))
             if col_detail.button("開啟個股詳情", width="stretch", disabled=len(selected) != 1, key="watch_open_detail",
                                  help="勾選一檔時可用"):
                 _go_to_detail(selected[0])
+            col_compare.button("比較勾選的", width="stretch", key="watch_compare",
+                               disabled=not 2 <= len(selected) <= compare.MAX_STOCKS,
+                               help=f"勾選 2～{compare.MAX_STOCKS} 檔，到「個股比較」並排看走勢與指標",
+                               on_click=_open_compare, args=(selected,))
             run_ai = col_ai.button(ai_label, type="primary", width="stretch", key="watch_ai_run",
                                    help="用 Codex 逐檔分析並儲存（每檔各用一次額度），結果收錄每日報告；沒勾選就分析整個名單")
         if run_ai:
@@ -2197,6 +2359,8 @@ def screener_page():
             _render_screen_tab(signal_df)
         elif tab == "觀察名單":
             _render_watchlist_tab(signal_df)
+        elif tab == "個股比較":
+            _render_compare_tab()
         elif tab == "訊號回測":
             _render_backtest_tab()
 
@@ -2862,7 +3026,7 @@ NAV_TABS = {
     "home": ["市場溫度計", "期貨法人", "產業熱力圖", "排行", "股價", "三大法人", "融資融券", "新聞", "收集紀錄"],
     "portfolio": ["持倉明細", "持股訊號", "AI 持股分析", "新增交易", "交易紀錄", "已實現損益"],
     "detail": ["技術面", "籌碼面", "基本面", "新聞", "AI 分析"],
-    "screener": ["篩選器", "觀察名單", "訊號回測"],
+    "screener": ["篩選器", "觀察名單", "個股比較", "訊號回測"],
     "alerts": ["最近觸發", "提醒規則", "新增提醒"],
     "calendar": ["持股與觀察名單", "其他提醒", "全市場除權息"],
     "ai": ["新聞深度分析", "大盤籌碼分析", "預測追蹤", "手動貼上"],

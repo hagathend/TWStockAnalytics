@@ -143,11 +143,12 @@ def code_frame(code: str) -> pd.DataFrame:
 
 
 def latest_table() -> pd.DataFrame:
-    """每檔最新一季的 ROE（年化）、單季毛利率、近四季 EPS（選股器用）"""
+    """每檔最新一季的 ROE（年化）、單季毛利率、近四季 EPS、負債比（選股器、個股比較用）"""
+    columns = ["code", "roe_annualized", "gross_margin", "eps_ttm", "debt_ratio"]
     frame = _compute(db.query_financials())
     if frame.empty:
-        return pd.DataFrame(columns=["code", "roe_annualized", "gross_margin", "eps_ttm"])
-    return frame.groupby("code", sort=False).tail(1)[["code", "roe_annualized", "gross_margin", "eps_ttm"]].reset_index(drop=True)
+        return pd.DataFrame(columns=columns)
+    return frame.groupby("code", sort=False).tail(1)[columns].reset_index(drop=True)
 
 
 def summarize_for_prompt(code: str) -> str | None:
