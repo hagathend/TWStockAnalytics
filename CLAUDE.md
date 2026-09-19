@@ -212,6 +212,8 @@ Schema 變更走 `db.init_db()` 裡的 `ALTER TABLE ... ADD COLUMN` + `try/excep
   子項目對應頁內分頁，清單在 `NAV_TABS`。頁面用 `ui.page_tabs(page_id, NAV_TABS[page_id])` 取得目前分頁，
   **只執行目前分頁的內容**（不要一頁從頭畫到尾一直往下拉）。新增區塊時放進適當分頁，或在 `NAV_TABS` 加子項目。
   側邊欄子項目用 `on_click` 切換，不要在腳本中途 `st.rerun()`（會清掉頁面上還沒畫到的輸入框狀態）。
+- **側邊欄保持很短**：只放導覽與「立即收集」。查詢日期在市場總覽頁上方（`_render_query_date_picker()`，個股詳情用 `_query_date()` 跟著同一天），新聞焦點是市場總覽的分頁；不要再把會變長的清單放回側邊欄（太長會捲不到）。
+- 下拉選單選完焦點會留在選單上，接著點表格第一下會被吃掉；選完後要接著點表格的地方用 `ui.release_focus()`。
 
 ## 安裝版（給不懂電腦的朋友，詳見 `packaging/README.md`）
 

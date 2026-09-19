@@ -251,35 +251,39 @@ def _run_collect_from_sidebar():
             st.info("新聞分析提示詞已產生，請到「AI 分析」頁複製使用")
 
 
-def _render_sidebar() -> str:
-    """畫出各頁共用的側邊欄（收集按鈕、查詢日期、新聞焦點），回傳目前選擇的查詢日期。
+def _render_sidebar():
+    """各頁共用的側邊欄：只放收集按鈕，保持很短（查詢日期在市場總覽頁上方、新聞焦點在市場總覽的分頁）。
     區塊標題一律用 ui.sidebar_label（比導覽列小一級的灰字），不要用 st.header。"""
     with st.sidebar:
         ui.sidebar_label("資料收集")
         if st.button("立即收集今日資料", type="primary", width="stretch"):
             _run_collect_from_sidebar()
 
-        ui.sidebar_label("查詢日期")
-        available_dates = db.query_available_dates()
-        if available_dates:
-            selected_date = st.selectbox("查詢日期", available_dates, label_visibility="collapsed")
-        else:
-            selected_date = st.text_input(
-                "查詢日期", value=_date.today().isoformat(), label_visibility="collapsed"
-            )
 
-        ui.sidebar_label(f"新聞焦點 Top {news_top_n()}")
-        ai_picks = db.query_ai_picks(selected_date)
-        if ai_picks:
-            for pick in ai_picks:
-                label = f"{pick['rank']:>2}.　{pick['code']}　{pick['name']}"
-                if st.button(label, key=f"pick_{pick['code']}_{pick['rank']}", type="tertiary",
-                             width="stretch", help=pick.get("reason")):
-                    _go_to_detail(pick["code"])
-        else:
-            st.caption("此日期尚無 AI 分析結果")
+_QUERY_DATE_KEY = "query_date"
 
-    return selected_date
+
+def _query_date() -> str:
+    """目前的查詢日期（市場總覽選的；沒選過就是最新有資料的一天）。個股詳情的相關新聞也用這個日期"""
+    dates = db.query_available_dates()
+    chosen = st.session_state.get(_QUERY_DATE_KEY) or st.session_state.get(ui._KEPT_WIDGETS, {}).get(_QUERY_DATE_KEY)
+    if chosen in dates:
+        return chosen
+    return dates[0] if dates else _date.today().isoformat()
+
+
+def _render_query_date_picker() -> str:
+    dates = db.query_available_dates()
+    if not dates:
+        return _date.today().isoformat()
+    st.session_state[_QUERY_DATE_KEY] = _query_date()  # 換頁回來、或選過的日期已經不在清單時還原
+    col_date, _ = st.columns([1, 3])
+    selected = col_date.selectbox("查詢日期", dates, key=_QUERY_DATE_KEY,
+                                  on_change=st.session_state.__setitem__, args=("query_date_changed", True))
+    ui.remember_widgets([_QUERY_DATE_KEY])
+    if st.session_state.pop("query_date_changed", False):
+        ui.release_focus()
+    return selected
 
 
 # ─────────────────────────────── 總覽 ───────────────────────────────
@@ -489,9 +493,27 @@ def _render_industry_heatmap(selected_date: str):
                          width="stretch", hide_index=True)
 
 
+def _render_news_focus(selected_date: str):
+    picks = db.query_ai_picks(selected_date)
+    with ui.panel(f"新聞焦點 Top {news_top_n()}", f"{selected_date}・AI 從當天新聞挑出的個股・點一下開啟個股詳情"):
+        if not picks:
+            st.caption("這天還沒有新聞分析結果（收集完成後會自動分析，或到「AI 分析 › 新聞深度分析」執行）")
+        else:
+            view = pd.DataFrame(picks)[list(_PICK_COLUMNS)].rename(columns=_PICK_COLUMNS)
+            clicked = _clickable_table(view, "news_focus_table", width="stretch", hide_index=True,
+                                       column_config={"原因": st.column_config.TextColumn("原因", width="large")})
+            if clicked is not None and clicked < len(picks):
+                _go_to_detail(picks[clicked]["code"])
+    summary = db.query_ai_analysis_summary(selected_date)
+    if summary and summary.get("summary"):
+        with ui.panel("當日新聞總結"):
+            st.markdown(_md_linebreaks(summary["summary"]))
+
+
 def home_page():
-    selected_date = _render_sidebar()
-    ui.page_header("市場總覽", f"{selected_date} 盤後價量、三大法人、融資融券與新聞")
+    _render_sidebar()
+    ui.page_header("市場總覽", "盤後價量、三大法人、融資融券、新聞焦點")
+    selected_date = _render_query_date_picker()
 
     _market_summary_cards(selected_date)
 
@@ -500,6 +522,8 @@ def home_page():
         if tab == "市場溫度計":
             _render_market_thermometer(selected_date)
             _render_adl(selected_date)
+        elif tab == "新聞焦點":
+            _render_news_focus(selected_date)
         elif tab == "期貨法人":
             _render_futures_panel(selected_date)
         elif tab == "產業熱力圖":
@@ -1109,7 +1133,8 @@ def _render_kline_panel(code: str, name: str):
 
 
 def detail_page():
-    selected_date = _render_sidebar()
+    _render_sidebar()
+    selected_date = _query_date()
     origin = st.session_state.get("detail_return")
     if origin in NAV_PAGES:
         if st.button(f"返回{NAV_PAGES[origin].title}", key="detail_back"):
@@ -1120,7 +1145,7 @@ def detail_page():
     code = col_input.text_input("股票代號", value=st.session_state.get("selected_code", ""),
                                 placeholder="輸入股票代號，例如 2330", label_visibility="collapsed")
     if not code:
-        st.info("請輸入股票代號，或從左側新聞焦點、「選股工具 › 觀察名單」點選")
+        st.info("請輸入股票代號，或從「市場總覽 › 新聞焦點」、「選股工具 › 觀察名單」點選")
         return
     st.session_state["selected_code"] = code  # 切換分頁或頁面後回來仍停在這檔
 
@@ -1149,7 +1174,7 @@ def detail_page():
             _render_dividend_panel(code)
             _render_pe_river_panel(code)
         elif tab == "新聞":
-            with ui.panel("相關新聞", selected_date):
+            with ui.panel("相關新聞", f"{selected_date}・日期在「市場總覽」上方切換"):
                 news_rows = db.query_news(selected_date, code)
                 if news_rows:
                     for row in news_rows:
@@ -3247,7 +3272,8 @@ def _render_sidebar_footer():
 
 # 側邊欄導覽：大項目＝頁面，子項目＝頁內分頁（目前所在的大項目才展開子項目）
 NAV_TABS = {
-    "home": ["市場溫度計", "期貨法人", "產業熱力圖", "排行", "股價", "三大法人", "融資融券", "新聞", "收集紀錄"],
+    "home": ["市場溫度計", "新聞焦點", "期貨法人", "產業熱力圖", "排行", "股價", "三大法人", "融資融券", "新聞",
+             "收集紀錄"],
     "portfolio": ["持倉明細", "持股訊號", "AI 持股分析", "新增交易", "交易紀錄", "已實現損益"],
     "detail": ["技術面", "籌碼面", "基本面", "新聞", "AI 分析"],
     "screener": ["篩選器", "觀察名單", "個股比較", "訊號回測"],

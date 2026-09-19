@@ -301,6 +301,14 @@ def cards(items: list[dict]):
     _html(f'<div class="tw-card-grid">{"".join(blocks)}</div>')
 
 
+def release_focus():
+    """讓目前取得焦點的輸入框失去焦點。下拉選單選完後焦點會留在選單上，接著點表格時第一下只會用來移開焦點、
+    表格收不到點擊（要點兩下）；選完就先把焦點移開。用高度 0 的元件執行一小段程式（同網域才能碰到主頁面）"""
+    import streamlit.components.v1 as components
+    components.html("<script>const el = window.parent.document.activeElement; if (el) el.blur();</script>",
+                    height=0)
+
+
 def info_grid(items: list[tuple]):
     """標題／內容的資料表（公司基本資料這類），一列兩組；空值不顯示。
     items: [(標題, 內容)] 或 [(標題, 內容, True)]＝內容佔滿整列（長文字用）"""
