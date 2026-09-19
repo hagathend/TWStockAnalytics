@@ -43,7 +43,7 @@ from src.config_ai import (
     save_report_settings,
     save_scraping_settings,
 )
-from src import config_watchlist, history, scheduled_ai
+from src import config_screener, config_watchlist, history, scheduled_ai
 from src.config_watchlist import add_stocks, load_watchlist
 from src.market_analysis import build_market_analysis_prompt, save_market_analysis
 from src.report_pdf import markdown_to_pdf
@@ -1689,9 +1689,58 @@ _SCREEN_DEFAULTS = {
 }
 
 
+def _apply_screen_preset():
+    """套用範本：回呼在重跑前執行，可以直接改條件 widget 的值"""
+    values = config_screener.load_presets().get(st.session_state.get("scr_preset"), {})
+    store = st.session_state.setdefault(ui._KEPT_WIDGETS, {})
+    for key, default in _SCREEN_DEFAULTS.items():
+        value = values.get(key, default)
+        st.session_state[key] = value
+        store[key] = value
+    st.session_state["screen_preset_notice"] = f"已套用「{st.session_state.get('scr_preset')}」"
+
+
+def _save_screen_preset():
+    name = st.session_state.get("scr_preset_name", "")
+    values = {key: st.session_state.get(key, default) for key, default in _SCREEN_DEFAULTS.items()}
+    try:
+        saved = config_screener.save_preset(name, values)
+    except config_screener.PresetError as exc:
+        st.session_state["screen_preset_notice"] = str(exc)
+        return
+    st.session_state["scr_preset_pending"] = saved
+    st.session_state["scr_preset_name"] = ""
+    st.session_state["screen_preset_notice"] = f"已存成範本「{saved}」"
+
+
+def _delete_screen_preset():
+    name = st.session_state.get("scr_preset")
+    config_screener.delete_preset(name)
+    st.session_state["screen_preset_notice"] = f"已刪除範本「{name}」"
+
+
+def _render_screen_presets():
+    presets = config_screener.load_presets()
+    pending = st.session_state.pop("scr_preset_pending", None)
+    if pending in presets:
+        st.session_state["scr_preset"] = pending
+    col_pick, col_apply, col_delete, col_save = st.columns([2.2, 0.8, 0.8, 1.2], vertical_alignment="bottom")
+    col_pick.selectbox("條件範本", list(presets) or ["（還沒有範本）"], key="scr_preset", disabled=not presets)
+    col_apply.button("套用", width="stretch", disabled=not presets, key="scr_preset_apply", on_click=_apply_screen_preset)
+    col_delete.button("刪除", width="stretch", disabled=not presets, key="scr_preset_delete", on_click=_delete_screen_preset)
+    with col_save.popover("存成範本", width="stretch"):
+        st.text_input("範本名稱", placeholder="例如：高殖利率＋外資買", key="scr_preset_name",
+                      help="把目前所有篩選條件存起來；同名會覆蓋")
+        st.button("儲存", type="primary", width="stretch", key="scr_preset_save", on_click=_save_screen_preset)
+    notice = st.session_state.pop("screen_preset_notice", None)
+    if notice:
+        st.caption(notice)
+
+
 def _render_screen_tab(signal_df: pd.DataFrame):
     ui.restore_widgets(_SCREEN_DEFAULTS)
-    with ui.panel("篩選條件"):
+    with ui.panel("篩選條件", "常用的條件組合可以存成範本，下次一鍵套用"):
+        _render_screen_presets()
         labels = {v: k for k, v in signals.SIGNALS.items()}
         chosen = st.multiselect("訊號條件", list(labels), key="scr_signals")
         col1, col2, _ = st.columns([1, 1, 2])
