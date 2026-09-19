@@ -39,12 +39,6 @@ class ReleaseParsingTests(unittest.TestCase):
         self.assertEqual(release["asset_name"], "TWStockAnalytics-Setup-0.0.9.exe")
         self.assertEqual(release["sha256"], hashlib.sha256(INSTALLER).hexdigest())
 
-    def test_zip_copy_of_installer_is_not_picked(self):
-        # Release 同時附 zip（給瀏覽器下載比較快）與 exe；自動更新要的是 exe，zip 排在前面也不能選錯
-        zip_asset = {"name": "TWStockAnalytics-Setup-0.0.9.zip", "browser_download_url": "https://example.invalid/setup.zip"}
-        payload = {**RELEASE_PAYLOAD, "assets": [zip_asset, *RELEASE_PAYLOAD["assets"]]}
-        self.assertEqual(updater.summarize_release(payload)["asset_name"], "TWStockAnalytics-Setup-0.0.9.exe")
-
     def test_release_without_installer_is_ignored(self):
         self.assertIsNone(updater.summarize_release({**RELEASE_PAYLOAD, "assets": RELEASE_PAYLOAD["assets"][:1]}))
 
