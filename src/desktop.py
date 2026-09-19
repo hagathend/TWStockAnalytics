@@ -44,9 +44,15 @@ def _pid_alive(pid: int) -> bool:
     if not pid:
         return False
     if os.name == "nt":
-        result = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"],
-                                capture_output=True, text=True, creationflags=_NO_WINDOW)
-        return f'"{pid}"' in result.stdout
+        # 不用 text=True：tasklist 用系統編碼（繁中 Windows 是 Big5）輸出「資訊: 沒有執行中的工作…」，
+        # 用 UTF-8 解碼失敗時 subprocess 的讀取執行緒會出錯、stdout 變成 None（使用者實際遇到的 TypeError）。
+        # 直接比對位元組，找不到或指令失敗都當作沒在執行
+        try:
+            result = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"],
+                                    capture_output=True, timeout=15, creationflags=_NO_WINDOW)
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        return f'"{pid}"'.encode("ascii") in (result.stdout or b"")
     try:
         os.kill(pid, 0)
         return True
