@@ -1570,6 +1570,8 @@ def _cached_screen_tables() -> dict[str, pd.DataFrame]:
         "ownership": ownership.latest_table(),
         "financials": financials.latest_table(),
         "pe_percentile": pe_river.latest_percentiles(),
+        "industry": pd.DataFrame(list(db.query_industry_map().items()), columns=["code", "industry"]),
+        "issued": pd.DataFrame(db.query_issued_shares(_date.today().isoformat()), columns=["code", "issued_shares"]),
     }
 
 
@@ -1642,10 +1644,10 @@ def _trend_series(codes: list[str]) -> dict[str, list[float]]:
 
 
 _SCREEN_COLUMNS = {
-    "code": "代號", "name": "名稱", "trend": _TREND_COLUMN, "close": "收盤", "change_pct": "漲跌%",
+    "code": "代號", "name": "名稱", "industry": "產業", "trend": _TREND_COLUMN, "close": "收盤", "change_pct": "漲跌%",
     "return_20d": "20日報酬%", "rs_rank_pct": "相對強弱",
     "foreign_streak": "外資連買賣", "trust_streak": "投信連買賣",
-    "vol_ma20_lots": "20日均量(張)", "pe_ratio": "本益比", "dividend_yield": "殖利率%",
+    "vol_ma20_lots": "20日均量(張)", "turnover_rate": "週轉率%", "pe_ratio": "本益比", "dividend_yield": "殖利率%",
     "pb_ratio": "淨值比", "yoy_pct": "營收年增%", "revenue_high_text": "營收創高", "yoy_growth_streak": "年增連續月",
     "big1000_pct": "千張大戶%", "big1000_pct_change": "大戶週增(百分點)", "foreign_pct": "外資持股%",
     "foreign_change_20": "外資20日增(百分點)", "roe_annualized": "ROE年化%", "gross_margin": "毛利率%",
@@ -1683,6 +1685,7 @@ _SCREEN_DEFAULTS = {
     "scr_roe_min": None, "scr_gross_min": None, "scr_eps_ttm_min": None, "scr_pe_pct_max": None,
     "scr_revenue_high": False, "scr_yoy_streak": 0,
     "scr_big_min": None, "scr_big_change_min": None, "scr_foreign_change_min": None,
+    "scr_price_min": None, "scr_price_max": None, "scr_turnover_min": None, "scr_industries": [],
 }
 
 
@@ -1720,6 +1723,14 @@ def _render_screen_tab(signal_df: pd.DataFrame):
                                              key="scr_big_change_min")
             foreign_change_min = s3.number_input("外資持股 20 日增 ≥（百分點）", value=None, step=0.5, format="%.2f",
                                                  key="scr_foreign_change_min")
+        with st.expander("價格、產業與週轉率"):
+            p1, p2, p3 = st.columns([1, 1, 1])
+            price_min = p1.number_input("股價 ≥（元）", min_value=0.0, value=None, step=10.0, key="scr_price_min")
+            price_max = p2.number_input("股價 ≤（元）", min_value=0.0, value=None, step=10.0, key="scr_price_max")
+            turnover_min = p3.number_input("週轉率% ≥", min_value=0.0, value=None, step=0.5, key="scr_turnover_min",
+                                           help="當天成交股數 ÷ 發行股數；數字越高代表換手越熱絡")
+            industry_options = sorted(set(_cached_screen_tables()["industry"]["industry"]))
+            industries = st.multiselect("產業（不選＝全部）", industry_options, key="scr_industries")
     ui.remember_widgets(_SCREEN_DEFAULTS)
 
     result = signals.screen(signal_df, [labels[c] for c in chosen], min_avg_volume_lots=min_lots,
@@ -1749,6 +1760,16 @@ def _render_screen_tab(signal_df: pd.DataFrame):
             result = result[result["big1000_pct"].notna() & (result["big1000_pct"] >= big_min)]
         if big_change_min is not None:
             result = result[result["big1000_pct_change"].notna() & (result["big1000_pct_change"] >= big_change_min)]
+        result = result.merge(tables["industry"], on="code", how="left").merge(tables["issued"], on="code", how="left")
+        result["turnover_rate"] = result["volume"] / result["issued_shares"].where(result["issued_shares"] > 0) * 100
+        if price_min is not None:
+            result = result[result["close"] >= price_min]
+        if price_max is not None:
+            result = result[result["close"] <= price_max]
+        if turnover_min is not None:
+            result = result[result["turnover_rate"].notna() & (result["turnover_rate"] >= turnover_min)]
+        if industries:
+            result = result[result["industry"].isin(industries)]
         result = result.reset_index(drop=True)
 
     _render_screen_results(result)
@@ -1774,7 +1795,7 @@ def _render_screen_results(result: pd.DataFrame):
         styler = _styled_table(
             view, signed=["漲跌%", "20日報酬%", "外資連買賣", "投信連買賣", "營收年增%", "大戶週增(百分點)", "外資20日增(百分點)"],
             thousands=["20日均量(張)", "外資連買賣", "投信連買賣", "年增連續月"],
-            decimals=["收盤", "漲跌%", "20日報酬%", "本益比", "殖利率%", "淨值比", "營收年增%", "千張大戶%",
+            decimals=["收盤", "漲跌%", "20日報酬%", "週轉率%", "本益比", "殖利率%", "淨值比", "營收年增%", "千張大戶%",
                       "大戶週增(百分點)", "外資持股%", "外資20日增(百分點)", "ROE年化%", "毛利率%", "近四季EPS", "本益比百分位"],
         )
         stocks = list(zip(result["code"], result["name"]))
