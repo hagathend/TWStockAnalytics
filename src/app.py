@@ -30,7 +30,7 @@ import streamlit as st  # noqa: E402
 from src.ai_analysis import (NEWS_TOP_N_OPTIONS, analyze_with_codex_deep, build_prompt,  # noqa: E402
                              news_top_n, parse_and_save)
 from src.codex_cli import generate_codex_text, check_codex_login, list_codex_models
-from src.charting import build_candlestick
+from src import charting
 from src.chip_metrics import metrics_for_code
 from src.chip_metrics import summarize_for_prompt as summarize_chip_metrics
 from src.collect_all import run_daily_collect
@@ -895,6 +895,36 @@ def _render_stock_ai_panel(code: str):
             st.markdown(_md_linebreaks(existing_analysis[0]["analysis"]))
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def _cached_chart_rows(code: str, days: int, today: str) -> list[dict]:
+    """同一個週期切換期間不用重抓：一律抓該週期最長期間所需的歷史"""
+    return charting.fetch_rows(code, days, _date.fromisoformat(today))
+
+
+_KLINE_DEFAULTS = {"kline_period": "日K", "kline_indicators": []}
+
+
+def _render_kline_panel(code: str, name: str):
+    ui.restore_widgets(_KLINE_DEFAULTS | {f"kline_range_{p}": spec["default"] for p, spec in charting.PERIODS.items()})
+    with ui.panel("K 線走勢", "均線・支撐壓力與成交量密集區・週 K／月 K 由日線合併・資料來源 FinMind"):
+        col_period, col_range, col_ind = st.columns([1.1, 1.5, 1.6], vertical_alignment="bottom")
+        period = col_period.segmented_control("週期", list(charting.PERIODS), key="kline_period") or "日K"
+        spec = charting.PERIODS[period]
+        range_label = col_range.segmented_control("期間", list(spec["ranges"]), key=f"kline_range_{period}")             or spec["default"]
+        indicators = col_ind.pills("指標", charting.INDICATORS, selection_mode="multi", key="kline_indicators") or []
+        ui.remember_widgets(["kline_period", "kline_indicators", f"kline_range_{period}"])
+        longest = max(spec["ranges"], key=spec["ranges"].get)
+        with st.spinner("讀取 K 線資料中..."):
+            rows = _cached_chart_rows(code, charting.fetch_days(period, longest), _date.today().isoformat())
+            fig = charting.build_candlestick(code, name, period, range_label, indicators, rows=rows)
+        if fig:
+            ma = "／".join(f"{n}{spec['unit']}" for n in spec["ma"])
+            st.caption(f"均線 {ma}・虛線為支撐壓力、點線為成交量最密集價位、右側灰色長條為價量分布")
+            st.plotly_chart(fig, width="stretch", key="kline_chart")
+        else:
+            st.warning("查無此股票的歷史價量資料（可能代號輸入錯誤，或 FinMind 目前沒有資料）")
+
+
 def detail_page():
     selected_date = _render_sidebar()
     origin = st.session_state.get("detail_return")
@@ -918,13 +948,7 @@ def detail_page():
     tab, body = ui.page_tabs("detail", NAV_TABS["detail"])
     with body:
         if tab == "技術面":
-            with ui.panel("K 線走勢", "近 90 天・均線 MA5／MA20／MA60・支撐壓力與成交量密集區・資料來源 FinMind"):
-                with st.spinner("讀取 K 線資料中..."):
-                    fig = build_candlestick(code, name)
-                if fig:
-                    st.plotly_chart(fig, width="stretch")
-                else:
-                    st.warning("查無此股票的歷史價量資料（可能代號輸入錯誤，或 FinMind 目前沒有資料）")
+            _render_kline_panel(code, name)
             _render_relative_strength_panel(code)
         elif tab == "籌碼面":
             _render_chip_panel(code)
