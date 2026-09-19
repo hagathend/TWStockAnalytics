@@ -44,7 +44,7 @@ from src.config_ai import (
     save_report_settings,
     save_scraping_settings,
 )
-from src import compare, config_screener, config_watchlist, day_trading, dividend_history, history, scheduled_ai
+from src import compare, config_screener, subscriptions, config_watchlist, day_trading, dividend_history, history, scheduled_ai
 from src.config_watchlist import add_stocks, load_watchlist
 from src.market_analysis import build_market_analysis_prompt, save_market_analysis
 from src.report_pdf import markdown_to_pdf
@@ -2495,23 +2495,68 @@ def _event_table(events: pd.DataFrame):
                  column_config={"說明": st.column_config.TextColumn("說明", width="large")})
 
 
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def _cached_subscriptions(year: int) -> list[dict]:
+    ok, rows = subscriptions.fetch(year)
+    if not ok:
+        raise RuntimeError(rows)  # 失敗不快取，下次重試
+    return rows
+
+
+_SUBSCRIPTION_COLUMNS = {
+    "status": "狀態", "code": "代號", "name": "名稱", "kind": "類型", "start_date": "申購開始", "end_date": "申購截止",
+    "draw_date": "抽籤日", "listing_date": "撥券日", "price": "承銷價", "close": "最新收盤", "spread_pct": "價差%",
+    "spread_per_lot": "每籤價差(元)", "win_rate": "中籤率%", "broker": "主辦券商",
+}
+
+
+def _render_subscriptions():
+    today = _date.today()
+    try:
+        rows = _cached_subscriptions(today.year)
+        if today.month == 1:  # 年初時去年底的抽籤還在兩週內
+            rows = _cached_subscriptions(today.year - 1) + rows
+    except RuntimeError as exc:
+        st.warning(str(exc))
+        return
+    table = subscriptions.schedule(rows, today, subscriptions.latest_closes([r["code"] for r in rows]))
+    with ui.panel("公開申購", "申購中與即將開始的排前面，另列近兩週已抽籤的・價差用最新收盤估算，撥券時股價會變動・"
+                             "資料來源 證交所・點一下開啟個股詳情"):
+        if table.empty:
+            st.caption("目前沒有公開申購")
+            return
+        view = table[list(_SUBSCRIPTION_COLUMNS)].rename(columns=_SUBSCRIPTION_COLUMNS)
+        styler = _styled_table(view, signed=["價差%", "每籤價差(元)"], thousands=["每籤價差(元)"],
+                               decimals=["承銷價", "最新收盤", "價差%", "中籤率%"])
+        clicked = _clickable_table(styler, "subscription_table", width="stretch", hide_index=True)
+        if clicked is not None and clicked < len(table):
+            _go_to_detail(table.iloc[clicked]["code"])
+        st.caption("初次上市櫃的股票還沒有收盤價，價差留空；申購需在截止日前透過券商下單，並預扣申購處理費與價款")
+
+
 def calendar_page():
     _render_sidebar()
-    ui.page_header("行事曆", "除權息、月營收公布期限與 AI 預測檢驗日；持股與觀察名單相關的事件排在最前面")
+    ui.page_header("行事曆", "除權息、月營收公布期限、AI 預測檢驗日與公開申購；持股與觀察名單相關的事件排在最前面")
 
-    col_range, _ = st.columns([1, 3])
-    days = col_range.segmented_control("期間", [7, 30, 60], default=30, format_func=lambda d: f"{d} 天",
-                                       key="calendar_days") or 30
+    tab, body = ui.page_tabs("calendar", NAV_TABS["calendar"])
+    if tab == "公開申購":
+        with body:
+            _render_subscriptions()
+        return
+    with body:
+        col_range, _ = st.columns([1, 3])
+        days = col_range.segmented_control("期間", [7, 30, 60], default=30, format_func=lambda d: f"{d} 天",
+                                           key="calendar_days") or 30
     events = calendar_events.upcoming_events(_date.today(), days)
     if events.empty:
-        st.info("這段期間沒有事件。除權息預告在每日收集時更新。")
+        with body:
+            st.info("這段期間沒有事件。除權息預告在每日收集時更新。")
         return
 
     mine = events[events["in_holdings"] | events["in_watchlist"]]
     others = events[~(events["in_holdings"] | events["in_watchlist"]) & (events["kind"] != calendar_events.KIND_DIVIDEND)]
     market = events[~(events["in_holdings"] | events["in_watchlist"]) & (events["kind"] == calendar_events.KIND_DIVIDEND)]
 
-    tab, body = ui.page_tabs("calendar", NAV_TABS["calendar"])
     with body:
         if tab == "持股與觀察名單":
             with ui.panel("我的持股與觀察名單", "除權息預估股利未扣二代健保補充保費與匯費"):
@@ -3028,7 +3073,7 @@ NAV_TABS = {
     "detail": ["技術面", "籌碼面", "基本面", "新聞", "AI 分析"],
     "screener": ["篩選器", "觀察名單", "個股比較", "訊號回測"],
     "alerts": ["最近觸發", "提醒規則", "新增提醒"],
-    "calendar": ["持股與觀察名單", "其他提醒", "全市場除權息"],
+    "calendar": ["持股與觀察名單", "其他提醒", "全市場除權息", "公開申購"],
     "ai": ["新聞深度分析", "大盤籌碼分析", "預測追蹤", "手動貼上"],
     "history": ["新聞", "新聞焦點", "個股分析", "大盤分析", "AI 預測"],
     "ai_settings": ["Codex CLI", "每日排程", "Firecrawl"],
