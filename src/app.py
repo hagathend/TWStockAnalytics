@@ -34,7 +34,7 @@ from src import charting
 from src.chip_metrics import metrics_for_code
 from src.chip_metrics import summarize_for_prompt as summarize_chip_metrics
 from src.collect_all import run_daily_collect
-from src.collectors import company_profile
+from src.collectors import company_profile, realtime
 from src.collectors.firecrawl_fetcher import test_connection as firecrawl_test_connection
 from src.config_ai import (
     load_codex_settings,
@@ -44,7 +44,7 @@ from src.config_ai import (
     save_report_settings,
     save_scraping_settings,
 )
-from src import compare, config_screener, subscriptions, config_watchlist, day_trading, dividend_history, history, scheduled_ai
+from src import compare, config_screener, live_quotes, subscriptions, config_watchlist, day_trading, dividend_history, history, scheduled_ai
 from src.config_watchlist import add_stocks, load_watchlist
 from src.market_analysis import build_market_analysis_prompt, save_market_analysis
 from src.report_pdf import markdown_to_pdf
@@ -1114,6 +1114,7 @@ def detail_page():
 
     name = db.lookup_stock_name(code) or code
     _render_quote(code, name)
+    _render_live_quote_line(code)
     _render_position_panel(code)
 
     tab, body = ui.page_tabs("detail", NAV_TABS["detail"])
@@ -1367,6 +1368,92 @@ def _render_saved_analyses(stocks: list[dict]):
                 st.markdown(_md_linebreaks(saved[0]["analysis"]))
 
 
+@st.cache_data(ttl=10, show_spinner=False)
+def _cached_live_quotes(codes: tuple[str, ...]) -> dict[str, dict]:
+    """10 秒內重複查詢直接用快取（證交所會擋太頻繁的請求）；失敗丟例外，不會被快取"""
+    ok, quotes = realtime.fetch_quotes(list(codes))
+    if not ok:
+        raise RuntimeError(quotes)
+    return quotes
+
+
+_LIVE_QUOTE_COLUMNS = {"code": "代號", "name": "名稱", "price": "成交", "change": "漲跌", "change_pct": "漲跌%",
+                       "open": "開盤", "high": "最高", "low": "最低", "volume_lots": "成交量(張)", "time": "時間"}
+_LIVE_POSITION_COLUMNS = {"code": "代號", "name": "名稱", "shares": "股數", "avg_cost": "平均成本", "price": "成交",
+                          "change_pct": "漲跌%", "market_value": "即時市值", "pnl": "即時損益", "pnl_pct": "報酬率%",
+                          "day_pnl": "今日損益", "time": "時間"}
+
+
+def _render_live_quotes(key: str, stocks: list[tuple[str, str]], positions: list[dict] | None = None):
+    """盤中即時報價面板。按鈕才查詢（開頁不自動打外部服務）；開啟自動更新時每 30 秒重查這一塊"""
+    if not stocks:
+        return
+    with ui.panel("盤中即時報價", "證交所基本市況報導，約 5 秒更新・收盤後顯示當天最後成交・即時損益未扣賣出稅費"):
+        col_button, col_auto, col_info = st.columns([1.2, 1.6, 3], vertical_alignment="center")
+        if col_button.button("更新報價", key=f"live_{key}_refresh", width="stretch"):
+            st.session_state[f"live_{key}_on"] = True
+        if not st.session_state.get(f"live_{key}_on"):
+            col_info.caption("按「更新報價」查詢目前成交價")
+        auto = col_auto.toggle("每 30 秒自動更新", key=f"live_{key}_auto", disabled=not live_quotes.is_trading_time(),
+                               help="交易時間（週一到週五 9:00～13:30）才能開啟")
+        if not (st.session_state.get(f"live_{key}_on") or auto):
+            return
+        # 自動更新時只重跑報價這一塊（fragment），不會整頁重算
+        st.fragment(run_every=30 if auto else None)(_live_quote_body)(key, stocks, positions)
+
+
+def _live_quote_body(key: str, stocks: list[tuple[str, str]], positions: list[dict] | None):
+    try:
+        quotes = _cached_live_quotes(tuple(code for code, _ in stocks))
+    except RuntimeError as exc:
+        st.warning(str(exc))
+        return
+    stamp = live_quotes.latest_stamp(quotes)
+    st.caption(f"資料時間 {stamp}" if stamp else "查無報價")
+    if positions:
+        table = live_quotes.position_table(positions, quotes)
+        total_pnl = table["pnl"].sum(min_count=1)
+        day_pnl = table["day_pnl"].sum(min_count=1)
+        ui.cards([
+            {"label": "即時市值", "value": f"{table['market_value'].sum():,.0f}"},
+            {"label": "即時未實現損益", "value": "-" if pd.isna(total_pnl) else f"{total_pnl:+,.0f}",
+             "tone": ui.tone_of(total_pnl)},
+            {"label": "今日損益（估）", "value": "-" if pd.isna(day_pnl) else f"{day_pnl:+,.0f}",
+             "tone": ui.tone_of(day_pnl), "sub": "漲跌 × 股數，當天買進的部位會失真"},
+        ])
+        view = table[list(_LIVE_POSITION_COLUMNS)].rename(columns=_LIVE_POSITION_COLUMNS)
+        styler = _styled_table(view, signed=["漲跌%", "即時損益", "報酬率%", "今日損益"],
+                               thousands=["股數", "即時市值", "即時損益", "今日損益"],
+                               decimals=["平均成本", "成交", "漲跌%", "報酬率%"])
+    else:
+        view = live_quotes.quote_table(stocks, quotes)[list(_LIVE_QUOTE_COLUMNS)].rename(columns=_LIVE_QUOTE_COLUMNS)
+        styler = _styled_table(view, signed=["漲跌", "漲跌%"], thousands=["成交量(張)"],
+                               decimals=["成交", "漲跌", "漲跌%", "開盤", "最高", "最低"])
+    st.dataframe(styler, hide_index=True, width="stretch", key=f"live_{key}_table")
+
+
+def _render_live_quote_line(code: str):
+    """個股詳情報價列下方：交易時間自動顯示即時成交；非交易時間按按鈕才查"""
+    if not (live_quotes.is_trading_time() or st.session_state.get("live_detail_on") == code):
+        st.button("查詢即時報價", key="live_detail_refresh", type="tertiary",
+                  on_click=st.session_state.__setitem__, args=("live_detail_on", code))
+        return
+    try:
+        quote = _cached_live_quotes((code,)).get(code)
+    except RuntimeError as exc:
+        st.caption(str(exc))
+        return
+    if not quote or quote.get("price") is None:
+        st.caption("查無即時報價")
+        return
+    tone = ui.tone_of(quote["change"])
+    color = ui.UP_COLOR if tone == "up" else ui.DOWN_COLOR if tone == "down" else "#172E4D"
+    change = f"{quote['change']:+,.2f}（{quote['change_pct']:+.2f}%）" if quote["change"] is not None else ""
+    st.markdown(f'<div class="tw-quote-meta">即時 {quote["date"]} {quote["time"]}　'
+                f'<span style="color:{color};font-weight:600;font-size:1rem">{quote["price"]:,.2f} {change}</span>　'
+                f'成交量 {quote["volume_lots"] or 0:,.0f} 張</div>', unsafe_allow_html=True)
+
+
 def portfolio_page():
     _render_sidebar()
     ui.page_header("我的持股", "由交易紀錄以平均成本法計算；成本含買進手續費，未實現損益未扣將來賣出的稅費；資料只存在本機資料庫")
@@ -1397,6 +1484,7 @@ def portfolio_page():
             st.info("目前沒有持有中的股票，請到「新增交易」記錄買進")
         elif tab == "持倉明細":
             _render_positions_table(positions, totals)
+            _render_live_quotes("portfolio", [(p["code"], p["name"]) for p in positions], positions)
         elif tab == "持股訊號":
             with ui.panel("持股訊號", "僅上市股・區分今日新出現與持續中的訊號"):
                 _render_signal_alerts(signals.watchlist_alerts(_cached_signal_history(), [p["code"] for p in positions]),
@@ -2329,6 +2417,7 @@ def _render_watchlist_tab(signal_df: pd.DataFrame):
                                    help="用 Codex 逐檔分析並儲存（每檔各用一次額度），結果收錄每日報告；沒勾選就分析整個名單")
         if run_ai:
             _analyze_stocks_with_codex(ai_targets, "觀察名單")
+    _render_live_quotes("watch", list(stocks.items()))
 
     today_analysed = [{"code": c, "name": n} for c, n in stocks.items()
                       if db.query_stock_analysis(_date.today().isoformat(), c)]
