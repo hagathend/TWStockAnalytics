@@ -24,6 +24,7 @@ from datetime import date as _date, timedelta  # noqa: E402
 import pandas as pd  # noqa: E402
 import plotly.express as px  # noqa: E402
 import plotly.graph_objects as go  # noqa: E402
+from plotly.subplots import make_subplots  # noqa: E402
 import streamlit as st  # noqa: E402
 
 from src.ai_analysis import (NEWS_TOP_N_OPTIONS, analyze_with_codex_deep, build_prompt,  # noqa: E402
@@ -339,6 +340,27 @@ def _render_market_thermometer(selected_date: str):
             st.plotly_chart(ui.style_chart(fig, height=280), width="stretch", key="breadth_chart")
 
 
+def _render_adl(selected_date: str):
+    """騰落線與加權指數：指數創高但騰落線沒跟上，代表上漲集中在少數權值股"""
+    breadth = _cached_breadth(selected_date)
+    if len(breadth) < 2:
+        return
+    recent = breadth.tail(120)
+    index = pd.DataFrame(db.query_market_index(recent["date"].iloc[0], selected_date))
+    with ui.panel("騰落線（ADL）", "每天上漲家數減下跌家數的累計（上市個股）・和加權指數對照：指數上漲但騰落線走平或下滑，"
+                                  "代表上漲集中在少數股票"):
+        fig = make_subplots(specs=[[{"secondary_y": True}]])
+        fig.add_scatter(x=recent["date"], y=recent["adl"], mode="lines", name="騰落線",
+                        line={"color": ui.ACCENT_COLOR, "width": 2.2}, secondary_y=False)
+        if not index.empty:
+            fig.add_scatter(x=index["date"], y=index["taiex"], mode="lines", name="加權指數",
+                            line={"color": "#8792A6", "width": 1.4}, secondary_y=True)
+        fig.update_xaxes(type="category", nticks=10)
+        fig.update_yaxes(title_text="累計家數", secondary_y=False)
+        fig.update_yaxes(title_text="加權指數", secondary_y=True, showgrid=False)
+        st.plotly_chart(ui.style_chart(fig, height=300), width="stretch", key="adl_chart")
+
+
 def _render_futures_panel(selected_date: str):
     frame = futures.net_oi_frame(selected_date)
     summary = futures.summary(selected_date)
@@ -432,6 +454,7 @@ def home_page():
     with body:
         if tab == "市場溫度計":
             _render_market_thermometer(selected_date)
+            _render_adl(selected_date)
         elif tab == "期貨法人":
             _render_futures_panel(selected_date)
         elif tab == "產業熱力圖":
