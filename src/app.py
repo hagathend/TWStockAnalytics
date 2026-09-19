@@ -43,7 +43,7 @@ from src.config_ai import (
     save_report_settings,
     save_scraping_settings,
 )
-from src import config_screener, config_watchlist, history, scheduled_ai
+from src import config_screener, config_watchlist, dividend_history, history, scheduled_ai
 from src.config_watchlist import add_stocks, load_watchlist
 from src.market_analysis import build_market_analysis_prompt, save_market_analysis
 from src.report_pdf import markdown_to_pdf
@@ -801,6 +801,115 @@ def _render_financials_panel(code: str):
             st.plotly_chart(ui.style_chart(fig, height=280), width="stretch", key=f"financials_chart_{code}")
 
 
+_HEALTH_COLUMNS = {
+    "label": "季別", "net_margin": "淨利率%", "asset_turnover": "資產週轉(次)", "equity_multiplier": "權益乘數",
+    "roe_annualized": "ROE%", "roa_annualized": "ROA%", "debt_ratio": "負債比%", "current_ratio": "流動比%",
+    "ocf_to_net_income": "營業現金流÷淨利",
+}
+
+
+def _render_financial_health_panel(code: str):
+    """資產負債與現金流量：財務體質（負債、流動性）、杜邦拆解 ROE、獲利有沒有真的收到現金"""
+    frame = financials.code_frame(code)
+    if frame.empty or frame["debt_ratio"].isna().all():
+        return
+    last = frame.iloc[-1]
+
+    def num(v, spec, suffix=""):
+        return "-" if v is None or pd.isna(v) else f"{v:{spec}}{suffix}"
+
+    with ui.panel("財務體質與現金流", f"最新 {last['label']}・比率為期末數或累計年化・現金流單位億元・金融業沒有流動比"):
+        quality = last["ocf_to_net_income"]
+        ui.cards([
+            {"label": "負債比", "value": num(last["debt_ratio"], ".1f", "%"), "sub": "負債 ÷ 資產"},
+            {"label": "流動比", "value": num(last["current_ratio"], ".0f", "%"), "sub": "流動資產 ÷ 流動負債"},
+            {"label": "ROA（年化）", "value": num(last["roa_annualized"], ".1f", "%"),
+             "sub": f"ROE {num(last['roe_annualized'], '.1f', '%')}"},
+            {"label": "營業現金流 ÷ 淨利", "value": num(quality, ".2f", " 倍"),
+             "sub": "今年累計；長期小於 1 要留意" if pd.notna(quality) else "淨利為負時不計算"},
+        ])
+        table = frame.iloc[::-1].head(8)[list(_HEALTH_COLUMNS)].rename(columns=_HEALTH_COLUMNS)
+        st.dataframe(_styled_table(table, decimals=[c for c in _HEALTH_COLUMNS.values() if c != "季別"]),
+                     hide_index=True, width="stretch", key=f"health_table_{code}")
+        st.caption("杜邦分析：ROE ≈ 淨利率 × 資產週轉 × 權益乘數。權益乘數高代表舉債多，ROE 靠槓桿撐起來的要多留意")
+        cash = frame[frame["operating_cf_q"].notna()]
+        if len(cash) >= 2:
+            fig = go.Figure()
+            for column, name, color in (("operating_cf_q", "營業現金流", ui.UP_COLOR),
+                                        ("investing_cf_q", "投資現金流", "#8792A6"),
+                                        ("financing_cf_q", "籌資現金流", "#A78BFA")):
+                fig.add_bar(x=cash["label"], y=cash[column] / 1e5, name=name, marker_color=color,
+                            hovertemplate=f"%{{x}}<br>{name} %{{y:,.2f}} 億<extra></extra>")
+            fig.add_scatter(x=cash["label"], y=cash["free_cf_q"] / 1e5, name="自由現金流", mode="lines+markers",
+                            line={"color": "#F5B942", "width": 2},
+                            hovertemplate="%{x}<br>自由現金流 %{y:,.2f} 億<extra></extra>")
+            fig.update_layout(barmode="group", yaxis={"title": "億元"})
+            fig.update_xaxes(type="category")
+            st.plotly_chart(ui.style_chart(fig, height=280), width="stretch", key=f"cashflow_chart_{code}")
+            st.caption("單季數字（年初累計相減）；自由現金流＝營業＋投資現金流")
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _cached_dividend_events(code: str, today: str) -> pd.DataFrame:
+    return dividend_history.fetch(code, today=_date.fromisoformat(today))
+
+
+_DIVIDEND_EVENT_COLUMNS = {"period": "所屬期間", "ex_date": "除權息日", "cash": "現金股利", "stock": "股票股利",
+                           "before_price": "除權息前股價", "yield_pct": "殖利率%", "fill": "填息"}
+
+
+def _render_dividend_panel(code: str):
+    today = _date.today()
+    try:
+        with st.spinner("讀取股利資料中..."):
+            events = _cached_dividend_events(code, today.isoformat())
+    except Exception:  # noqa: BLE001 - FinMind 暫時連不上就不顯示這個面板
+        return
+    if events.empty:
+        return
+    frame = financials.code_frame(code)
+    eps = {int(r.year): r.eps_cum for r in frame.itertuples() if r.quarter == 4 and pd.notna(r.eps_cum)}
+    annual = dividend_history.annual_table(events, eps)
+    price_rows = db.query_code_history("stock_price", code, limit=1)
+    price = price_rows[0]["close"] if price_rows else None
+    trailing = dividend_history.trailing_cash(events, today)
+    filled = events["fill_days"].dropna()
+    with ui.panel("股利政策", "所屬年度依盈餘年度加總・殖利率以除權息前一天股價計算・資料來源 FinMind"):
+        ui.cards([
+            {"label": "近一年現金股利", "value": f"{trailing:.2f} 元", "sub": "除息日在近 365 天內"},
+            {"label": "現金殖利率", "value": f"{trailing / price * 100:.2f}%" if price and trailing else "-",
+             "sub": f"以最新收盤 {price:,.2f} 計算" if price else ""},
+            {"label": "連續配息", "value": f"{dividend_history.consecutive_years(annual, today.year)} 年",
+             "sub": f"近 {dividend_history.DEFAULT_YEARS} 年資料"},
+            {"label": "平均填息天數", "value": f"{filled.mean():.0f} 天" if len(filled) else "-",
+             "sub": f"{len(filled)}／{int(events['before_price'].notna().sum())} 次已填息"},
+        ])
+        if len(annual) >= 2:
+            fig = go.Figure()
+            fig.add_bar(x=annual["fiscal_year"], y=annual["cash"], name="現金股利", marker_color=ui.UP_COLOR,
+                        hovertemplate="%{x} 年度<br>現金 %{y:.2f} 元<extra></extra>")
+            if (annual["stock"] > 0).any():
+                fig.add_bar(x=annual["fiscal_year"], y=annual["stock"], name="股票股利", marker_color="#F5B942",
+                            hovertemplate="%{x} 年度<br>股票 %{y:.2f} 元<extra></extra>")
+            if annual["payout_pct"].notna().any():
+                fig.add_scatter(x=annual["fiscal_year"], y=annual["payout_pct"], name="盈餘分配率%", yaxis="y2",
+                                mode="lines+markers", line={"color": "#A78BFA", "width": 2})
+            payout_top = max(100.0, float(annual["payout_pct"].max(skipna=True) or 0) * 1.1)
+            fig.update_layout(barmode="stack", yaxis={"title": "元"},
+                              yaxis2={"title": "%", "overlaying": "y", "side": "right", "showgrid": False,
+                                      "range": [0, payout_top]})
+            fig.update_xaxes(type="category")
+            st.plotly_chart(ui.style_chart(fig, height=260), width="stretch", key=f"dividend_chart_{code}")
+        table = events.iloc[::-1].head(12).copy()
+        table["fill"] = [("尚未除權息" if pd.isna(ex) else "尚未填息" if pd.isna(days) else f"{int(days)} 天")
+                         for ex, days in zip(table["ex_date"], table["fill_days"])]
+        table["ex_date"] = table["ex_date"].fillna("-")
+        table = table[list(_DIVIDEND_EVENT_COLUMNS)].rename(columns=_DIVIDEND_EVENT_COLUMNS)
+        st.dataframe(_styled_table(table, decimals=["現金股利", "股票股利", "除權息前股價", "殖利率%"]),
+                     hide_index=True, width="stretch", key=f"dividend_table_{code}")
+        st.caption("填息：除權息日起算的交易日數，收盤回到除權息前股價即算填息。盈餘分配率只在有該年度季報 EPS 時計算")
+
+
 _RIVER_COLORS = {10: "rgba(34, 181, 115, 0.22)", 25: "rgba(34, 181, 115, 0.12)", 50: "rgba(135, 146, 166, 0.10)",
                  75: "rgba(240, 82, 79, 0.12)", 90: "rgba(240, 82, 79, 0.22)"}
 
@@ -910,7 +1019,8 @@ def _render_kline_panel(code: str, name: str):
         col_period, col_range, col_ind = st.columns([1.1, 1.5, 1.6], vertical_alignment="bottom")
         period = col_period.segmented_control("週期", list(charting.PERIODS), key="kline_period") or "日K"
         spec = charting.PERIODS[period]
-        range_label = col_range.segmented_control("期間", list(spec["ranges"]), key=f"kline_range_{period}")             or spec["default"]
+        range_label = (col_range.segmented_control("期間", list(spec["ranges"]), key=f"kline_range_{period}")
+                       or spec["default"])
         indicators = col_ind.pills("指標", charting.INDICATORS, selection_mode="multi", key="kline_indicators") or []
         ui.remember_widgets(["kline_period", "kline_indicators", f"kline_range_{period}"])
         longest = max(spec["ranges"], key=spec["ranges"].get)
@@ -959,6 +1069,8 @@ def detail_page():
             _render_fundamentals_panel(code)
             _render_revenue_panel(code)
             _render_financials_panel(code)
+            _render_financial_health_panel(code)
+            _render_dividend_panel(code)
             _render_pe_river_panel(code)
         elif tab == "新聞":
             with ui.panel("相關新聞", selected_date):

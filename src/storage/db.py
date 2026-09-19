@@ -166,6 +166,13 @@ CREATE TABLE IF NOT EXISTS financials (
     net_income REAL,
     eps REAL,
     equity REAL,
+    total_assets REAL,
+    total_liabilities REAL,
+    current_assets REAL,
+    current_liabilities REAL,
+    operating_cf REAL,
+    investing_cf REAL,
+    financing_cf REAL,
     PRIMARY KEY (year, quarter, market, code)
 );
 
@@ -354,6 +361,13 @@ def _migrate_holdings_to_trades(conn):
     conn.execute("INSERT INTO app_meta (key, value) VALUES ('holdings_migrated', ?)", (now,))
 
 
+# 資產負債表與現金流量表（後來加的欄位；舊資料這些是 NULL，回補時會重抓）
+FINANCIALS_EXTRA_COLUMNS = ("total_assets", "total_liabilities", "current_assets", "current_liabilities",
+                            "operating_cf", "investing_cf", "financing_cf")
+_FINANCIALS_COLUMNS = ("year", "quarter", "market", "code", "name", "revenue", "gross_profit", "operating_income",
+                       "net_income", "eps", "equity") + FINANCIALS_EXTRA_COLUMNS
+
+
 def init_db():
     with get_conn() as conn:
         conn.executescript(SCHEMA)
@@ -362,6 +376,11 @@ def init_db():
                 conn.execute(f"ALTER TABLE news ADD COLUMN {column} {col_type}")
             except sqlite3.OperationalError:
                 pass  # 欄位已存在（舊資料庫升級用，新建的資料庫已經在 SCHEMA 裡就有這欄）
+        for column in FINANCIALS_EXTRA_COLUMNS:
+            try:
+                conn.execute(f"ALTER TABLE financials ADD COLUMN {column} REAL")
+            except sqlite3.OperationalError:
+                pass
         # 修復舊版解析錯誤存下的上櫃自營商欄位（當時存成外資的數字）。
         # 官方合計欄位是對的，且「合計 = 外資 + 投信 + 自營商」，所以自營商可由另外三欄推回；
         # 資料正確時條件不成立、不會更新任何列。
@@ -1226,14 +1245,11 @@ def query_dividend_events(start: str, end: str) -> list[dict]:
 def save_financials(rows: list[dict]):
     if not rows:
         return
+    columns = ", ".join(_FINANCIALS_COLUMNS)
+    values = ", ".join(f":{c}" for c in _FINANCIALS_COLUMNS)
     with get_conn() as conn:
-        conn.executemany(
-            """INSERT OR REPLACE INTO financials (year, quarter, market, code, name, revenue, gross_profit,
-                   operating_income, net_income, eps, equity)
-               VALUES (:year, :quarter, :market, :code, :name, :revenue, :gross_profit, :operating_income,
-                   :net_income, :eps, :equity)""",
-            rows,
-        )
+        conn.executemany(f"INSERT OR REPLACE INTO financials ({columns}) VALUES ({values})",
+                         [{c: row.get(c) for c in _FINANCIALS_COLUMNS} for row in rows])
 
 
 def query_financials(code: str | None = None) -> list[dict]:
@@ -1247,7 +1263,9 @@ def query_financials(code: str | None = None) -> list[dict]:
 
 def query_financials_counts() -> dict[tuple[int, int, str], int]:
     with get_conn() as conn:
-        cur = conn.execute("SELECT year, quarter, market, COUNT(*) AS n FROM financials GROUP BY year, quarter, market")
+        # 只算有現金流量的列：舊版只存損益與權益，這樣回補時會把那些季重抓一次補齊新欄位
+        cur = conn.execute("SELECT year, quarter, market, COUNT(operating_cf) AS n FROM financials "
+                           "GROUP BY year, quarter, market")
         return {(r["year"], r["quarter"], r["market"]): r["n"] for r in cur.fetchall()}
 
 

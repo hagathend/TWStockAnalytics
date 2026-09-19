@@ -5,6 +5,11 @@
 - 毛利率／營益率用單季數字計算（反映最新一季的獲利能力）
 - ROE（年化）＝累計歸屬母公司淨利 ÷ 期末歸屬母公司權益 × (4 ÷ 季別)
 - 近四季 EPS＝最近四個單季 EPS 相加（四季都要有）
+- 資產負債比率用期末數：負債比＝負債 ÷ 資產、流動比＝流動資產 ÷ 流動負債（金融業沒有流動分類，為 None）
+- ROA（年化）＝累計淨利 ÷ 期末資產 × (4 ÷ 季別)
+- 杜邦分析（年化）：ROE ≈ 淨利率 × 總資產週轉率 × 權益乘數（淨利用歸屬母公司，營收為合併數，所以乘積與 ROE 會有些微差距）
+- 現金流量：單季營業／投資／籌資現金流；自由現金流＝營業＋投資現金流（台股網站常見算法，投資含資本支出以外的項目）；
+  盈餘品質＝累計營業現金流 ÷ 累計淨利（長期小於 1 代表帳上賺的錢沒有真的收到現金）
 """
 
 import time
@@ -71,7 +76,12 @@ def backfill(quarters: int = DEFAULT_BACKFILL_QUARTERS, progress=None, sleep_sec
 
 
 _FRAME_COLUMNS = ["code", "year", "quarter", "label", "eps_cum", "eps_q", "revenue_q", "gross_margin",
-                  "operating_margin", "roe_annualized", "eps_ttm"]
+                  "operating_margin", "roe_annualized", "eps_ttm", "net_income_q", "debt_ratio", "current_ratio",
+                  "roa_annualized", "net_margin", "asset_turnover", "equity_multiplier", "operating_cf_q",
+                  "investing_cf_q", "financing_cf_q", "free_cf_q", "ocf_to_net_income"]
+_NUMERIC_COLUMNS = ("revenue", "gross_profit", "operating_income", "net_income", "eps", "equity", "total_assets",
+                    "total_liabilities", "current_assets", "current_liabilities", "operating_cf", "investing_cf",
+                    "financing_cf")
 
 
 def _compute(rows: list[dict]) -> pd.DataFrame:
@@ -79,8 +89,8 @@ def _compute(rows: list[dict]) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame(columns=_FRAME_COLUMNS)
     df = pd.DataFrame(rows).sort_values(["code", "year", "quarter"]).reset_index(drop=True)
-    for column in ("revenue", "gross_profit", "operating_income", "net_income", "eps", "equity"):
-        df[column] = pd.to_numeric(df[column], errors="coerce")
+    for column in _NUMERIC_COLUMNS:
+        df[column] = pd.to_numeric(df[column], errors="coerce") if column in df else float("nan")
     grouped = df.groupby("code", sort=False)
     period = df["year"] * 4 + df["quarter"]
     prev_is_last_quarter = (grouped["year"].shift(1) == df["year"]) & (grouped["quarter"].shift(1) == df["quarter"] - 1)
@@ -103,6 +113,23 @@ def _compute(rows: list[dict]) -> pd.DataFrame:
     consecutive = (period - df.groupby("code", sort=False)["year"].shift(3) * 4
                    - df.groupby("code", sort=False)["quarter"].shift(3)) == 3
     out["eps_ttm"] = rolling.where(consecutive)
+
+    def ratio(numerator, denominator):
+        return numerator / denominator.where(denominator != 0)
+
+    annualize = 4 / df["quarter"]
+    out["net_income_q"] = single("net_income")
+    out["debt_ratio"] = ratio(df["total_liabilities"], df["total_assets"]) * 100
+    out["current_ratio"] = ratio(df["current_assets"], df["current_liabilities"]) * 100
+    out["roa_annualized"] = ratio(df["net_income"], df["total_assets"]) * annualize * 100
+    out["net_margin"] = ratio(df["net_income"], df["revenue"]) * 100
+    out["asset_turnover"] = ratio(df["revenue"], df["total_assets"]) * annualize
+    out["equity_multiplier"] = ratio(df["total_assets"], df["equity"])
+    out["operating_cf_q"], out["investing_cf_q"] = single("operating_cf"), single("investing_cf")
+    out["financing_cf_q"] = single("financing_cf")
+    out["free_cf_q"] = out["operating_cf_q"] + out["investing_cf_q"]
+    # 淨利是負的時候比值沒有意義（負除負會變成好看的正數）
+    out["ocf_to_net_income"] = ratio(df["operating_cf"], df["net_income"].where(df["net_income"] > 0))
     return out[_FRAME_COLUMNS]
 
 
@@ -137,4 +164,7 @@ def summarize_for_prompt(code: str) -> str | None:
                      f"營益率 {num(row.operating_margin, '.1f', '%')}、ROE（年化）{num(row.roe_annualized, '.1f', '%')}")
     last = frame.iloc[-1]
     lines.append(f"近四季 EPS {num(last['eps_ttm'], '.2f', ' 元')}")
+    lines.append(f"{last['label']} 負債比 {num(last['debt_ratio'], '.1f', '%')}、流動比 {num(last['current_ratio'], '.0f', '%')}、"
+                 f"ROA（年化）{num(last['roa_annualized'], '.1f', '%')}、"
+                 f"累計營業現金流 ÷ 淨利 {num(last['ocf_to_net_income'], '.2f', ' 倍')}")
     return "\n".join(lines)
