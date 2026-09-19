@@ -44,13 +44,14 @@ from src.config_ai import (
     save_report_settings,
     save_scraping_settings,
 )
-from src import compare, config_screener, live_quotes, subscriptions, config_watchlist, day_trading, dividend_history, history, scheduled_ai
+from src import compare, config_screener, live_quotes, storage_location, subscriptions, config_watchlist, day_trading, dividend_history, history, scheduled_ai
 from src.config_watchlist import add_stocks, load_watchlist
 from src.market_analysis import build_market_analysis_prompt, save_market_analysis
 from src.report_pdf import markdown_to_pdf
 from src import (alerts, backtest, calendar_events, desktop, financials, futures, pe_river, rankings, fundamentals, heatmap, market_breadth, market_index, notify, portfolio,
                  ownership, prediction_views, predictions,
                  revenue, shareholding, signals, ui, updater)
+from src import config as config_paths
 from src.config import IS_INSTALLED
 from src.codex_cli import _executable as find_codex_executable
 from src.config_app import load_app_settings, save_app_settings
@@ -1785,8 +1786,85 @@ def ai_analysis_page():
 # ─────────────────────────────── AI 設定 ───────────────────────────────
 
 
+_TABLE_LABELS = {
+    "news": "新聞（含全文與 AI 摘要）", "stock_price": "股價", "institutional": "三大法人", "margin": "融資融券",
+    "valuation": "本益比／殖利率", "month_revenue": "月營收", "financials": "季度財報", "shareholding": "股權分散",
+    "foreign_holding": "外資持股", "sbl_short": "借券賣出", "day_trading": "現股當沖", "stock_analysis": "個股分析",
+    "market_analysis": "大盤分析", "ai_picks": "新聞焦點", "ai_analysis_summary": "新聞總結", "predictions": "AI 預測",
+    "collect_log": "收集紀錄", "dividend_events": "除權息預告", "market_index": "加權指數",
+    "futures_institutional": "期貨法人", "trades": "交易紀錄", "alert_events": "提醒紀錄",
+}
+
+
+@st.cache_data(ttl=600, show_spinner="計算各類資料大小中...")
+def _cached_table_sizes(db_path: str) -> list[dict]:
+    return storage_location.table_sizes()
+
+
+def _move_database():
+    ok, message = storage_location.move_database(st.session_state.get("storage_target", ""),
+                                                 delete_old=st.session_state.get("storage_delete_old", False))
+    st.session_state["storage_notice"] = (ok, message)
+    if ok:
+        st.cache_data.clear()  # 快取裡的資料來自舊檔案，清掉重讀
+
+
+def _vacuum_database():
+    st.session_state["storage_notice"] = storage_location.vacuum()
+    _cached_table_sizes.clear()
+
+
+def _render_storage_settings():
+    info = storage_location.usage()
+    notice = st.session_state.pop("storage_notice", None)
+    with ui.panel("資料庫容量", "所有收集的資料與分析結果都存在這個 SQLite 檔案"):
+        if info["location_error"]:
+            st.warning(info["location_error"])
+        if notice:
+            (st.success if notice[0] else st.error)(notice[1])
+        ui.cards([
+            {"label": "資料庫大小", "value": storage_location.format_bytes(info["size"])},
+            {"label": "可回收空間", "value": storage_location.format_bytes(info["reclaimable"]),
+             "sub": "刪除資料後留下的空白，壓縮可以釋放"},
+            {"label": "所在磁碟剩餘空間", "value": storage_location.format_bytes(info["free_disk"])},
+        ])
+        ui.info_grid([("目前位置", info["path"], True),
+                      ("位置設定", "預設位置" if info["is_default"] else "自訂位置", True)])
+        backfill_running = desktop.backfill_status()["running"]
+        st.button("壓縮資料庫", key="storage_vacuum", on_click=_vacuum_database, disabled=backfill_running,
+                  help="重整檔案、釋放可回收空間；資料量大時要等一段時間，期間不要收集資料")
+
+    with ui.panel("各類資料用量", "依每一欄資料長度估算（不含索引），用來看哪類資料佔最多空間"):
+        sizes = _cached_table_sizes(info["path"])
+        if sizes:
+            total = sum(r["bytes"] for r in sizes) or 1
+            view = pd.DataFrame([{"資料": _TABLE_LABELS.get(r["table"], r["table"]), "筆數": r["rows"],
+                                  "估計大小": storage_location.format_bytes(r["bytes"]),
+                                  "佔比%": r["bytes"] / total * 100} for r in sizes])
+            st.dataframe(_styled_table(view, thousands=["筆數"], decimals=["佔比%"]), hide_index=True,
+                         width="stretch", key="storage_table_sizes")
+
+    with ui.panel("搬移資料庫", "搬到空間比較大的磁碟；搬完立即生效，每日排程下次執行也會用新位置"):
+        st.text_input("新的資料夾", key="storage_target", placeholder="例如 D:\\TWStockData",
+                      help="貼上完整的資料夾路徑；資料夾不存在會自動建立，裡面不能已經有 tw_stock.db")
+        st.checkbox("搬完後刪除原本的資料庫檔案", key="storage_delete_old",
+                    help="不勾選會保留原檔當備份，確認新位置正常後可以自己刪除")
+        col_move, col_default, _ = st.columns([1, 1.3, 2])
+        col_move.button("搬移", type="primary", width="stretch", key="storage_move", on_click=_move_database,
+                        disabled=backfill_running)
+        if not info["is_default"]:
+            col_default.button("搬回預設位置", width="stretch", key="storage_move_default", disabled=backfill_running,
+                               on_click=lambda: (st.session_state.__setitem__("storage_target",
+                                                                              str(config_paths.DEFAULT_DB_DIR)),
+                                                 _move_database()))
+        if backfill_running:
+            st.caption("正在下載歷史資料，完成後才能搬移或壓縮")
+        else:
+            st.caption("搬移期間請不要按收集資料；資料庫有幾百 MB 時需要數十秒")
+
+
 def ai_settings_page():
-    ui.page_header("AI 設定", "分析引擎與內文擷取服務")
+    ui.page_header("AI 設定", "分析引擎、內文擷取服務與資料儲存位置")
 
     tab, body = ui.page_tabs("ai_settings", NAV_TABS["ai_settings"])
     with body:
@@ -1831,6 +1909,8 @@ def ai_settings_page():
         elif tab == "每日排程":
             with ui.panel("每日排程", "自動收集的時間，以及收集完要用 Codex 做哪些分析"):
                 _render_schedule_setup()
+        elif tab == "資料儲存":
+            _render_storage_settings()
         elif tab == "Firecrawl":
             with ui.panel("Firecrawl 內文擷取", "選用・免費額度每月 1000 次，沒設定 Key 會自動改用本機 Playwright"):
                 scraping_settings = load_scraping_settings()
@@ -3159,6 +3239,8 @@ def _render_sidebar_footer():
     """所有頁面共用的側邊欄底部：新版本提示與版本"""
     with st.sidebar:
         st.divider()
+        if config_paths.DB_LOCATION_ERROR:
+            st.warning("找不到自訂位置的資料庫（磁碟沒接上？），目前暫用預設位置。詳見「AI 設定 › 資料儲存」")
         _render_update_notice()
         st.caption(f"台股分析 v{__version__}")
 
@@ -3173,7 +3255,7 @@ NAV_TABS = {
     "calendar": ["持股與觀察名單", "其他提醒", "全市場除權息", "公開申購"],
     "ai": ["新聞深度分析", "大盤籌碼分析", "預測追蹤", "手動貼上"],
     "history": ["新聞", "新聞焦點", "個股分析", "大盤分析", "AI 預測"],
-    "ai_settings": ["Codex CLI", "每日排程", "Firecrawl"],
+    "ai_settings": ["Codex CLI", "每日排程", "Firecrawl", "資料儲存"],
 }
 
 ONBOARDING_NEEDED = _onboarding_needed()
