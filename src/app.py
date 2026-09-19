@@ -1831,23 +1831,31 @@ def _render_watchlist_tab(signal_df: pd.DataFrame):
         if clicked is not None and clicked < len(codes):
             _go_to_detail(codes[clicked])
         selected = [codes[i] for i in rows_checked if i < len(codes)]
+        # AI 分析：有勾選就只分析勾選的，沒勾就分析整個名單
+        ai_targets = [{"code": c, "name": stocks[c]} for c in (selected or codes)]
+        ai_label = f"AI 分析勾選的 {len(selected)} 檔" if selected else f"AI 分析全部 {len(codes)} 檔"
         with actions:
-            col_info, col_remove, col_detail = st.columns([3, 1.2, 1.2], vertical_alignment="center")
+            col_info, col_remove, col_detail, col_ai = st.columns([2.4, 1.1, 1.1, 1.3], vertical_alignment="center")
             col_info.caption(f"已勾選 {len(selected)} 檔" if selected else "訊號只計算上市股（上櫃資料源無法回補歷史）")
             col_remove.button("從名單移除", width="stretch", disabled=not selected, key="watch_remove",
                               on_click=_remove_selected_from_group, args=(table_key, group, codes))
             if col_detail.button("開啟個股詳情", width="stretch", disabled=len(selected) != 1, key="watch_open_detail",
                                  help="勾選一檔時可用"):
                 _go_to_detail(selected[0])
+            run_ai = col_ai.button(ai_label, type="primary", width="stretch", key="watch_ai_run",
+                                   help="用 Codex 逐檔分析並儲存（每檔各用一次額度），結果收錄每日報告；沒勾選就分析整個名單")
+        if run_ai:
+            _analyze_stocks_with_codex(ai_targets, "觀察名單")
+
+    today_analysed = [{"code": c, "name": n} for c, n in stocks.items()
+                      if db.query_stock_analysis(_date.today().isoformat(), c)]
+    if today_analysed:
+        with ui.panel("今天的 AI 分析", f"「{group}」今天已分析 {len(today_analysed)} 檔，點開看全文"):
+            _render_saved_analyses(today_analysed)
 
     with ui.panel("名單訊號", "僅上市股・區分今日新出現與持續中的訊號"):
         _render_signal_alerts(list(alerts_by_code.values()), "這個名單今天沒有觸發任何訊號")
 
-    group_stocks = [{"code": code, "name": name} for code, name in stocks.items()]
-    with ui.panel("AI 名單分析", f"逐檔用 Codex 分析「{group}」的 {len(group_stocks)} 檔（每檔各用一次額度），結果收錄每日報告"):
-        if st.button("用 Codex 逐檔分析這個名單並儲存", type="primary", key="watch_ai_run"):
-            _analyze_stocks_with_codex(group_stocks, "觀察名單")
-        _render_saved_analyses(group_stocks)
 
 
 def screener_page():
