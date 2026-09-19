@@ -751,25 +751,31 @@ _RIVER_COLORS = {10: "rgba(34, 181, 115, 0.22)", 25: "rgba(34, 181, 115, 0.12)",
 
 
 def _render_pe_river_panel(code: str):
-    result = pe_river.river(code)
-    if not result:
+    results = {key: pe_river.river(code, metric=key) for key in pe_river.METRICS}
+    available = [key for key, value in results.items() if value]
+    if not available:
         return
-    frame, multiples = result["frame"], result["multiples"]
-    percentile = result["percentile"]
-    position = "偏便宜" if percentile <= 25 else "偏貴" if percentile >= 75 else "中間"
-    with ui.panel("本益比河流圖", f"目前 {result['current_pe']:.1f} 倍・位於近 {result['days']} 個交易日第 "
-                               f"{percentile:.0f} 百分位（{position}）・只比較自己的歷史，不同產業不能互比"):
+    with ui.panel("河流圖", "用這檔自己過去的倍數區間畫出價格帶，看目前股價偏貴還是偏便宜；只比較自己的歷史，不同產業不能互比"):
+        labels = {key: pe_river.METRICS[key]["label"] for key in available}
+        key = st.segmented_control("倍數", available, default=available[0], format_func=labels.get,
+                                   key=f"river_metric_{code}") or available[0]
+        result = results[key]
+        frame, multiples = result["frame"], result["multiples"]
+        percentile = result["percentile"]
+        position = "偏便宜" if percentile <= 25 else "偏貴" if percentile >= 75 else "中間"
+        st.caption(f"{labels[key]}目前 {result['current_pe']:.2f} 倍・位於近 {result['days']} 個交易日第 "
+                   f"{percentile:.0f} 百分位（{position}）・價格帶＝推算的{pe_river.METRICS[key]['base']} × 歷史倍數")
         fig = go.Figure()
         levels = list(pe_river.BAND_PERCENTILES)
         for i, p in enumerate(levels):
-            fig.add_scatter(x=frame["date"], y=frame[f"band_{p}"], mode="lines", name=f"{multiples[p]:.1f} 倍（{p}%）",
+            fig.add_scatter(x=frame["date"], y=frame[f"band_{p}"], mode="lines", name=f"{multiples[p]:.2f} 倍（{p}%）",
                             line={"width": 1, "color": "rgba(201, 209, 222, 0.35)"},
                             fill="tonexty" if i else None, fillcolor=_RIVER_COLORS[p],
-                            hovertemplate=f"%{{x}}<br>{multiples[p]:.1f} 倍價格 %{{y:,.2f}}<extra></extra>")
+                            hovertemplate=f"%{{x}}<br>{multiples[p]:.2f} 倍價格 %{{y:,.2f}}<extra></extra>")
         fig.add_scatter(x=frame["date"], y=frame["close"], mode="lines", name="收盤價",
                         line={"color": ui.ACCENT_COLOR, "width": 2.2})
         fig.update_xaxes(type="category", nticks=8)
-        st.plotly_chart(ui.style_chart(fig, height=320), width="stretch", key=f"pe_river_{code}")
+        st.plotly_chart(ui.style_chart(fig, height=320), width="stretch", key=f"river_{key}_{code}")
 
 
 def _render_history_panel(code: str):

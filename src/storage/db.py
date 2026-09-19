@@ -1256,11 +1256,13 @@ def query_valuation_dates(market: str = "TWSE") -> set[str]:
         return {r["date"] for r in conn.execute("SELECT DISTINCT date FROM valuation WHERE market = ?", (market,)).fetchall()}
 
 
-def query_pe_history(code: str, since: str) -> list[dict]:
-    """同一天的收盤價與本益比（本益比河流圖用）"""
+def query_pe_history(code: str, since: str, column: str = "pe_ratio") -> list[dict]:
+    """同一天的收盤價與本益比或淨值比（河流圖用）；回傳欄位名一律叫 pe"""
+    if column not in ("pe_ratio", "pb_ratio"):
+        raise ValueError(column)
     with get_conn() as conn:
         cur = conn.execute(
-            """SELECT v.date, p.close, v.pe_ratio AS pe FROM valuation v
+            f"""SELECT v.date, p.close, v.{column} AS pe FROM valuation v
                JOIN stock_price p ON p.date = v.date AND p.code = v.code AND p.market = v.market
                WHERE v.code = ? AND v.date >= ? ORDER BY v.date""",
             (code, since),
