@@ -1405,3 +1405,16 @@ def query_news_without_related_code(limit: int = 5000) -> list[dict]:
 def update_news_related_code(news_id: int, related_code: str | None):
     with get_conn() as conn:
         conn.execute("UPDATE news SET related_code = ? WHERE id = ?", (related_code, news_id))
+
+
+def query_issued_shares(as_of: str) -> list[tuple[str, int]]:
+    """[(代號, 發行股數)]：這一天或之前最新一筆外資持股資料上的發行股數（只有上市股）"""
+    with get_conn() as conn:
+        cur = conn.execute(
+            """SELECT f.code, f.issued_shares FROM foreign_holding f
+               JOIN (SELECT code, MAX(date) AS d FROM foreign_holding WHERE date <= ? GROUP BY code) latest
+                 ON f.code = latest.code AND f.date = latest.d
+               WHERE f.issued_shares > 0""",
+            (as_of,),
+        )
+        return [(r["code"], r["issued_shares"]) for r in cur.fetchall()]

@@ -46,7 +46,7 @@ from src import config_watchlist, history, scheduled_ai
 from src.config_watchlist import add_stocks, load_watchlist
 from src.market_analysis import build_market_analysis_prompt, save_market_analysis
 from src.report_pdf import markdown_to_pdf
-from src import (alerts, backtest, calendar_events, desktop, financials, futures, pe_river, fundamentals, heatmap, market_breadth, market_index, notify, portfolio,
+from src import (alerts, backtest, calendar_events, desktop, financials, futures, pe_river, rankings, fundamentals, heatmap, market_breadth, market_index, notify, portfolio,
                  ownership, prediction_views, predictions,
                  revenue, shareholding, signals, ui, updater)
 from src.config import IS_INSTALLED
@@ -371,6 +371,39 @@ def _render_futures_panel(selected_date: str):
             st.plotly_chart(ui.style_chart(fig, height=280), width="stretch", key="futures_oi_chart")
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def _cached_ranking_table(date: str) -> pd.DataFrame:
+    return rankings.daily_table(date)
+
+
+_RANK_COLUMNS = {
+    "rank": "名次", "code": "代號", "name": "名稱", "market": "市場", "close": "收盤", "change_pct": "漲跌%",
+    "volume_lots": "成交量(張)", "turnover_billion": "成交值(億)", "turnover_rate": "週轉率%",
+    "foreign_lots": "外資(張)", "trust_lots": "投信(張)", "dividend_yield": "殖利率%",
+}
+
+
+def _render_rankings(selected_date: str):
+    col_metric, col_market = st.columns([4, 1.2], vertical_alignment="bottom")
+    metric = col_metric.pills("排行項目", list(rankings.METRICS), default="漲幅", key="rank_metric") or "漲幅"
+    market = col_market.segmented_control("市場", list(rankings.MARKETS), default="全部", key="rank_market") or "全部"
+    table = _cached_ranking_table(selected_date)
+    result = rankings.rank(table, metric, market)
+    note = "週轉率只有上市股（需要發行股數）" if metric == "週轉率" else "只算個股，不含 ETF 與權證"
+    with ui.panel(f"{metric}排行", f"{selected_date}・{market}・前 {len(result)} 名・{note}・點一下股票開啟個股詳情"):
+        if result.empty:
+            st.caption("這天沒有資料")
+            return
+        view = result.assign(rank=range(1, len(result) + 1), market=result["market"].map({"TWSE": "上市", "TPEx": "上櫃"}))
+        view = view[list(_RANK_COLUMNS)].rename(columns=_RANK_COLUMNS)
+        styler = _styled_table(view, signed=["漲跌%", "外資(張)", "投信(張)"],
+                               thousands=["成交量(張)", "外資(張)", "投信(張)"],
+                               decimals=["收盤", "漲跌%", "成交值(億)", "週轉率%", "殖利率%"])
+        clicked = _clickable_table(styler, "rank_table", width="stretch", hide_index=True, height=600)
+        if clicked is not None and clicked < len(result):
+            _go_to_detail(result.iloc[clicked]["code"])
+
+
 def _render_industry_heatmap(selected_date: str):
     with ui.panel("產業熱力圖", "方塊大小＝成交值、顏色＝漲跌幅（紅漲綠跌）・點產業可放大，點上方路徑返回"):
         col_market, _ = st.columns([1, 3])
@@ -403,6 +436,8 @@ def home_page():
             _render_futures_panel(selected_date)
         elif tab == "產業熱力圖":
             _render_industry_heatmap(selected_date)
+        elif tab == "排行":
+            _render_rankings(selected_date)
         elif tab == "股價":
             filter_code = st.text_input("搜尋", placeholder="依代號或名稱搜尋，例如 2330 或 台積",
                                         key="price_code", label_visibility="collapsed")
@@ -2538,7 +2573,7 @@ def _render_sidebar_footer():
 
 # 側邊欄導覽：大項目＝頁面，子項目＝頁內分頁（目前所在的大項目才展開子項目）
 NAV_TABS = {
-    "home": ["市場溫度計", "期貨法人", "產業熱力圖", "股價", "三大法人", "融資融券", "新聞", "收集紀錄"],
+    "home": ["市場溫度計", "期貨法人", "產業熱力圖", "排行", "股價", "三大法人", "融資融券", "新聞", "收集紀錄"],
     "portfolio": ["持倉明細", "持股訊號", "AI 持股分析", "新增交易", "交易紀錄", "已實現損益"],
     "detail": ["技術面", "籌碼面", "基本面", "新聞", "AI 分析"],
     "screener": ["篩選器", "觀察名單", "訊號回測"],
