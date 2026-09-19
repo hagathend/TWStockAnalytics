@@ -83,9 +83,12 @@ src/
 ├── history.py             歷史查詢：新聞焦點上榜次數統計、依期間／方向／狀態篩選 AI 預測（查詢 SQL 在 db.search_*）
 ├── alerts.py / notify.py  條件提醒與 Windows 通知；calendar_events.py 行事曆
 ├── market_breadth.py / market_index.py / heatmap.py / futures.py   市場溫度計、加權指數與相對強弱、產業熱力圖、期貨法人
-├── revenue.py / financials.py / pe_river.py   月營收趨勢、季度財報、本益比河流圖
+├── revenue.py / financials.py / pe_river.py   月營收趨勢、季度財報（含負債比、流動比、ROA、杜邦、現金流）、本益比／淨值比河流圖
+├── dividend_history.py    歷年股利、盈餘分配率、殖利率與填息天數（FinMind 現抓）
+├── day_trading.py         現股當沖回補、當沖比；rankings.py 排行榜；compare.py 個股比較
+├── subscriptions.py       公開申購抽籤日程與價差；live_quotes.py 盤中即時報價整理（持股即時損益）
 ├── shareholding.py / ownership.py / price_levels.py   千張大戶、外資持股與借券、支撐壓力與成交量密集區
-├── charting.py            個股 K 線圖（plotly + FinMind）
+├── charting.py            個股 K 線圖（plotly + FinMind）：日K／週K／月K（由日線合併）、KD／MACD／RSI 副圖
 ├── report_pdf.py          報告 Markdown → PDF（Playwright）
 ├── collect_all.py         每日收集流程；backfill.py 歷史補收集
 ├── scheduled_ai.py        收集後的 AI 分析（新聞／持股／觀察名單，各自在 codex_settings.json 開關，預設只分析新聞）
@@ -95,7 +98,8 @@ src/
 ├── ai_providers.py        舊的 Ollama／雲端 API 封裝（已停用，保留程式碼）
 ├── collectors/            twse_official（TWSE rwd + TPEx）、fundamentals、finmind、news_crawler、news_rss、
 │                          firecrawl_fetcher、article_fetcher、twse_market（加權指數）、twse_ownership（外資持股／借券）、
-│                          dividends、tdcc（集保股權分散）、mops_revenue／mops_financials（公開資訊觀測站舊站）、taifex
+│                          dividends、tdcc（集保股權分散）、mops_revenue／mops_financials（公開資訊觀測站舊站）、taifex、
+│                          day_trading（當沖）、company_profile（公司資料 t05st03）、realtime（盤中報價 mis.twse）
 ├── config_watchlist.py    觀察名單（可多個名單組合，存 data/watchlist.json；收集、提醒、報告用所有名單的聯集）
 └── storage/db.py          SQLite 全部讀寫
 scripts/                   run_daily_collect.py（排程呼叫）、backfill_history.py、migrate_to_installed.py
@@ -138,7 +142,8 @@ AI 新聞分析（Codex CLI，收集後自動觸發）：
 | `shareholding` | date+code+level | 集保股權分散（每週） |
 | `foreign_holding` / `sbl_short` | date+code | 外資持股比例／借券賣出餘額（上市） |
 | `dividend_events` | ex_date+market+code | 除權息預告 |
-| `financials` | year+quarter+market+code | 季報（年初累計值，單季值由 `financials.py` 相減） |
+| `financials` | year+quarter+market+code | 季報損益、資產負債（期末）、現金流量（年初累計值，單季值由 `financials.py` 相減） |
+| `day_trading` | date+market+code | 現股當沖成交股數與買賣金額（當沖比＝÷ `stock_price.volume`） |
 | `futures_institutional` | date+commodity+identity | 台指期三大法人交易與未平倉口數 |
 | `trading_calendar` | date+market | 補收集時記住的非交易日 |
 | `collect_log` | id | 每步驟成功/失敗紀錄，debug 收集問題先看這裡 |
