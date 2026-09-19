@@ -1420,3 +1420,23 @@ def query_issued_shares(as_of: str) -> list[tuple[str, int]]:
             (as_of,),
         )
         return [(r["code"], r["issued_shares"]) for r in cur.fetchall()]
+
+
+def query_close_series(codes: list[str], since: str) -> dict[str, list[float]]:
+    """{代號: [收盤價…]}（由舊到新），表格內的迷你走勢圖用；一次查多檔"""
+    codes = [c for c in dict.fromkeys(codes) if c]
+    if not codes:
+        return {}
+    result: dict[str, list[float]] = {code: [] for code in codes}
+    with get_conn() as conn:
+        for start in range(0, len(codes), 500):  # SQLite 參數數量有上限，分批查
+            chunk = codes[start:start + 500]
+            cur = conn.execute(
+                f"""SELECT code, close FROM stock_price
+                    WHERE date >= ? AND close > 0 AND code IN ({",".join("?" * len(chunk))})
+                    ORDER BY code, date""",
+                (since, *chunk),
+            )
+            for row in cur.fetchall():
+                result[row["code"]].append(float(row["close"]))
+    return result

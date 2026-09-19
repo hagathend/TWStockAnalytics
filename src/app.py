@@ -1572,8 +1572,22 @@ def _render_backtest_tab():
             st.caption("這個訊號在樣本期間沒有出現")
 
 
+_TREND_DAYS = 90  # 迷你走勢圖涵蓋的日曆天（約 60 個交易日）
+_TREND_COLUMN = "60日走勢"
+
+
+def _trend_config() -> dict:
+    return {_TREND_COLUMN: st.column_config.LineChartColumn(_TREND_COLUMN, width="small",
+                                                            help="近約 60 個交易日的收盤價走勢")}
+
+
+def _trend_series(codes: list[str]) -> dict[str, list[float]]:
+    since = (_date.today() - timedelta(days=_TREND_DAYS)).isoformat()
+    return db.query_close_series(list(codes), since)
+
+
 _SCREEN_COLUMNS = {
-    "code": "代號", "name": "名稱", "close": "收盤", "change_pct": "漲跌%",
+    "code": "代號", "name": "名稱", "trend": _TREND_COLUMN, "close": "收盤", "change_pct": "漲跌%",
     "return_20d": "20日報酬%", "rs_rank_pct": "相對強弱",
     "foreign_streak": "外資連買賣", "trust_streak": "投信連買賣",
     "vol_ma20_lots": "20日均量(張)", "pe_ratio": "本益比", "dividend_yield": "殖利率%",
@@ -1699,6 +1713,8 @@ def _render_screen_results(result: pd.DataFrame):
             return
         actions = st.container()
         result["vol_ma20_lots"] = (result["vol_ma20"] / 1000).round(0)
+        series = _trend_series(result["code"])
+        result["trend"] = [series.get(code, []) for code in result["code"]]
         view = result[list(_SCREEN_COLUMNS)].rename(columns=_SCREEN_COLUMNS)
         styler = _styled_table(
             view, signed=["漲跌%", "20日報酬%", "外資連買賣", "投信連買賣", "營收年增%", "大戶週增(百分點)", "外資20日增(百分點)"],
@@ -1718,6 +1734,7 @@ def _render_screen_results(result: pd.DataFrame):
                 "相對強弱": st.column_config.ProgressColumn("相對強弱", min_value=0, max_value=100, format="%.0f",
                                                         help="同一天全市場 20 日報酬的百分位排名"),
                 "觸發訊號": st.column_config.TextColumn("觸發訊號", width="large"),
+                **_trend_config(),
             },
         )
         st.session_state["screen_checked_codes"] = [codes[i] for i in rows if i < len(codes)]
@@ -1759,7 +1776,7 @@ def _render_signal_alerts(alerts: list[dict], empty_text: str):
             ui.chips([(signals.SIGNALS[k], "") for k in alert["continuing"]])
 
 
-_WATCH_COLUMNS = {"code": "代號", "name": "名稱", "date": "價格日期", "close": "收盤", "change_pct": "漲跌%",
+_WATCH_COLUMNS = {"code": "代號", "name": "名稱", "trend": _TREND_COLUMN, "date": "價格日期", "close": "收盤", "change_pct": "漲跌%",
                   "new": "今日新訊號", "continuing": "持續中訊號"}
 
 
@@ -1849,12 +1866,13 @@ def _render_watchlist_tab(signal_df: pd.DataFrame):
             st.caption("這個名單還沒有股票。可以在上方輸入代號，或在「篩選器」勾選後加入。")
             return
         rows = []
+        series = _trend_series(list(stocks))
         for code, name in stocks.items():
             quote = db.query_latest_close(code) or {}
             close, change = quote.get("close"), quote.get("change")
             alert = alerts_by_code.get(code, {})
             rows.append({
-                "code": code, "name": name, "date": quote.get("date"), "close": close,
+                "code": code, "name": name, "trend": series.get(code, []), "date": quote.get("date"), "close": close,
                 "change_pct": change / (close - change) * 100 if close is not None and change is not None and close - change else None,
                 "new": "、".join(signals.SIGNALS[k] for k in alert.get("new", [])),
                 "continuing": "、".join(signals.SIGNALS[k] for k in alert.get("continuing", [])),
@@ -1867,7 +1885,8 @@ def _render_watchlist_tab(signal_df: pd.DataFrame):
             _styled_table(view, signed=["漲跌%"], decimals=["收盤", "漲跌%"]), table_key,
             width="stretch", hide_index=True,
             column_config={"今日新訊號": st.column_config.TextColumn("今日新訊號", width="medium"),
-                           "持續中訊號": st.column_config.TextColumn("持續中訊號", width="large")},
+                           "持續中訊號": st.column_config.TextColumn("持續中訊號", width="large"),
+                           **_trend_config()},
         )
         if clicked is not None and clicked < len(codes):
             _go_to_detail(codes[clicked])
