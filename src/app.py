@@ -1046,18 +1046,30 @@ def _render_realized_panel():
             st.code(portfolio.build_review_prompt(chosen), language=None)
 
 
-def _analyze_all_positions(positions: list[dict]):
+def _analyze_stocks_with_codex(stocks: list[dict], label: str):
+    """逐檔用 Codex 做個股分析並儲存（持股、觀察名單共用），顯示進度與結果"""
     progress = st.progress(0.0, text="準備中...")
 
     def _update(done, total, message):
         progress.progress(done / total if total else 0.0, text=f"{message}（{done + 1}/{total}）")
 
-    outcome = scheduled_ai.analyze_stocks(positions, _date.today().isoformat(), progress=_update, skip_existing=False)
+    outcome = scheduled_ai.analyze_stocks(stocks, _date.today().isoformat(), progress=_update, skip_existing=False)
     progress.empty()
     if outcome["failed"]:
-        st.error("部分分析失敗：\n" + "\n".join(f"{code}：{message}" for code, message in outcome["failed"]))
+        st.error(f"完成 {len(outcome['done'])} 檔；部分分析失敗：\n"
+                 + "\n".join(f"{code}：{message}" for code, message in outcome["failed"]))
     else:
-        st.success(f"已完成 {len(outcome['done'])} 檔持股分析，並收錄到每日報告")
+        st.success(f"已完成 {len(outcome['done'])} 檔{label}分析，並收錄到每日報告")
+
+
+def _render_saved_analyses(stocks: list[dict]):
+    """列出這些股票今天已儲存的分析（可展開）"""
+    today = _date.today().isoformat()
+    for stock in stocks:
+        saved = db.query_stock_analysis(today, stock["code"])
+        if saved:
+            with st.expander(f"{stock['code']} {stock['name']}・今天的分析（{saved[0]['created_at']}）"):
+                st.markdown(_md_linebreaks(saved[0]["analysis"]))
 
 
 def portfolio_page():
@@ -1097,13 +1109,8 @@ def portfolio_page():
         elif tab == "AI 持股分析":
             with ui.panel("AI 持股分析", "逐檔用 Codex 分析，提示詞附上你的成本與損益，列出續抱／減碼／停損的觀察條件"):
                 if st.button("用 Codex 逐檔分析持股並儲存", type="primary"):
-                    _analyze_all_positions(positions)
-                today = _date.today().isoformat()
-                for p in positions:
-                    saved = db.query_stock_analysis(today, p["code"])
-                    if saved:
-                        with st.expander(f"{p['code']} {p['name']}・今天的分析（{saved[0]['created_at']}）"):
-                            st.markdown(_md_linebreaks(saved[0]["analysis"]))
+                    _analyze_stocks_with_codex(positions, "持股")
+                _render_saved_analyses(positions)
         elif tab == "新增交易":
             with ui.panel("新增交易", "買進、賣出都記一筆；手續費與證交稅留空會自動試算"):
                 _render_add_trade_form()
@@ -1812,6 +1819,12 @@ def _render_watchlist_tab(signal_df: pd.DataFrame):
 
     with ui.panel("名單訊號", "僅上市股・區分今日新出現與持續中的訊號"):
         _render_signal_alerts(list(alerts_by_code.values()), "這個名單今天沒有觸發任何訊號")
+
+    group_stocks = [{"code": code, "name": name} for code, name in stocks.items()]
+    with ui.panel("AI 名單分析", f"逐檔用 Codex 分析「{group}」的 {len(group_stocks)} 檔（每檔各用一次額度），結果收錄每日報告"):
+        if st.button("用 Codex 逐檔分析這個名單並儲存", type="primary", key="watch_ai_run"):
+            _analyze_stocks_with_codex(group_stocks, "觀察名單")
+        _render_saved_analyses(group_stocks)
 
 
 def screener_page():
