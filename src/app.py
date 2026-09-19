@@ -1046,18 +1046,30 @@ def _render_realized_panel():
             st.code(portfolio.build_review_prompt(chosen), language=None)
 
 
-def _analyze_all_positions(positions: list[dict]):
+def _analyze_stocks_with_codex(stocks: list[dict], label: str):
+    """逐檔用 Codex 做個股分析並儲存（持股、觀察名單共用），顯示進度與結果"""
     progress = st.progress(0.0, text="準備中...")
 
     def _update(done, total, message):
         progress.progress(done / total if total else 0.0, text=f"{message}（{done + 1}/{total}）")
 
-    outcome = scheduled_ai.analyze_stocks(positions, _date.today().isoformat(), progress=_update, skip_existing=False)
+    outcome = scheduled_ai.analyze_stocks(stocks, _date.today().isoformat(), progress=_update, skip_existing=False)
     progress.empty()
     if outcome["failed"]:
-        st.error("部分分析失敗：\n" + "\n".join(f"{code}：{message}" for code, message in outcome["failed"]))
+        st.error(f"完成 {len(outcome['done'])} 檔；部分分析失敗：\n"
+                 + "\n".join(f"{code}：{message}" for code, message in outcome["failed"]))
     else:
-        st.success(f"已完成 {len(outcome['done'])} 檔持股分析，並收錄到每日報告")
+        st.success(f"已完成 {len(outcome['done'])} 檔{label}分析，並收錄到每日報告")
+
+
+def _render_saved_analyses(stocks: list[dict]):
+    """列出這些股票今天已儲存的分析（可展開）"""
+    today = _date.today().isoformat()
+    for stock in stocks:
+        saved = db.query_stock_analysis(today, stock["code"])
+        if saved:
+            with st.expander(f"{stock['code']} {stock['name']}・今天的分析（{saved[0]['created_at']}）"):
+                st.markdown(_md_linebreaks(saved[0]["analysis"]))
 
 
 def portfolio_page():
@@ -1097,13 +1109,8 @@ def portfolio_page():
         elif tab == "AI 持股分析":
             with ui.panel("AI 持股分析", "逐檔用 Codex 分析，提示詞附上你的成本與損益，列出續抱／減碼／停損的觀察條件"):
                 if st.button("用 Codex 逐檔分析持股並儲存", type="primary"):
-                    _analyze_all_positions(positions)
-                today = _date.today().isoformat()
-                for p in positions:
-                    saved = db.query_stock_analysis(today, p["code"])
-                    if saved:
-                        with st.expander(f"{p['code']} {p['name']}・今天的分析（{saved[0]['created_at']}）"):
-                            st.markdown(_md_linebreaks(saved[0]["analysis"]))
+                    _analyze_stocks_with_codex(positions, "持股")
+                _render_saved_analyses(positions)
         elif tab == "新增交易":
             with ui.panel("新增交易", "買進、賣出都記一筆；手續費與證交稅留空會自動試算"):
                 _render_add_trade_form()
@@ -1457,6 +1464,19 @@ def _cached_signal_history(as_of: str | None = None) -> pd.DataFrame:
     return signals.load_signal_history(as_of=as_of)
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def _cached_screen_tables() -> dict[str, pd.DataFrame]:
+    """選股篩選要合併的各種最新資料（基本面、營收訊號、大戶、外資持股、季報、本益比百分位），快取 10 分鐘"""
+    return {
+        "fundamentals": fundamentals.latest_fundamentals(),
+        "revenue": revenue.latest_signals()[["code", "revenue_high_12m", "yoy_growth_streak"]],
+        "shareholding": shareholding.latest_table()[["code", "big1000_pct", "big1000_pct_change"]],
+        "ownership": ownership.latest_table(),
+        "financials": financials.latest_table(),
+        "pe_percentile": pe_river.latest_percentiles(),
+    }
+
+
 @st.cache_data(ttl=600, show_spinner="計算回測資料中...")
 def _cached_backtest_frame() -> pd.DataFrame:
     """回測用盡量長的歷史（本地資料庫有多少用多少）"""
@@ -1594,22 +1614,23 @@ def _render_screen_tab(signal_df: pd.DataFrame):
 
     result = signals.screen(signal_df, [labels[c] for c in chosen], min_avg_volume_lots=min_lots,
                             mode="all" if mode == "全部符合" else "any")
-    result = fundamentals.attach_fundamentals(result, fundamentals.latest_fundamentals())
+    tables = _cached_screen_tables()
+    result = fundamentals.attach_fundamentals(result, tables["fundamentals"])
     result = fundamentals.apply_filters(result, pe_max=pe_max, yield_min=yield_min, pb_max=pb_max, yoy_min=yoy_min)
     if not result.empty:
-        result = result.merge(revenue.latest_signals()[["code", "revenue_high_12m", "yoy_growth_streak"]], on="code", how="left")
+        result = result.merge(tables["revenue"], on="code", how="left")
         if revenue_high_only:
             result = result[result["revenue_high_12m"] == True]  # noqa: E712 - 欄位含 None，不能用 truthy 判斷
         if yoy_streak_min:
             result = result[result["yoy_growth_streak"].fillna(0) >= yoy_streak_min]
         result["revenue_high_text"] = result["revenue_high_12m"].map({True: "是", False: ""}).fillna("")
-        result = result.merge(shareholding.latest_table()[["code", "big1000_pct", "big1000_pct_change"]], on="code", how="left")
-        result = result.merge(ownership.latest_table(), on="code", how="left")
-        result = result.merge(financials.latest_table(), on="code", how="left")
+        result = result.merge(tables["shareholding"], on="code", how="left")
+        result = result.merge(tables["ownership"], on="code", how="left")
+        result = result.merge(tables["financials"], on="code", how="left")
         for column, minimum in (("roe_annualized", roe_min), ("gross_margin", gross_min), ("eps_ttm", eps_ttm_min)):
             if minimum is not None:
                 result = result[result[column].notna() & (result[column] >= minimum)]
-        result = result.merge(pe_river.latest_percentiles(), on="code", how="left")
+        result = result.merge(tables["pe_percentile"], on="code", how="left")
         if pe_pct_max is not None:
             result = result[result["pe_percentile"].notna() & (result["pe_percentile"] <= pe_pct_max)]
         if foreign_change_min is not None:
@@ -1620,6 +1641,14 @@ def _render_screen_tab(signal_df: pd.DataFrame):
             result = result[result["big1000_pct_change"].notna() & (result["big1000_pct_change"] >= big_change_min)]
         result = result.reset_index(drop=True)
 
+    _render_screen_results(result)
+
+
+@st.fragment
+def _render_screen_results(result: pd.DataFrame):
+    """篩選結果表格。用 fragment：勾選或點擊只重跑這一塊，不會整頁重算篩選條件
+    （以前每點一下整頁重跑 1～2 秒，期間表格變灰、接著的勾選會被吃掉）"""
+    result = result.copy()
     with ui.panel("篩選結果", f"符合 {len(result)} 檔・依相對強弱排序・勾選左邊方框可加入觀察名單・點一下股票開啟個股詳情"):
         notice = st.session_state.pop("screen_notice", None)
         if notice:
@@ -1636,9 +1665,10 @@ def _render_screen_tab(signal_df: pd.DataFrame):
             decimals=["收盤", "漲跌%", "20日報酬%", "本益比", "殖利率%", "淨值比", "營收年增%", "千張大戶%",
                       "大戶週增(百分點)", "外資持股%", "外資20日增(百分點)", "ROE年化%", "毛利率%", "近四季EPS", "本益比百分位"],
         )
-        table_key = f"screen_table_{st.session_state.get('screen_table_version', 0)}"
         stocks = list(zip(result["code"], result["name"]))
         codes = list(result["code"])
+        # 篩選結果換了就換一個表格（勾選依代號還原），避免勾選的「第幾列」對到別檔股票
+        table_key = f"screen_table_{st.session_state.get('screen_table_version', 0)}_{hash(tuple(codes)) & 0xFFFFFFFF:x}"
         checked_codes = st.session_state.get("screen_checked_codes", [])
         rows, clicked = _checkable_table(
             styler, table_key, selected_rows=[codes.index(c) for c in checked_codes if c in codes],
@@ -1801,17 +1831,31 @@ def _render_watchlist_tab(signal_df: pd.DataFrame):
         if clicked is not None and clicked < len(codes):
             _go_to_detail(codes[clicked])
         selected = [codes[i] for i in rows_checked if i < len(codes)]
+        # AI 分析：有勾選就只分析勾選的，沒勾就分析整個名單
+        ai_targets = [{"code": c, "name": stocks[c]} for c in (selected or codes)]
+        ai_label = f"AI 分析勾選的 {len(selected)} 檔" if selected else f"AI 分析全部 {len(codes)} 檔"
         with actions:
-            col_info, col_remove, col_detail = st.columns([3, 1.2, 1.2], vertical_alignment="center")
+            col_info, col_remove, col_detail, col_ai = st.columns([2.4, 1.1, 1.1, 1.3], vertical_alignment="center")
             col_info.caption(f"已勾選 {len(selected)} 檔" if selected else "訊號只計算上市股（上櫃資料源無法回補歷史）")
             col_remove.button("從名單移除", width="stretch", disabled=not selected, key="watch_remove",
                               on_click=_remove_selected_from_group, args=(table_key, group, codes))
             if col_detail.button("開啟個股詳情", width="stretch", disabled=len(selected) != 1, key="watch_open_detail",
                                  help="勾選一檔時可用"):
                 _go_to_detail(selected[0])
+            run_ai = col_ai.button(ai_label, type="primary", width="stretch", key="watch_ai_run",
+                                   help="用 Codex 逐檔分析並儲存（每檔各用一次額度），結果收錄每日報告；沒勾選就分析整個名單")
+        if run_ai:
+            _analyze_stocks_with_codex(ai_targets, "觀察名單")
+
+    today_analysed = [{"code": c, "name": n} for c, n in stocks.items()
+                      if db.query_stock_analysis(_date.today().isoformat(), c)]
+    if today_analysed:
+        with ui.panel("今天的 AI 分析", f"「{group}」今天已分析 {len(today_analysed)} 檔，點開看全文"):
+            _render_saved_analyses(today_analysed)
 
     with ui.panel("名單訊號", "僅上市股・區分今日新出現與持續中的訊號"):
         _render_signal_alerts(list(alerts_by_code.values()), "這個名單今天沒有觸發任何訊號")
+
 
 
 def screener_page():
