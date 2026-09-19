@@ -178,9 +178,12 @@ def _take_table_click(key: str) -> int | None:
 
 
 def _clickable_table(data, key: str, **kwargs):
-    """點任一格（單擊或雙擊）就回傳那一列的位置（沒點回傳 None）。只用「單格選取」，表格左邊不會出現勾選框"""
-    st.dataframe(data, key=key, on_select=partial(_on_table_click, key), selection_mode="single-cell", **kwargs)
-    return _take_table_click(key)
+    """點任一格（單擊或雙擊）就回傳那一列的位置（沒點回傳 None）。只用「單格選取」，表格左邊不會出現勾選框。
+    實際的元件 key 帶版本號，點開的對話框關閉時換版本（見 _clear_table_click）"""
+    widget_key = f"{key}__v{st.session_state.get(f'{key}__version', 0)}"
+    st.dataframe(data, key=widget_key, on_select=partial(_on_table_click, widget_key), selection_mode="single-cell",
+                 **kwargs)
+    return _take_table_click(widget_key)
 
 
 def _checkable_table(data, key: str, selected_rows: list[int] | None = None, **kwargs):
@@ -193,7 +196,15 @@ def _checkable_table(data, key: str, selected_rows: list[int] | None = None, **k
 
 
 def _clear_table_click(key: str):
-    st.session_state[key] = {"selection": {"rows": [], "columns": [], "cells": []}}
+    """對話框關閉時的回呼：換一個新的表格元件。
+    沿用原表格的話，關閉後焦點回到表格，表格會自己再送一次選取（對話框馬上又跳出來、看起來關不掉），
+    而且下一次點擊會被吃掉（要點兩下才開得起來）；換成新元件就沒有這些殘留狀態"""
+    st.session_state[f"{key}__version"] = st.session_state.get(f"{key}__version", 0) + 1
+
+
+def _open_dialog(title: str, table_key: str, body, *args):
+    """點表格開對話框；關閉時換掉表格元件（見 _clear_table_click）"""
+    st.dialog(title, width="large", on_dismiss=partial(_clear_table_click, table_key))(body)(*args)
 
 
 def _md_linebreaks(text: str) -> str:
@@ -2814,7 +2825,6 @@ def _row_at(rows: list, index: int | None):
     return rows[index] if index is not None and index < len(rows) else None
 
 
-@st.dialog("新聞", width="large", on_dismiss=partial(_clear_table_click, "history_news_table"))
 def _news_dialog(row: dict):
     ui.section(row["title"], f"{row['date']}・{row['source']}" + (f"・關聯 {row['related_code']}" if row.get("related_code") else ""))
     if row.get("excerpt"):
@@ -2829,13 +2839,11 @@ def _news_dialog(row: dict):
         st.link_button("開啟原文", row["url"], type="primary")
 
 
-@st.dialog("個股分析", width="large", on_dismiss=partial(_clear_table_click, "history_stock_table"))
 def _stock_analysis_dialog(row: dict):
     ui.section(f"{row['code']} {row['name']}", f"{row['date']} 的分析・產生時間 {row['created_at']}")
     st.markdown(_md_linebreaks(row["analysis"]))
 
 
-@st.dialog("AI 觀點", width="large", on_dismiss=partial(_clear_table_click, "history_pred_table"))
 def _view_dialog(row: dict):
     dates = row["analysis_dates"]
     period = f"{row['start_date']} 起・{_view_result_text(row)}"
@@ -2866,7 +2874,7 @@ def _render_history_news(start: str, end: str, keyword: str):
                                    column_config={"標題": st.column_config.TextColumn("標題", width="large")})
     row = _row_at(rows, clicked)
     if row:
-        _news_dialog(row)
+        _open_dialog("新聞", "history_news_table", _news_dialog, row)
 
 
 def _render_history_picks(start: str, end: str, keyword: str):
@@ -2910,7 +2918,7 @@ def _render_history_stock_analysis(start: str, end: str, keyword: str):
         clicked = _clickable_table(view, "history_stock_table", width="stretch", hide_index=True, height=320)
     row = _row_at(rows, clicked)
     if row:
-        _stock_analysis_dialog(row)
+        _open_dialog("個股分析", "history_stock_table", _stock_analysis_dialog, row)
 
 
 def _render_history_market_analysis(start: str, end: str, keyword: str):
@@ -2937,7 +2945,7 @@ def _render_history_predictions(start: str, end: str, keyword: str):
         clicked = _views_table(views, key="history_pred_table", height=380)
     row = _row_at(views, clicked)
     if row:
-        _view_dialog(row)
+        _open_dialog("AI 觀點", "history_pred_table", _view_dialog, row)
 
 
 def history_page():
