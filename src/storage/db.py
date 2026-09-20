@@ -166,6 +166,13 @@ CREATE TABLE IF NOT EXISTS financials (
     net_income REAL,
     eps REAL,
     equity REAL,
+    total_assets REAL,
+    total_liabilities REAL,
+    current_assets REAL,
+    current_liabilities REAL,
+    operating_cf REAL,
+    investing_cf REAL,
+    financing_cf REAL,
     PRIMARY KEY (year, quarter, market, code)
 );
 
@@ -191,6 +198,18 @@ CREATE TABLE IF NOT EXISTS foreign_holding (
     foreign_pct REAL,
     foreign_limit_pct REAL,
     PRIMARY KEY (date, code)
+);
+
+-- 現股當沖（上市 TWTB4U、上櫃 intraday/stat；股數、金額元）
+CREATE TABLE IF NOT EXISTS day_trading (
+    date TEXT NOT NULL,
+    market TEXT NOT NULL,
+    code TEXT NOT NULL,
+    name TEXT,
+    volume INTEGER,
+    buy_value INTEGER,
+    sell_value INTEGER,
+    PRIMARY KEY (date, market, code)
 );
 
 -- 借券賣出餘額（證交所 TWT93U 後半段，只存上市個股；股數）
@@ -354,6 +373,13 @@ def _migrate_holdings_to_trades(conn):
     conn.execute("INSERT INTO app_meta (key, value) VALUES ('holdings_migrated', ?)", (now,))
 
 
+# 資產負債表與現金流量表（後來加的欄位；舊資料這些是 NULL，回補時會重抓）
+FINANCIALS_EXTRA_COLUMNS = ("total_assets", "total_liabilities", "current_assets", "current_liabilities",
+                            "operating_cf", "investing_cf", "financing_cf")
+_FINANCIALS_COLUMNS = ("year", "quarter", "market", "code", "name", "revenue", "gross_profit", "operating_income",
+                       "net_income", "eps", "equity") + FINANCIALS_EXTRA_COLUMNS
+
+
 def init_db():
     with get_conn() as conn:
         conn.executescript(SCHEMA)
@@ -362,6 +388,11 @@ def init_db():
                 conn.execute(f"ALTER TABLE news ADD COLUMN {column} {col_type}")
             except sqlite3.OperationalError:
                 pass  # 欄位已存在（舊資料庫升級用，新建的資料庫已經在 SCHEMA 裡就有這欄）
+        for column in FINANCIALS_EXTRA_COLUMNS:
+            try:
+                conn.execute(f"ALTER TABLE financials ADD COLUMN {column} REAL")
+            except sqlite3.OperationalError:
+                pass
         # 修復舊版解析錯誤存下的上櫃自營商欄位（當時存成外資的數字）。
         # 官方合計欄位是對的，且「合計 = 外資 + 投信 + 自營商」，所以自營商可由另外三欄推回；
         # 資料正確時條件不成立、不會更新任何列。
@@ -1166,6 +1197,42 @@ def save_sbl_short(rows: list[dict]):
         )
 
 
+def save_day_trading(rows: list[dict]):
+    if not rows:
+        return
+    with get_conn() as conn:
+        conn.executemany(
+            """INSERT OR REPLACE INTO day_trading (date, market, code, name, volume, buy_value, sell_value)
+               VALUES (:date, :market, :code, :name, :volume, :buy_value, :sell_value)""", rows)
+
+
+def query_day_trading_dates(market: str) -> set[str]:
+    with get_conn() as conn:
+        cur = conn.execute("SELECT DISTINCT date FROM day_trading WHERE market = ?", (market,))
+        return {r["date"] for r in cur.fetchall()}
+
+
+def query_day_trading_history(code: str, since: str) -> list[dict]:
+    """單一股票的當沖量與當天總成交量（當沖比＝當沖量 ÷ 成交量）"""
+    with get_conn() as conn:
+        cur = conn.execute(
+            """SELECT d.date, d.volume AS day_trade_volume, d.buy_value, d.sell_value, p.volume AS total_volume
+               FROM day_trading d JOIN stock_price p ON p.date = d.date AND p.market = d.market AND p.code = d.code
+               WHERE d.code = ? AND d.date >= ? ORDER BY d.date""", (code, since))
+        return [dict(r) for r in cur.fetchall()]
+
+
+def query_day_trading_ratio(date: str) -> list[dict]:
+    """某一天每檔個股的當沖比%（這一天沒有當沖資料的市場就不會出現）"""
+    with get_conn() as conn:
+        cur = conn.execute(
+            f"""SELECT d.code, d.volume AS day_trade_volume, p.volume AS total_volume,
+                       100.0 * d.volume / p.volume AS day_trade_pct
+                FROM day_trading d JOIN stock_price p ON p.date = d.date AND p.market = d.market AND p.code = d.code
+                WHERE d.date = ? AND p.volume > 0 AND {STOCK_CODE_SQL.replace("code", "d.code")}""", (date,))
+        return [dict(r) for r in cur.fetchall()]
+
+
 def query_dates_in(table: str) -> set[str]:
     if table not in ("foreign_holding", "sbl_short"):
         raise ValueError(f"不支援的表格: {table}")
@@ -1226,14 +1293,11 @@ def query_dividend_events(start: str, end: str) -> list[dict]:
 def save_financials(rows: list[dict]):
     if not rows:
         return
+    columns = ", ".join(_FINANCIALS_COLUMNS)
+    values = ", ".join(f":{c}" for c in _FINANCIALS_COLUMNS)
     with get_conn() as conn:
-        conn.executemany(
-            """INSERT OR REPLACE INTO financials (year, quarter, market, code, name, revenue, gross_profit,
-                   operating_income, net_income, eps, equity)
-               VALUES (:year, :quarter, :market, :code, :name, :revenue, :gross_profit, :operating_income,
-                   :net_income, :eps, :equity)""",
-            rows,
-        )
+        conn.executemany(f"INSERT OR REPLACE INTO financials ({columns}) VALUES ({values})",
+                         [{c: row.get(c) for c in _FINANCIALS_COLUMNS} for row in rows])
 
 
 def query_financials(code: str | None = None) -> list[dict]:
@@ -1247,7 +1311,9 @@ def query_financials(code: str | None = None) -> list[dict]:
 
 def query_financials_counts() -> dict[tuple[int, int, str], int]:
     with get_conn() as conn:
-        cur = conn.execute("SELECT year, quarter, market, COUNT(*) AS n FROM financials GROUP BY year, quarter, market")
+        # 只算有現金流量的列：舊版只存損益與權益，這樣回補時會把那些季重抓一次補齊新欄位
+        cur = conn.execute("SELECT year, quarter, market, COUNT(operating_cf) AS n FROM financials "
+                           "GROUP BY year, quarter, market")
         return {(r["year"], r["quarter"], r["market"]): r["n"] for r in cur.fetchall()}
 
 
@@ -1256,11 +1322,13 @@ def query_valuation_dates(market: str = "TWSE") -> set[str]:
         return {r["date"] for r in conn.execute("SELECT DISTINCT date FROM valuation WHERE market = ?", (market,)).fetchall()}
 
 
-def query_pe_history(code: str, since: str) -> list[dict]:
-    """同一天的收盤價與本益比（本益比河流圖用）"""
+def query_pe_history(code: str, since: str, column: str = "pe_ratio") -> list[dict]:
+    """同一天的收盤價與本益比或淨值比（河流圖用）；回傳欄位名一律叫 pe"""
+    if column not in ("pe_ratio", "pb_ratio"):
+        raise ValueError(column)
     with get_conn() as conn:
         cur = conn.execute(
-            """SELECT v.date, p.close, v.pe_ratio AS pe FROM valuation v
+            f"""SELECT v.date, p.close, v.{column} AS pe FROM valuation v
                JOIN stock_price p ON p.date = v.date AND p.code = v.code AND p.market = v.market
                WHERE v.code = ? AND v.date >= ? ORDER BY v.date""",
             (code, since),
@@ -1405,3 +1473,49 @@ def query_news_without_related_code(limit: int = 5000) -> list[dict]:
 def update_news_related_code(news_id: int, related_code: str | None):
     with get_conn() as conn:
         conn.execute("UPDATE news SET related_code = ? WHERE id = ?", (related_code, news_id))
+
+
+def query_issued_shares(as_of: str) -> list[tuple[str, int]]:
+    """[(代號, 發行股數)]：這一天或之前最新一筆外資持股資料上的發行股數（只有上市股）"""
+    with get_conn() as conn:
+        cur = conn.execute(
+            """SELECT f.code, f.issued_shares FROM foreign_holding f
+               JOIN (SELECT code, MAX(date) AS d FROM foreign_holding WHERE date <= ? GROUP BY code) latest
+                 ON f.code = latest.code AND f.date = latest.d
+               WHERE f.issued_shares > 0""",
+            (as_of,),
+        )
+        return [(r["code"], r["issued_shares"]) for r in cur.fetchall()]
+
+
+def query_close_series(codes: list[str], since: str) -> dict[str, list[float]]:
+    """{代號: [收盤價…]}（由舊到新），表格內的迷你走勢圖用；一次查多檔"""
+    codes = [c for c in dict.fromkeys(codes) if c]
+    if not codes:
+        return {}
+    result: dict[str, list[float]] = {code: [] for code in codes}
+    with get_conn() as conn:
+        for start in range(0, len(codes), 500):  # SQLite 參數數量有上限，分批查
+            chunk = codes[start:start + 500]
+            cur = conn.execute(
+                f"""SELECT code, close FROM stock_price
+                    WHERE date >= ? AND close > 0 AND code IN ({",".join("?" * len(chunk))})
+                    ORDER BY code, date""",
+                (since, *chunk),
+            )
+            for row in cur.fetchall():
+                result[row["code"]].append(float(row["close"]))
+    return result
+
+
+def query_margin_totals(since: str, until: str, market: str = "TWSE") -> list[dict]:
+    """每天全市場個股的融資、融券餘額合計（張）；只算個股，排除 ETF"""
+    with get_conn() as conn:
+        cur = conn.execute(
+            f"""SELECT date, SUM(margin_balance) AS margin_balance, SUM(short_balance) AS short_balance,
+                       COUNT(*) AS stocks
+                FROM margin WHERE market = ? AND date >= ? AND date <= ? AND {STOCK_CODE_SQL}
+                GROUP BY date ORDER BY date""",
+            (market, since, until),
+        )
+        return [dict(r) for r in cur.fetchall()]

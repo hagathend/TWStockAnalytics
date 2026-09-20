@@ -26,7 +26,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 DB_NAME = "tw_stock.db"
-SETTINGS_FILES = ["watchlist.json", "codex_settings.json", "report_settings.json", "scraping_settings.json"]
+SETTINGS_FILES = ["watchlist.json", "codex_settings.json", "report_settings.json", "scraping_settings.json",
+                  "screener_presets.json"]
 
 
 def default_target() -> Path:

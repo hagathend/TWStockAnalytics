@@ -17,6 +17,7 @@ from src.fundamentals import summarize_for_prompt as summarize_fundamentals
 from src.portfolio import summarize_for_prompt as summarize_holding
 from src.market_index import stock_prompt_block as summarize_relative_strength
 from src.ownership import summarize_for_prompt as summarize_ownership
+from src.day_trading import summarize_for_prompt as summarize_day_trading
 from src.predictions import record_from_analysis
 from src.price_levels import from_finmind as _levels_frame
 from src.price_levels import summarize_for_prompt as summarize_price_levels
@@ -213,6 +214,12 @@ def strip_holding_section(analysis_text: str) -> str:
     return "\n".join(kept).rstrip()
 
 
+def _chip_block(code: str) -> str:
+    block = summarize_chip_metrics(metrics_for_code(code))
+    day_trade = summarize_day_trading(code)
+    return f"{block}\n{day_trade}" if day_trade else block
+
+
 def build_stock_analysis_prompt(code: str) -> str:
     """回傳這檔股票的分析提示詞（含技術指標、籌碼歷史、股價、相關新聞）"""
     name = db.lookup_stock_name(code) or code
@@ -225,7 +232,7 @@ def build_stock_analysis_prompt(code: str) -> str:
         price_rows=_PRICE_ROWS_SHOWN,
         indicator_block=_format_indicators(price_rows),
         levels_block=summarize_price_levels(_levels_frame(price_rows)) if price_rows else "（無法取得股價歷史）",
-        chip_block=summarize_chip_metrics(metrics_for_code(code)),
+        chip_block=_chip_block(code),
         relative_block=summarize_relative_strength(code),
         ownership_block=summarize_ownership(code),
         fundamental_block=summarize_fundamentals(code),

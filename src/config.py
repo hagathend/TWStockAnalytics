@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -38,7 +39,30 @@ _BUNDLED_BROWSERS = BASE_DIR / "ms-playwright"
 if _BUNDLED_BROWSERS.is_dir():
     os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(_BUNDLED_BROWSERS))
 
-DB_PATH = DATA_DIR / "tw_stock.db"
+DB_FILE_NAME = "tw_stock.db"
+DEFAULT_DB_DIR = DATA_DIR
+# 資料庫可以搬到別的資料夾（例如空間比較大的磁碟）：位置記在資料夾裡的 storage_settings.json，
+# App、每日排程、背景補資料都從這裡讀，所以搬一次各處一致。設定其餘的 json 仍留在 DATA_DIR（都很小）
+STORAGE_SETTINGS_PATH = DATA_DIR / "storage_settings.json"
+# 設定了自訂位置、但那裡找不到資料庫（例如外接硬碟沒接上）時的說明；這時暫時改用預設位置，畫面上會提醒
+DB_LOCATION_ERROR: str | None = None
+
+
+def _resolve_db_path() -> Path:
+    global DB_LOCATION_ERROR
+    try:
+        custom = json.loads(STORAGE_SETTINGS_PATH.read_text(encoding="utf-8")).get("db_dir")
+    except (OSError, ValueError, AttributeError):
+        custom = None
+    if custom:
+        path = Path(custom) / DB_FILE_NAME
+        if path.is_file():
+            return path
+        DB_LOCATION_ERROR = f"設定的資料庫位置找不到資料庫：{path}（磁碟沒接上或檔案被移走），暫時改用預設位置"
+    return DEFAULT_DB_DIR / DB_FILE_NAME
+
+
+DB_PATH = _resolve_db_path()
 
 FINMIND_TOKEN = os.getenv("FINMIND_TOKEN", "")
 

@@ -30,6 +30,21 @@ class RiverTests(TempDBTestCase):
         self.assertAlmostEqual(last["band_50"], last["eps"] * result["multiples"][50])
         self.assertIn("第 100 百分位", pe_river.summarize_for_prompt("2330"))
 
+    def test_price_book_river(self):
+        dates = _seed()
+        with db.get_conn() as conn:  # 淨值比從 2.0 一路降到 1.01，目前最便宜
+            for i, d in enumerate(dates):
+                conn.execute("UPDATE valuation SET pb_ratio = ? WHERE code = '2330' AND date = ?", (2.0 - i * 0.01, d))
+        result = pe_river.river("2330", today=TODAY, metric="pb")
+        self.assertAlmostEqual(result["current_pe"], 1.01)
+        self.assertAlmostEqual(result["percentile"], 1.0)  # 100 天中最低的一天
+        self.assertAlmostEqual(result["frame"].iloc[-1]["eps"], 100 / 1.01)  # 推算每股淨值
+        # 虧損公司沒有本益比，但仍然有淨值比河流圖
+        with db.get_conn() as conn:
+            conn.execute("UPDATE valuation SET pe_ratio = NULL WHERE code = '2330'")
+        self.assertIsNone(pe_river.river("2330", today=TODAY))
+        self.assertIsNotNone(pe_river.river("2330", today=TODAY, metric="pb"))
+
     def test_too_few_days_or_losses_excluded(self):
         _seed(days=50)
         self.assertIsNone(pe_river.river("2330", today=TODAY))

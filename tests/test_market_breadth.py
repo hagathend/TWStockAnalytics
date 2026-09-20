@@ -35,6 +35,12 @@ class BreadthTests(unittest.TestCase):
         self.assertTrue(pd.isna(breadth.iloc[5]["new_high_20"]))
         self.assertTrue(pd.isna(last["new_high_60"]))  # 只有 25 天
 
+    def test_advance_decline_line(self):
+        # 第 2 天：兩檔漲、一檔跌 → +1；第 3 天：一檔漲、兩檔跌 → -1；第 4 天：三檔都漲 → +3
+        breadth = market_breadth.compute_breadth(_history({
+            "2330": [100.0, 101.0, 100.0, 101.0], "2317": [50.0, 51.0, 52.0, 53.0], "2454": [80.0, 79.0, 78.0, 79.0]}))
+        self.assertEqual([0, 1, 0, 3], list(breadth["adl"]))
+
     def test_equal_to_prior_high_is_not_new_high(self):
         breadth = market_breadth.compute_breadth(_history({"2330": [100.0] * 25}))
         self.assertEqual(breadth.iloc[-1]["new_high_20"], 0)

@@ -24,15 +24,17 @@ from datetime import date as _date, timedelta  # noqa: E402
 import pandas as pd  # noqa: E402
 import plotly.express as px  # noqa: E402
 import plotly.graph_objects as go  # noqa: E402
+from plotly.subplots import make_subplots  # noqa: E402
 import streamlit as st  # noqa: E402
 
 from src.ai_analysis import (NEWS_TOP_N_OPTIONS, analyze_with_codex_deep, build_prompt,  # noqa: E402
                              news_top_n, parse_and_save)
 from src.codex_cli import generate_codex_text, check_codex_login, list_codex_models
-from src.charting import build_candlestick
+from src import charting
 from src.chip_metrics import metrics_for_code
 from src.chip_metrics import summarize_for_prompt as summarize_chip_metrics
 from src.collect_all import run_daily_collect
+from src.collectors import company_profile, realtime
 from src.collectors.firecrawl_fetcher import test_connection as firecrawl_test_connection
 from src.config_ai import (
     load_codex_settings,
@@ -42,13 +44,14 @@ from src.config_ai import (
     save_report_settings,
     save_scraping_settings,
 )
-from src import config_watchlist, history, scheduled_ai
+from src import compare, config_screener, live_quotes, storage_location, subscriptions, config_watchlist, day_trading, dividend_history, history, scheduled_ai
 from src.config_watchlist import add_stocks, load_watchlist
 from src.market_analysis import build_market_analysis_prompt, save_market_analysis
 from src.report_pdf import markdown_to_pdf
-from src import (alerts, backtest, calendar_events, desktop, financials, futures, pe_river, fundamentals, heatmap, market_breadth, market_index, notify, portfolio,
+from src import (alerts, backtest, calendar_events, desktop, financials, futures, pe_river, rankings, fundamentals, heatmap, market_breadth, market_index, notify, portfolio,
                  ownership, prediction_views, predictions,
                  revenue, shareholding, signals, ui, updater)
+from src import config as config_paths
 from src.config import IS_INSTALLED
 from src.codex_cli import _executable as find_codex_executable
 from src.config_app import load_app_settings, save_app_settings
@@ -176,9 +179,12 @@ def _take_table_click(key: str) -> int | None:
 
 
 def _clickable_table(data, key: str, **kwargs):
-    """點任一格（單擊或雙擊）就回傳那一列的位置（沒點回傳 None）。只用「單格選取」，表格左邊不會出現勾選框"""
-    st.dataframe(data, key=key, on_select=partial(_on_table_click, key), selection_mode="single-cell", **kwargs)
-    return _take_table_click(key)
+    """點任一格（單擊或雙擊）就回傳那一列的位置（沒點回傳 None）。只用「單格選取」，表格左邊不會出現勾選框。
+    實際的元件 key 帶版本號，點開的對話框關閉時換版本（見 _clear_table_click）"""
+    widget_key = f"{key}__v{st.session_state.get(f'{key}__version', 0)}"
+    st.dataframe(data, key=widget_key, on_select=partial(_on_table_click, widget_key), selection_mode="single-cell",
+                 **kwargs)
+    return _take_table_click(widget_key)
 
 
 def _checkable_table(data, key: str, selected_rows: list[int] | None = None, **kwargs):
@@ -191,7 +197,15 @@ def _checkable_table(data, key: str, selected_rows: list[int] | None = None, **k
 
 
 def _clear_table_click(key: str):
-    st.session_state[key] = {"selection": {"rows": [], "columns": [], "cells": []}}
+    """對話框關閉時的回呼：換一個新的表格元件。
+    沿用原表格的話，關閉後焦點回到表格，表格會自己再送一次選取（對話框馬上又跳出來、看起來關不掉），
+    而且下一次點擊會被吃掉（要點兩下才開得起來）；換成新元件就沒有這些殘留狀態"""
+    st.session_state[f"{key}__version"] = st.session_state.get(f"{key}__version", 0) + 1
+
+
+def _open_dialog(title: str, table_key: str, body, *args):
+    """點表格開對話框；關閉時換掉表格元件（見 _clear_table_click）"""
+    st.dialog(title, width="large", on_dismiss=partial(_clear_table_click, table_key))(body)(*args)
 
 
 def _md_linebreaks(text: str) -> str:
@@ -237,35 +251,39 @@ def _run_collect_from_sidebar():
             st.info("新聞分析提示詞已產生，請到「AI 分析」頁複製使用")
 
 
-def _render_sidebar() -> str:
-    """畫出各頁共用的側邊欄（收集按鈕、查詢日期、新聞焦點），回傳目前選擇的查詢日期。
+def _render_sidebar():
+    """各頁共用的側邊欄：只放收集按鈕，保持很短（查詢日期在市場總覽頁上方、新聞焦點在市場總覽的分頁）。
     區塊標題一律用 ui.sidebar_label（比導覽列小一級的灰字），不要用 st.header。"""
     with st.sidebar:
         ui.sidebar_label("資料收集")
         if st.button("立即收集今日資料", type="primary", width="stretch"):
             _run_collect_from_sidebar()
 
-        ui.sidebar_label("查詢日期")
-        available_dates = db.query_available_dates()
-        if available_dates:
-            selected_date = st.selectbox("查詢日期", available_dates, label_visibility="collapsed")
-        else:
-            selected_date = st.text_input(
-                "查詢日期", value=_date.today().isoformat(), label_visibility="collapsed"
-            )
 
-        ui.sidebar_label(f"新聞焦點 Top {news_top_n()}")
-        ai_picks = db.query_ai_picks(selected_date)
-        if ai_picks:
-            for pick in ai_picks:
-                label = f"{pick['rank']:>2}.　{pick['code']}　{pick['name']}"
-                if st.button(label, key=f"pick_{pick['code']}_{pick['rank']}", type="tertiary",
-                             width="stretch", help=pick.get("reason")):
-                    _go_to_detail(pick["code"])
-        else:
-            st.caption("此日期尚無 AI 分析結果")
+_QUERY_DATE_KEY = "query_date"
 
-    return selected_date
+
+def _query_date() -> str:
+    """目前的查詢日期（市場總覽選的；沒選過就是最新有資料的一天）。個股詳情的相關新聞也用這個日期"""
+    dates = db.query_available_dates()
+    chosen = st.session_state.get(_QUERY_DATE_KEY) or st.session_state.get(ui._KEPT_WIDGETS, {}).get(_QUERY_DATE_KEY)
+    if chosen in dates:
+        return chosen
+    return dates[0] if dates else _date.today().isoformat()
+
+
+def _render_query_date_picker() -> str:
+    dates = db.query_available_dates()
+    if not dates:
+        return _date.today().isoformat()
+    st.session_state[_QUERY_DATE_KEY] = _query_date()  # 換頁回來、或選過的日期已經不在清單時還原
+    col_date, _ = st.columns([1, 3])
+    selected = col_date.selectbox("查詢日期", dates, key=_QUERY_DATE_KEY,
+                                  on_change=st.session_state.__setitem__, args=("query_date_changed", True))
+    ui.remember_widgets([_QUERY_DATE_KEY])
+    if st.session_state.pop("query_date_changed", False):
+        ui.release_focus()
+    return selected
 
 
 # ─────────────────────────────── 總覽 ───────────────────────────────
@@ -339,6 +357,58 @@ def _render_market_thermometer(selected_date: str):
             st.plotly_chart(ui.style_chart(fig, height=280), width="stretch", key="breadth_chart")
 
 
+def _render_adl(selected_date: str):
+    """騰落線與加權指數：指數創高但騰落線沒跟上，代表上漲集中在少數權值股"""
+    breadth = _cached_breadth(selected_date)
+    if len(breadth) < 2:
+        return
+    recent = breadth.tail(120)
+    index = pd.DataFrame(db.query_market_index(recent["date"].iloc[0], selected_date))
+    with ui.panel("騰落線（ADL）", "每天上漲家數減下跌家數的累計（上市個股）・和加權指數對照：指數上漲但騰落線走平或下滑，"
+                                  "代表上漲集中在少數股票"):
+        fig = make_subplots(specs=[[{"secondary_y": True}]])
+        fig.add_scatter(x=recent["date"], y=recent["adl"], mode="lines", name="騰落線",
+                        line={"color": ui.ACCENT_COLOR, "width": 2.2}, secondary_y=False)
+        if not index.empty:
+            fig.add_scatter(x=index["date"], y=index["taiex"], mode="lines", name="加權指數",
+                            line={"color": "#8792A6", "width": 1.4}, secondary_y=True)
+        fig.update_xaxes(type="category", nticks=10)
+        fig.update_yaxes(title_text="累計家數", secondary_y=False)
+        fig.update_yaxes(title_text="加權指數", secondary_y=True, showgrid=False)
+        st.plotly_chart(ui.style_chart(fig, height=300), width="stretch", key="adl_chart")
+
+
+def _lots_change(frame: pd.DataFrame, column: str, n: int) -> int | None:
+    return int(frame[column].iloc[-1] - frame[column].iloc[-1 - n]) if len(frame) > n else None
+
+
+def _render_margin_trend(selected_date: str):
+    """大盤（上市個股）融資、融券餘額合計的走勢；融資大增而指數沒漲，代表散戶追價、籌碼變亂"""
+    since = (_date.fromisoformat(selected_date) - timedelta(days=180)).isoformat()
+    frame = pd.DataFrame(db.query_margin_totals(since, selected_date))
+    if len(frame) < 2:
+        return
+    last = frame.iloc[-1]
+    ratio = last["short_balance"] / last["margin_balance"] * 100 if last["margin_balance"] else None
+    with ui.panel("大盤融資融券", f"上市個股合計・資料日 {last['date']}・單位：張"):
+        cards = []
+        for label, column in (("融資餘額", "margin_balance"), ("融券餘額", "short_balance")):
+            day, week = _lots_change(frame, column, 1), _lots_change(frame, column, 5)
+            sub = "較前一日 " + ("-" if day is None else f"{day:+,}") + "・5 日 " + ("-" if week is None else f"{week:+,}")
+            cards.append({"label": label, "value": f"{int(last[column]):,}", "sub": sub, "sub_tone": ui.tone_of(day or 0)})
+        cards.append({"label": "券資比", "value": "-" if ratio is None else f"{ratio:.2f}%", "sub": "融券 ÷ 融資"})
+        ui.cards(cards)
+        fig = make_subplots(specs=[[{"secondary_y": True}]])
+        fig.add_scatter(x=frame["date"], y=frame["margin_balance"], mode="lines", name="融資餘額",
+                        line={"color": ui.UP_COLOR, "width": 2}, secondary_y=False)
+        fig.add_scatter(x=frame["date"], y=frame["short_balance"], mode="lines", name="融券餘額",
+                        line={"color": ui.DOWN_COLOR, "width": 1.6}, secondary_y=True)
+        fig.update_xaxes(type="category", nticks=10)
+        fig.update_yaxes(title_text="融資（張）", secondary_y=False)
+        fig.update_yaxes(title_text="融券（張）", secondary_y=True, showgrid=False)
+        st.plotly_chart(ui.style_chart(fig, height=280), width="stretch", key="margin_trend_chart")
+
+
 def _render_futures_panel(selected_date: str):
     frame = futures.net_oi_frame(selected_date)
     summary = futures.summary(selected_date)
@@ -371,6 +441,40 @@ def _render_futures_panel(selected_date: str):
             st.plotly_chart(ui.style_chart(fig, height=280), width="stretch", key="futures_oi_chart")
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def _cached_ranking_table(date: str) -> pd.DataFrame:
+    return rankings.daily_table(date)
+
+
+_RANK_COLUMNS = {
+    "rank": "名次", "code": "代號", "name": "名稱", "market": "市場", "close": "收盤", "change_pct": "漲跌%",
+    "volume_lots": "成交量(張)", "turnover_billion": "成交值(億)", "turnover_rate": "週轉率%",
+    "foreign_lots": "外資(張)", "trust_lots": "投信(張)", "dividend_yield": "殖利率%", "day_trade_pct": "當沖比%",
+}
+
+
+def _render_rankings(selected_date: str):
+    col_metric, col_market = st.columns([4, 1.2], vertical_alignment="bottom")
+    metric = col_metric.pills("排行項目", list(rankings.METRICS), default="漲幅", key="rank_metric") or "漲幅"
+    market = col_market.segmented_control("市場", list(rankings.MARKETS), default="全部", key="rank_market") or "全部"
+    table = _cached_ranking_table(selected_date)
+    result = rankings.rank(table, metric, market)
+    note = {"週轉率": "週轉率只有上市股（需要發行股數）",
+            "當沖比": f"只列成交量 {rankings.MIN_DAY_TRADE_LOTS:,} 張以上"}.get(metric, "只算個股，不含 ETF 與權證")
+    with ui.panel(f"{metric}排行", f"{selected_date}・{market}・前 {len(result)} 名・{note}・點一下股票開啟個股詳情"):
+        if result.empty:
+            st.caption("這天沒有資料")
+            return
+        view = result.assign(rank=range(1, len(result) + 1), market=result["market"].map({"TWSE": "上市", "TPEx": "上櫃"}))
+        view = view[list(_RANK_COLUMNS)].rename(columns=_RANK_COLUMNS)
+        styler = _styled_table(view, signed=["漲跌%", "外資(張)", "投信(張)"],
+                               thousands=["成交量(張)", "外資(張)", "投信(張)"],
+                               decimals=["收盤", "漲跌%", "成交值(億)", "週轉率%", "殖利率%", "當沖比%"])
+        clicked = _clickable_table(styler, "rank_table", width="stretch", hide_index=True, height=600)
+        if clicked is not None and clicked < len(result):
+            _go_to_detail(result.iloc[clicked]["code"])
+
+
 def _render_industry_heatmap(selected_date: str):
     with ui.panel("產業熱力圖", "方塊大小＝成交值、顏色＝漲跌幅（紅漲綠跌）・點產業可放大，點上方路徑返回"):
         col_market, _ = st.columns([1, 3])
@@ -389,9 +493,27 @@ def _render_industry_heatmap(selected_date: str):
                          width="stretch", hide_index=True)
 
 
+def _render_news_focus(selected_date: str):
+    picks = db.query_ai_picks(selected_date)
+    with ui.panel(f"新聞焦點 Top {news_top_n()}", f"{selected_date}・AI 從當天新聞挑出的個股・點一下開啟個股詳情"):
+        if not picks:
+            st.caption("這天還沒有新聞分析結果（收集完成後會自動分析，或到「AI 分析 › 新聞深度分析」執行）")
+        else:
+            view = pd.DataFrame(picks)[list(_PICK_COLUMNS)].rename(columns=_PICK_COLUMNS)
+            clicked = _clickable_table(view, "news_focus_table", width="stretch", hide_index=True,
+                                       column_config={"原因": st.column_config.TextColumn("原因", width="large")})
+            if clicked is not None and clicked < len(picks):
+                _go_to_detail(picks[clicked]["code"])
+    summary = db.query_ai_analysis_summary(selected_date)
+    if summary and summary.get("summary"):
+        with ui.panel("當日新聞總結"):
+            st.markdown(_md_linebreaks(summary["summary"]))
+
+
 def home_page():
-    selected_date = _render_sidebar()
-    ui.page_header("市場總覽", f"{selected_date} 盤後價量、三大法人、融資融券與新聞")
+    _render_sidebar()
+    ui.page_header("市場總覽", "盤後價量、三大法人、融資融券、新聞焦點")
+    selected_date = _render_query_date_picker()
 
     _market_summary_cards(selected_date)
 
@@ -399,10 +521,15 @@ def home_page():
     with body:
         if tab == "市場溫度計":
             _render_market_thermometer(selected_date)
+            _render_adl(selected_date)
+        elif tab == "新聞焦點":
+            _render_news_focus(selected_date)
         elif tab == "期貨法人":
             _render_futures_panel(selected_date)
         elif tab == "產業熱力圖":
             _render_industry_heatmap(selected_date)
+        elif tab == "排行":
+            _render_rankings(selected_date)
         elif tab == "股價":
             filter_code = st.text_input("搜尋", placeholder="依代號或名稱搜尋，例如 2330 或 台積",
                                         key="price_code", label_visibility="collapsed")
@@ -432,6 +559,7 @@ def home_page():
                 st.info("此日期尚無三大法人資料")
 
         elif tab == "融資融券":
+            _render_margin_trend(selected_date)
             filter_code = st.text_input("搜尋", placeholder="依代號或名稱搜尋", key="margin_code",
                                         label_visibility="collapsed")
             rows = db.query_margin(selected_date, filter_code or None)
@@ -711,30 +839,204 @@ def _render_financials_panel(code: str):
             st.plotly_chart(ui.style_chart(fig, height=280), width="stretch", key=f"financials_chart_{code}")
 
 
+_HEALTH_COLUMNS = {
+    "label": "季別", "net_margin": "淨利率%", "asset_turnover": "資產週轉(次)", "equity_multiplier": "權益乘數",
+    "roe_annualized": "ROE%", "roa_annualized": "ROA%", "debt_ratio": "負債比%", "current_ratio": "流動比%",
+    "ocf_to_net_income": "營業現金流÷淨利",
+}
+
+
+def _render_financial_health_panel(code: str):
+    """資產負債與現金流量：財務體質（負債、流動性）、杜邦拆解 ROE、獲利有沒有真的收到現金"""
+    frame = financials.code_frame(code)
+    if frame.empty or frame["debt_ratio"].isna().all():
+        return
+    last = frame.iloc[-1]
+
+    def num(v, spec, suffix=""):
+        return "-" if v is None or pd.isna(v) else f"{v:{spec}}{suffix}"
+
+    with ui.panel("財務體質與現金流", f"最新 {last['label']}・比率為期末數或累計年化・現金流單位億元・金融業沒有流動比"):
+        quality = last["ocf_to_net_income"]
+        ui.cards([
+            {"label": "負債比", "value": num(last["debt_ratio"], ".1f", "%"), "sub": "負債 ÷ 資產"},
+            {"label": "流動比", "value": num(last["current_ratio"], ".0f", "%"), "sub": "流動資產 ÷ 流動負債"},
+            {"label": "ROA（年化）", "value": num(last["roa_annualized"], ".1f", "%"),
+             "sub": f"ROE {num(last['roe_annualized'], '.1f', '%')}"},
+            {"label": "營業現金流 ÷ 淨利", "value": num(quality, ".2f", " 倍"),
+             "sub": "今年累計；長期小於 1 要留意" if pd.notna(quality) else "淨利為負時不計算"},
+        ])
+        table = frame.iloc[::-1].head(8)[list(_HEALTH_COLUMNS)].rename(columns=_HEALTH_COLUMNS)
+        st.dataframe(_styled_table(table, decimals=[c for c in _HEALTH_COLUMNS.values() if c != "季別"]),
+                     hide_index=True, width="stretch", key=f"health_table_{code}")
+        st.caption("杜邦分析：ROE ≈ 淨利率 × 資產週轉 × 權益乘數。權益乘數高代表舉債多，ROE 靠槓桿撐起來的要多留意")
+        cash = frame[frame["operating_cf_q"].notna()]
+        if len(cash) >= 2:
+            fig = go.Figure()
+            for column, name, color in (("operating_cf_q", "營業現金流", ui.UP_COLOR),
+                                        ("investing_cf_q", "投資現金流", "#8792A6"),
+                                        ("financing_cf_q", "籌資現金流", "#A78BFA")):
+                fig.add_bar(x=cash["label"], y=cash[column] / 1e5, name=name, marker_color=color,
+                            hovertemplate=f"%{{x}}<br>{name} %{{y:,.2f}} 億<extra></extra>")
+            fig.add_scatter(x=cash["label"], y=cash["free_cf_q"] / 1e5, name="自由現金流", mode="lines+markers",
+                            line={"color": "#F5B942", "width": 2},
+                            hovertemplate="%{x}<br>自由現金流 %{y:,.2f} 億<extra></extra>")
+            fig.update_layout(barmode="group", yaxis={"title": "億元"})
+            fig.update_xaxes(type="category")
+            st.plotly_chart(ui.style_chart(fig, height=280), width="stretch", key=f"cashflow_chart_{code}")
+            st.caption("單季數字（年初累計相減）；自由現金流＝營業＋投資現金流")
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _cached_dividend_events(code: str, today: str) -> pd.DataFrame:
+    return dividend_history.fetch(code, today=_date.fromisoformat(today))
+
+
+_DIVIDEND_EVENT_COLUMNS = {"period": "所屬期間", "ex_date": "除權息日", "cash": "現金股利", "stock": "股票股利",
+                           "before_price": "除權息前股價", "yield_pct": "殖利率%", "fill": "填息"}
+
+
+def _render_dividend_panel(code: str):
+    today = _date.today()
+    try:
+        with st.spinner("讀取股利資料中..."):
+            events = _cached_dividend_events(code, today.isoformat())
+    except Exception:  # noqa: BLE001 - FinMind 暫時連不上就不顯示這個面板
+        return
+    if events.empty:
+        return
+    frame = financials.code_frame(code)
+    eps = {int(r.year): r.eps_cum for r in frame.itertuples() if r.quarter == 4 and pd.notna(r.eps_cum)}
+    annual = dividend_history.annual_table(events, eps)
+    price_rows = db.query_code_history("stock_price", code, limit=1)
+    price = price_rows[0]["close"] if price_rows else None
+    trailing = dividend_history.trailing_cash(events, today)
+    filled = events["fill_days"].dropna()
+    with ui.panel("股利政策", "所屬年度依盈餘年度加總・殖利率以除權息前一天股價計算・資料來源 FinMind"):
+        ui.cards([
+            {"label": "近一年現金股利", "value": f"{trailing:.2f} 元", "sub": "除息日在近 365 天內"},
+            {"label": "現金殖利率", "value": f"{trailing / price * 100:.2f}%" if price and trailing else "-",
+             "sub": f"以最新收盤 {price:,.2f} 計算" if price else ""},
+            {"label": "連續配息", "value": f"{dividend_history.consecutive_years(annual, today.year)} 年",
+             "sub": f"近 {dividend_history.DEFAULT_YEARS} 年資料"},
+            {"label": "平均填息天數", "value": f"{filled.mean():.0f} 天" if len(filled) else "-",
+             "sub": f"{len(filled)}／{int(events['before_price'].notna().sum())} 次已填息"},
+        ])
+        if len(annual) >= 2:
+            fig = go.Figure()
+            fig.add_bar(x=annual["fiscal_year"], y=annual["cash"], name="現金股利", marker_color=ui.UP_COLOR,
+                        hovertemplate="%{x} 年度<br>現金 %{y:.2f} 元<extra></extra>")
+            if (annual["stock"] > 0).any():
+                fig.add_bar(x=annual["fiscal_year"], y=annual["stock"], name="股票股利", marker_color="#F5B942",
+                            hovertemplate="%{x} 年度<br>股票 %{y:.2f} 元<extra></extra>")
+            if annual["payout_pct"].notna().any():
+                fig.add_scatter(x=annual["fiscal_year"], y=annual["payout_pct"], name="盈餘分配率%", yaxis="y2",
+                                mode="lines+markers", line={"color": "#A78BFA", "width": 2})
+            payout_top = max(100.0, float(annual["payout_pct"].max(skipna=True) or 0) * 1.1)
+            fig.update_layout(barmode="stack", yaxis={"title": "元"},
+                              yaxis2={"title": "%", "overlaying": "y", "side": "right", "showgrid": False,
+                                      "range": [0, payout_top]})
+            fig.update_xaxes(type="category")
+            st.plotly_chart(ui.style_chart(fig, height=260), width="stretch", key=f"dividend_chart_{code}")
+        table = events.iloc[::-1].head(12).copy()
+        table["fill"] = [("尚未除權息" if pd.isna(ex) else "尚未填息" if pd.isna(days) else f"{int(days)} 天")
+                         for ex, days in zip(table["ex_date"], table["fill_days"])]
+        table["ex_date"] = table["ex_date"].fillna("-")
+        table = table[list(_DIVIDEND_EVENT_COLUMNS)].rename(columns=_DIVIDEND_EVENT_COLUMNS)
+        st.dataframe(_styled_table(table, decimals=["現金股利", "股票股利", "除權息前股價", "殖利率%"]),
+                     hide_index=True, width="stretch", key=f"dividend_table_{code}")
+        st.caption("填息：除權息日起算的交易日數，收盤回到除權息前股價即算填息。盈餘分配率只在有該年度季報 EPS 時計算")
+
+
+def _render_day_trading_panel(code: str):
+    frame = day_trading.code_history(code)
+    ratio = frame["day_trade_pct"].dropna() if not frame.empty else pd.Series(dtype=float)
+    if ratio.empty:
+        return
+    last = frame.iloc[-1]
+    net = (last["sell_value"] or 0) - (last["buy_value"] or 0)
+    with ui.panel("現股當沖", f"資料日 {last['date']}・當沖比＝當沖成交股數 ÷ 成交股數・比例高代表短線客多、波動大"):
+        ui.cards([
+            {"label": "當沖比", "value": f"{ratio.iloc[-1]:.1f}%", "sub": f"當沖 {int(last['day_trade_volume']) // 1000:,} 張"},
+            {"label": "5 日平均", "value": f"{ratio.tail(5).mean():.1f}%"},
+            {"label": "20 日平均", "value": f"{ratio.tail(20).mean():.1f}%"},
+            {"label": "當沖價差（估）", "value": f"{net / 1e4:+,.0f} 萬", "tone": ui.tone_of(net),
+             "sub": "當天當沖賣出 − 買進金額，未扣稅費"},
+        ])
+        if len(frame) >= 2:
+            fig = make_subplots(specs=[[{"secondary_y": True}]])
+            fig.add_bar(x=frame["date"], y=frame["day_trade_volume"] / 1000, name="當沖量（張）",
+                        marker_color="rgba(135, 146, 166, 0.55)", secondary_y=False)
+            fig.add_scatter(x=frame["date"], y=frame["day_trade_pct"], name="當沖比%", mode="lines+markers",
+                            line={"color": "#F5B942", "width": 2}, secondary_y=True)
+            fig.update_xaxes(type="category", nticks=10)
+            fig.update_yaxes(title_text="張", secondary_y=False)
+            fig.update_yaxes(title_text="%", secondary_y=True, showgrid=False)
+            st.plotly_chart(ui.style_chart(fig, height=260), width="stretch", key=f"day_trade_chart_{code}")
+
+
+@st.cache_data(ttl=7 * 86400, show_spinner=False)
+def _cached_company_profile(code: str) -> dict | None:
+    """查無公司（ETF 等）快取 None；連線失敗丟例外，不會被快取住，下次再試"""
+    ok, profile = company_profile.fetch(code)
+    if ok:
+        return profile
+    if "連線失敗" in profile:
+        raise RuntimeError(profile)
+    return None
+
+
+def _render_company_profile_panel(code: str):
+    try:
+        profile = _cached_company_profile(code)
+    except RuntimeError:
+        return
+    if not profile:
+        return
+    listed = " ".join(f"{label} {profile[key]}" for key, label in
+                      (("listed_twse", "上市"), ("listed_tpex", "上櫃"), ("listed_emerging", "興櫃")) if profile[key])
+    with ui.panel("公司資料", "資料來源 公開資訊觀測站"):
+        ui.info_grid([
+            ("主要業務", profile["business"], True),
+            ("公司名稱", profile["full_name"]), ("產業", profile["industry"]),
+            ("董事長", profile["chairman"]), ("總經理", profile["president"]),
+            ("成立日期", profile["founded"]), ("掛牌", listed),
+            ("實收資本額", profile["capital"]), ("發行股數", profile["shares"]),
+            ("配息頻率", profile["dividend_frequency"]), ("簽證會計師", profile["auditor"]),
+            ("發言人", profile["spokesman"]), ("網站", profile["website"]),
+        ])
+
+
 _RIVER_COLORS = {10: "rgba(34, 181, 115, 0.22)", 25: "rgba(34, 181, 115, 0.12)", 50: "rgba(135, 146, 166, 0.10)",
                  75: "rgba(240, 82, 79, 0.12)", 90: "rgba(240, 82, 79, 0.22)"}
 
 
 def _render_pe_river_panel(code: str):
-    result = pe_river.river(code)
-    if not result:
+    results = {key: pe_river.river(code, metric=key) for key in pe_river.METRICS}
+    available = [key for key, value in results.items() if value]
+    if not available:
         return
-    frame, multiples = result["frame"], result["multiples"]
-    percentile = result["percentile"]
-    position = "偏便宜" if percentile <= 25 else "偏貴" if percentile >= 75 else "中間"
-    with ui.panel("本益比河流圖", f"目前 {result['current_pe']:.1f} 倍・位於近 {result['days']} 個交易日第 "
-                               f"{percentile:.0f} 百分位（{position}）・只比較自己的歷史，不同產業不能互比"):
+    with ui.panel("河流圖", "用這檔自己過去的倍數區間畫出價格帶，看目前股價偏貴還是偏便宜；只比較自己的歷史，不同產業不能互比"):
+        labels = {key: pe_river.METRICS[key]["label"] for key in available}
+        key = st.segmented_control("倍數", available, default=available[0], format_func=labels.get,
+                                   key=f"river_metric_{code}") or available[0]
+        result = results[key]
+        frame, multiples = result["frame"], result["multiples"]
+        percentile = result["percentile"]
+        position = "偏便宜" if percentile <= 25 else "偏貴" if percentile >= 75 else "中間"
+        st.caption(f"{labels[key]}目前 {result['current_pe']:.2f} 倍・位於近 {result['days']} 個交易日第 "
+                   f"{percentile:.0f} 百分位（{position}）・價格帶＝推算的{pe_river.METRICS[key]['base']} × 歷史倍數")
         fig = go.Figure()
         levels = list(pe_river.BAND_PERCENTILES)
         for i, p in enumerate(levels):
-            fig.add_scatter(x=frame["date"], y=frame[f"band_{p}"], mode="lines", name=f"{multiples[p]:.1f} 倍（{p}%）",
+            fig.add_scatter(x=frame["date"], y=frame[f"band_{p}"], mode="lines", name=f"{multiples[p]:.2f} 倍（{p}%）",
                             line={"width": 1, "color": "rgba(201, 209, 222, 0.35)"},
                             fill="tonexty" if i else None, fillcolor=_RIVER_COLORS[p],
-                            hovertemplate=f"%{{x}}<br>{multiples[p]:.1f} 倍價格 %{{y:,.2f}}<extra></extra>")
+                            hovertemplate=f"%{{x}}<br>{multiples[p]:.2f} 倍價格 %{{y:,.2f}}<extra></extra>")
         fig.add_scatter(x=frame["date"], y=frame["close"], mode="lines", name="收盤價",
                         line={"color": ui.ACCENT_COLOR, "width": 2.2})
         fig.update_xaxes(type="category", nticks=8)
-        st.plotly_chart(ui.style_chart(fig, height=320), width="stretch", key=f"pe_river_{code}")
+        st.plotly_chart(ui.style_chart(fig, height=320), width="stretch", key=f"river_{key}_{code}")
 
 
 def _render_history_panel(code: str):
@@ -799,8 +1101,40 @@ def _render_stock_ai_panel(code: str):
             st.markdown(_md_linebreaks(existing_analysis[0]["analysis"]))
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def _cached_chart_rows(code: str, days: int, today: str) -> list[dict]:
+    """同一個週期切換期間不用重抓：一律抓該週期最長期間所需的歷史"""
+    return charting.fetch_rows(code, days, _date.fromisoformat(today))
+
+
+_KLINE_DEFAULTS = {"kline_period": "日K", "kline_indicators": []}
+
+
+def _render_kline_panel(code: str, name: str):
+    ui.restore_widgets(_KLINE_DEFAULTS | {f"kline_range_{p}": spec["default"] for p, spec in charting.PERIODS.items()})
+    with ui.panel("K 線走勢", "均線・支撐壓力與成交量密集區・週 K／月 K 由日線合併・資料來源 FinMind"):
+        col_period, col_range, col_ind = st.columns([1.1, 1.5, 1.6], vertical_alignment="bottom")
+        period = col_period.segmented_control("週期", list(charting.PERIODS), key="kline_period") or "日K"
+        spec = charting.PERIODS[period]
+        range_label = (col_range.segmented_control("期間", list(spec["ranges"]), key=f"kline_range_{period}")
+                       or spec["default"])
+        indicators = col_ind.pills("指標", charting.INDICATORS, selection_mode="multi", key="kline_indicators") or []
+        ui.remember_widgets(["kline_period", "kline_indicators", f"kline_range_{period}"])
+        longest = max(spec["ranges"], key=spec["ranges"].get)
+        with st.spinner("讀取 K 線資料中..."):
+            rows = _cached_chart_rows(code, charting.fetch_days(period, longest), _date.today().isoformat())
+            fig = charting.build_candlestick(code, name, period, range_label, indicators, rows=rows)
+        if fig:
+            ma = "／".join(f"{n}{spec['unit']}" for n in spec["ma"])
+            st.caption(f"均線 {ma}・虛線為支撐壓力、點線為成交量最密集價位、右側灰色長條為價量分布")
+            st.plotly_chart(fig, width="stretch", key="kline_chart")
+        else:
+            st.warning("查無此股票的歷史價量資料（可能代號輸入錯誤，或 FinMind 目前沒有資料）")
+
+
 def detail_page():
-    selected_date = _render_sidebar()
+    _render_sidebar()
+    selected_date = _query_date()
     origin = st.session_state.get("detail_return")
     if origin in NAV_PAGES:
         if st.button(f"返回{NAV_PAGES[origin].title}", key="detail_back"):
@@ -811,37 +1145,36 @@ def detail_page():
     code = col_input.text_input("股票代號", value=st.session_state.get("selected_code", ""),
                                 placeholder="輸入股票代號，例如 2330", label_visibility="collapsed")
     if not code:
-        st.info("請輸入股票代號，或從左側新聞焦點、「選股工具 › 觀察名單」點選")
+        st.info("請輸入股票代號，或從「市場總覽 › 新聞焦點」、「選股工具 › 觀察名單」點選")
         return
     st.session_state["selected_code"] = code  # 切換分頁或頁面後回來仍停在這檔
 
     name = db.lookup_stock_name(code) or code
     _render_quote(code, name)
+    _render_live_quote_line(code)
     _render_position_panel(code)
 
     tab, body = ui.page_tabs("detail", NAV_TABS["detail"])
     with body:
         if tab == "技術面":
-            with ui.panel("K 線走勢", "近 90 天・均線 MA5／MA20／MA60・支撐壓力與成交量密集區・資料來源 FinMind"):
-                with st.spinner("讀取 K 線資料中..."):
-                    fig = build_candlestick(code, name)
-                if fig:
-                    st.plotly_chart(fig, width="stretch")
-                else:
-                    st.warning("查無此股票的歷史價量資料（可能代號輸入錯誤，或 FinMind 目前沒有資料）")
+            _render_kline_panel(code, name)
             _render_relative_strength_panel(code)
         elif tab == "籌碼面":
             _render_chip_panel(code)
             _render_shareholding_panel(code)
             _render_ownership_panel(code)
+            _render_day_trading_panel(code)
             _render_history_panel(code)
         elif tab == "基本面":
+            _render_company_profile_panel(code)
             _render_fundamentals_panel(code)
             _render_revenue_panel(code)
             _render_financials_panel(code)
+            _render_financial_health_panel(code)
+            _render_dividend_panel(code)
             _render_pe_river_panel(code)
         elif tab == "新聞":
-            with ui.panel("相關新聞", selected_date):
+            with ui.panel("相關新聞", f"{selected_date}・日期在「市場總覽」上方切換"):
                 news_rows = db.query_news(selected_date, code)
                 if news_rows:
                     for row in news_rows:
@@ -1072,6 +1405,92 @@ def _render_saved_analyses(stocks: list[dict]):
                 st.markdown(_md_linebreaks(saved[0]["analysis"]))
 
 
+@st.cache_data(ttl=10, show_spinner=False)
+def _cached_live_quotes(codes: tuple[str, ...]) -> dict[str, dict]:
+    """10 秒內重複查詢直接用快取（證交所會擋太頻繁的請求）；失敗丟例外，不會被快取"""
+    ok, quotes = realtime.fetch_quotes(list(codes))
+    if not ok:
+        raise RuntimeError(quotes)
+    return quotes
+
+
+_LIVE_QUOTE_COLUMNS = {"code": "代號", "name": "名稱", "price": "成交", "change": "漲跌", "change_pct": "漲跌%",
+                       "open": "開盤", "high": "最高", "low": "最低", "volume_lots": "成交量(張)", "time": "時間"}
+_LIVE_POSITION_COLUMNS = {"code": "代號", "name": "名稱", "shares": "股數", "avg_cost": "平均成本", "price": "成交",
+                          "change_pct": "漲跌%", "market_value": "即時市值", "pnl": "即時損益", "pnl_pct": "報酬率%",
+                          "day_pnl": "今日損益", "time": "時間"}
+
+
+def _render_live_quotes(key: str, stocks: list[tuple[str, str]], positions: list[dict] | None = None):
+    """盤中即時報價面板。按鈕才查詢（開頁不自動打外部服務）；開啟自動更新時每 30 秒重查這一塊"""
+    if not stocks:
+        return
+    with ui.panel("盤中即時報價", "證交所基本市況報導，約 5 秒更新・收盤後顯示當天最後成交・即時損益未扣賣出稅費"):
+        col_button, col_auto, col_info = st.columns([1.2, 1.6, 3], vertical_alignment="center")
+        if col_button.button("更新報價", key=f"live_{key}_refresh", width="stretch"):
+            st.session_state[f"live_{key}_on"] = True
+        if not st.session_state.get(f"live_{key}_on"):
+            col_info.caption("按「更新報價」查詢目前成交價")
+        auto = col_auto.toggle("每 30 秒自動更新", key=f"live_{key}_auto", disabled=not live_quotes.is_trading_time(),
+                               help="交易時間（週一到週五 9:00～13:30）才能開啟")
+        if not (st.session_state.get(f"live_{key}_on") or auto):
+            return
+        # 自動更新時只重跑報價這一塊（fragment），不會整頁重算
+        st.fragment(run_every=30 if auto else None)(_live_quote_body)(key, stocks, positions)
+
+
+def _live_quote_body(key: str, stocks: list[tuple[str, str]], positions: list[dict] | None):
+    try:
+        quotes = _cached_live_quotes(tuple(code for code, _ in stocks))
+    except RuntimeError as exc:
+        st.warning(str(exc))
+        return
+    stamp = live_quotes.latest_stamp(quotes)
+    st.caption(f"資料時間 {stamp}" if stamp else "查無報價")
+    if positions:
+        table = live_quotes.position_table(positions, quotes)
+        total_pnl = table["pnl"].sum(min_count=1)
+        day_pnl = table["day_pnl"].sum(min_count=1)
+        ui.cards([
+            {"label": "即時市值", "value": f"{table['market_value'].sum():,.0f}"},
+            {"label": "即時未實現損益", "value": "-" if pd.isna(total_pnl) else f"{total_pnl:+,.0f}",
+             "tone": ui.tone_of(total_pnl)},
+            {"label": "今日損益（估）", "value": "-" if pd.isna(day_pnl) else f"{day_pnl:+,.0f}",
+             "tone": ui.tone_of(day_pnl), "sub": "漲跌 × 股數，當天買進的部位會失真"},
+        ])
+        view = table[list(_LIVE_POSITION_COLUMNS)].rename(columns=_LIVE_POSITION_COLUMNS)
+        styler = _styled_table(view, signed=["漲跌%", "即時損益", "報酬率%", "今日損益"],
+                               thousands=["股數", "即時市值", "即時損益", "今日損益"],
+                               decimals=["平均成本", "成交", "漲跌%", "報酬率%"])
+    else:
+        view = live_quotes.quote_table(stocks, quotes)[list(_LIVE_QUOTE_COLUMNS)].rename(columns=_LIVE_QUOTE_COLUMNS)
+        styler = _styled_table(view, signed=["漲跌", "漲跌%"], thousands=["成交量(張)"],
+                               decimals=["成交", "漲跌", "漲跌%", "開盤", "最高", "最低"])
+    st.dataframe(styler, hide_index=True, width="stretch", key=f"live_{key}_table")
+
+
+def _render_live_quote_line(code: str):
+    """個股詳情報價列下方：交易時間自動顯示即時成交；非交易時間按按鈕才查"""
+    if not (live_quotes.is_trading_time() or st.session_state.get("live_detail_on") == code):
+        st.button("查詢即時報價", key="live_detail_refresh", type="tertiary",
+                  on_click=st.session_state.__setitem__, args=("live_detail_on", code))
+        return
+    try:
+        quote = _cached_live_quotes((code,)).get(code)
+    except RuntimeError as exc:
+        st.caption(str(exc))
+        return
+    if not quote or quote.get("price") is None:
+        st.caption("查無即時報價")
+        return
+    tone = ui.tone_of(quote["change"])
+    color = ui.UP_COLOR if tone == "up" else ui.DOWN_COLOR if tone == "down" else "#172E4D"
+    change = f"{quote['change']:+,.2f}（{quote['change_pct']:+.2f}%）" if quote["change"] is not None else ""
+    st.markdown(f'<div class="tw-quote-meta">即時 {quote["date"]} {quote["time"]}　'
+                f'<span style="color:{color};font-weight:600;font-size:1rem">{quote["price"]:,.2f} {change}</span>　'
+                f'成交量 {quote["volume_lots"] or 0:,.0f} 張</div>', unsafe_allow_html=True)
+
+
 def portfolio_page():
     _render_sidebar()
     ui.page_header("我的持股", "由交易紀錄以平均成本法計算；成本含買進手續費，未實現損益未扣將來賣出的稅費；資料只存在本機資料庫")
@@ -1102,6 +1521,7 @@ def portfolio_page():
             st.info("目前沒有持有中的股票，請到「新增交易」記錄買進")
         elif tab == "持倉明細":
             _render_positions_table(positions, totals)
+            _render_live_quotes("portfolio", [(p["code"], p["name"]) for p in positions], positions)
         elif tab == "持股訊號":
             with ui.panel("持股訊號", "僅上市股・區分今日新出現與持續中的訊號"):
                 _render_signal_alerts(signals.watchlist_alerts(_cached_signal_history(), [p["code"] for p in positions]),
@@ -1391,8 +1811,85 @@ def ai_analysis_page():
 # ─────────────────────────────── AI 設定 ───────────────────────────────
 
 
+_TABLE_LABELS = {
+    "news": "新聞（含全文與 AI 摘要）", "stock_price": "股價", "institutional": "三大法人", "margin": "融資融券",
+    "valuation": "本益比／殖利率", "month_revenue": "月營收", "financials": "季度財報", "shareholding": "股權分散",
+    "foreign_holding": "外資持股", "sbl_short": "借券賣出", "day_trading": "現股當沖", "stock_analysis": "個股分析",
+    "market_analysis": "大盤分析", "ai_picks": "新聞焦點", "ai_analysis_summary": "新聞總結", "predictions": "AI 預測",
+    "collect_log": "收集紀錄", "dividend_events": "除權息預告", "market_index": "加權指數",
+    "futures_institutional": "期貨法人", "trades": "交易紀錄", "alert_events": "提醒紀錄",
+}
+
+
+@st.cache_data(ttl=600, show_spinner="計算各類資料大小中...")
+def _cached_table_sizes(db_path: str) -> list[dict]:
+    return storage_location.table_sizes()
+
+
+def _move_database():
+    ok, message = storage_location.move_database(st.session_state.get("storage_target", ""),
+                                                 delete_old=st.session_state.get("storage_delete_old", False))
+    st.session_state["storage_notice"] = (ok, message)
+    if ok:
+        st.cache_data.clear()  # 快取裡的資料來自舊檔案，清掉重讀
+
+
+def _vacuum_database():
+    st.session_state["storage_notice"] = storage_location.vacuum()
+    _cached_table_sizes.clear()
+
+
+def _render_storage_settings():
+    info = storage_location.usage()
+    notice = st.session_state.pop("storage_notice", None)
+    with ui.panel("資料庫容量", "所有收集的資料與分析結果都存在這個 SQLite 檔案"):
+        if info["location_error"]:
+            st.warning(info["location_error"])
+        if notice:
+            (st.success if notice[0] else st.error)(notice[1])
+        ui.cards([
+            {"label": "資料庫大小", "value": storage_location.format_bytes(info["size"])},
+            {"label": "可回收空間", "value": storage_location.format_bytes(info["reclaimable"]),
+             "sub": "刪除資料後留下的空白，壓縮可以釋放"},
+            {"label": "所在磁碟剩餘空間", "value": storage_location.format_bytes(info["free_disk"])},
+        ])
+        ui.info_grid([("目前位置", info["path"], True),
+                      ("位置設定", "預設位置" if info["is_default"] else "自訂位置", True)])
+        backfill_running = desktop.backfill_status()["running"]
+        st.button("壓縮資料庫", key="storage_vacuum", on_click=_vacuum_database, disabled=backfill_running,
+                  help="重整檔案、釋放可回收空間；資料量大時要等一段時間，期間不要收集資料")
+
+    with ui.panel("各類資料用量", "依每一欄資料長度估算（不含索引），用來看哪類資料佔最多空間"):
+        sizes = _cached_table_sizes(info["path"])
+        if sizes:
+            total = sum(r["bytes"] for r in sizes) or 1
+            view = pd.DataFrame([{"資料": _TABLE_LABELS.get(r["table"], r["table"]), "筆數": r["rows"],
+                                  "估計大小": storage_location.format_bytes(r["bytes"]),
+                                  "佔比%": r["bytes"] / total * 100} for r in sizes])
+            st.dataframe(_styled_table(view, thousands=["筆數"], decimals=["佔比%"]), hide_index=True,
+                         width="stretch", key="storage_table_sizes")
+
+    with ui.panel("搬移資料庫", "搬到空間比較大的磁碟；搬完立即生效，每日排程下次執行也會用新位置"):
+        st.text_input("新的資料夾", key="storage_target", placeholder="例如 D:\\TWStockData",
+                      help="貼上完整的資料夾路徑；資料夾不存在會自動建立，裡面不能已經有 tw_stock.db")
+        st.checkbox("搬完後刪除原本的資料庫檔案", key="storage_delete_old",
+                    help="不勾選會保留原檔當備份，確認新位置正常後可以自己刪除")
+        col_move, col_default, _ = st.columns([1, 1.3, 2])
+        col_move.button("搬移", type="primary", width="stretch", key="storage_move", on_click=_move_database,
+                        disabled=backfill_running)
+        if not info["is_default"]:
+            col_default.button("搬回預設位置", width="stretch", key="storage_move_default", disabled=backfill_running,
+                               on_click=lambda: (st.session_state.__setitem__("storage_target",
+                                                                              str(config_paths.DEFAULT_DB_DIR)),
+                                                 _move_database()))
+        if backfill_running:
+            st.caption("正在下載歷史資料，完成後才能搬移或壓縮")
+        else:
+            st.caption("搬移期間請不要按收集資料；資料庫有幾百 MB 時需要數十秒")
+
+
 def ai_settings_page():
-    ui.page_header("AI 設定", "分析引擎與內文擷取服務")
+    ui.page_header("AI 設定", "分析引擎、內文擷取服務與資料儲存位置")
 
     tab, body = ui.page_tabs("ai_settings", NAV_TABS["ai_settings"])
     with body:
@@ -1437,6 +1934,8 @@ def ai_settings_page():
         elif tab == "每日排程":
             with ui.panel("每日排程", "自動收集的時間，以及收集完要用 Codex 做哪些分析"):
                 _render_schedule_setup()
+        elif tab == "資料儲存":
+            _render_storage_settings()
         elif tab == "Firecrawl":
             with ui.panel("Firecrawl 內文擷取", "選用・免費額度每月 1000 次，沒設定 Key 會自動改用本機 Playwright"):
                 scraping_settings = load_scraping_settings()
@@ -1474,6 +1973,9 @@ def _cached_screen_tables() -> dict[str, pd.DataFrame]:
         "ownership": ownership.latest_table(),
         "financials": financials.latest_table(),
         "pe_percentile": pe_river.latest_percentiles(),
+        "industry": pd.DataFrame(list(db.query_industry_map().items()), columns=["code", "industry"]),
+        "issued": pd.DataFrame(db.query_issued_shares(_date.today().isoformat()), columns=["code", "issued_shares"]),
+        "day_trade": day_trading.latest_table(),
     }
 
 
@@ -1531,11 +2033,26 @@ def _render_backtest_tab():
             st.caption("這個訊號在樣本期間沒有出現")
 
 
+_TREND_DAYS = 90  # 迷你走勢圖涵蓋的日曆天（約 60 個交易日）
+_TREND_COLUMN = "60日走勢"
+
+
+def _trend_config() -> dict:
+    return {_TREND_COLUMN: st.column_config.LineChartColumn(_TREND_COLUMN, width="small",
+                                                            help="近約 60 個交易日的收盤價走勢")}
+
+
+def _trend_series(codes: list[str]) -> dict[str, list[float]]:
+    since = (_date.today() - timedelta(days=_TREND_DAYS)).isoformat()
+    return db.query_close_series(list(codes), since)
+
+
 _SCREEN_COLUMNS = {
-    "code": "代號", "name": "名稱", "close": "收盤", "change_pct": "漲跌%",
+    "code": "代號", "name": "名稱", "industry": "產業", "trend": _TREND_COLUMN, "close": "收盤", "change_pct": "漲跌%",
     "return_20d": "20日報酬%", "rs_rank_pct": "相對強弱",
     "foreign_streak": "外資連買賣", "trust_streak": "投信連買賣",
-    "vol_ma20_lots": "20日均量(張)", "pe_ratio": "本益比", "dividend_yield": "殖利率%",
+    "vol_ma20_lots": "20日均量(張)", "turnover_rate": "週轉率%", "day_trade_pct": "當沖比%", "pe_ratio": "本益比",
+    "dividend_yield": "殖利率%",
     "pb_ratio": "淨值比", "yoy_pct": "營收年增%", "revenue_high_text": "營收創高", "yoy_growth_streak": "年增連續月",
     "big1000_pct": "千張大戶%", "big1000_pct_change": "大戶週增(百分點)", "foreign_pct": "外資持股%",
     "foreign_change_20": "外資20日增(百分點)", "roe_annualized": "ROE年化%", "gross_margin": "毛利率%",
@@ -1573,12 +2090,63 @@ _SCREEN_DEFAULTS = {
     "scr_roe_min": None, "scr_gross_min": None, "scr_eps_ttm_min": None, "scr_pe_pct_max": None,
     "scr_revenue_high": False, "scr_yoy_streak": 0,
     "scr_big_min": None, "scr_big_change_min": None, "scr_foreign_change_min": None,
+    "scr_price_min": None, "scr_price_max": None, "scr_turnover_min": None, "scr_industries": [],
+    "scr_day_trade_max": None,
 }
+
+
+def _apply_screen_preset():
+    """套用範本：回呼在重跑前執行，可以直接改條件 widget 的值"""
+    values = config_screener.load_presets().get(st.session_state.get("scr_preset"), {})
+    store = st.session_state.setdefault(ui._KEPT_WIDGETS, {})
+    for key, default in _SCREEN_DEFAULTS.items():
+        value = values.get(key, default)
+        st.session_state[key] = value
+        store[key] = value
+    st.session_state["screen_preset_notice"] = f"已套用「{st.session_state.get('scr_preset')}」"
+
+
+def _save_screen_preset():
+    name = st.session_state.get("scr_preset_name", "")
+    values = {key: st.session_state.get(key, default) for key, default in _SCREEN_DEFAULTS.items()}
+    try:
+        saved = config_screener.save_preset(name, values)
+    except config_screener.PresetError as exc:
+        st.session_state["screen_preset_notice"] = str(exc)
+        return
+    st.session_state["scr_preset_pending"] = saved
+    st.session_state["scr_preset_name"] = ""
+    st.session_state["screen_preset_notice"] = f"已存成範本「{saved}」"
+
+
+def _delete_screen_preset():
+    name = st.session_state.get("scr_preset")
+    config_screener.delete_preset(name)
+    st.session_state["screen_preset_notice"] = f"已刪除範本「{name}」"
+
+
+def _render_screen_presets():
+    presets = config_screener.load_presets()
+    pending = st.session_state.pop("scr_preset_pending", None)
+    if pending in presets:
+        st.session_state["scr_preset"] = pending
+    col_pick, col_apply, col_delete, col_save = st.columns([2.2, 0.8, 0.8, 1.2], vertical_alignment="bottom")
+    col_pick.selectbox("條件範本", list(presets) or ["（還沒有範本）"], key="scr_preset", disabled=not presets)
+    col_apply.button("套用", width="stretch", disabled=not presets, key="scr_preset_apply", on_click=_apply_screen_preset)
+    col_delete.button("刪除", width="stretch", disabled=not presets, key="scr_preset_delete", on_click=_delete_screen_preset)
+    with col_save.popover("存成範本", width="stretch"):
+        st.text_input("範本名稱", placeholder="例如：高殖利率＋外資買", key="scr_preset_name",
+                      help="把目前所有篩選條件存起來；同名會覆蓋")
+        st.button("儲存", type="primary", width="stretch", key="scr_preset_save", on_click=_save_screen_preset)
+    notice = st.session_state.pop("screen_preset_notice", None)
+    if notice:
+        st.caption(notice)
 
 
 def _render_screen_tab(signal_df: pd.DataFrame):
     ui.restore_widgets(_SCREEN_DEFAULTS)
-    with ui.panel("篩選條件"):
+    with ui.panel("篩選條件", "常用的條件組合可以存成範本，下次一鍵套用"):
+        _render_screen_presets()
         labels = {v: k for k, v in signals.SIGNALS.items()}
         chosen = st.multiselect("訊號條件", list(labels), key="scr_signals")
         col1, col2, _ = st.columns([1, 1, 2])
@@ -1610,6 +2178,17 @@ def _render_screen_tab(signal_df: pd.DataFrame):
                                              key="scr_big_change_min")
             foreign_change_min = s3.number_input("外資持股 20 日增 ≥（百分點）", value=None, step=0.5, format="%.2f",
                                                  key="scr_foreign_change_min")
+        with st.expander("價格、產業、週轉率與當沖"):
+            p1, p2, p3, p4 = st.columns([1, 1, 1, 1])
+            price_min = p1.number_input("股價 ≥（元）", min_value=0.0, value=None, step=10.0, key="scr_price_min")
+            price_max = p2.number_input("股價 ≤（元）", min_value=0.0, value=None, step=10.0, key="scr_price_max")
+            turnover_min = p3.number_input("週轉率% ≥", min_value=0.0, value=None, step=0.5, key="scr_turnover_min",
+                                           help="當天成交股數 ÷ 發行股數；數字越高代表換手越熱絡")
+            day_trade_max = p4.number_input("當沖比% ≤", min_value=0.0, max_value=100.0, value=None, step=5.0,
+                                            key="scr_day_trade_max",
+                                            help="當沖成交股數 ÷ 成交股數；太高代表短線客主導、股價容易暴漲暴跌")
+            industry_options = sorted(set(_cached_screen_tables()["industry"]["industry"]))
+            industries = st.multiselect("產業（不選＝全部）", industry_options, key="scr_industries")
     ui.remember_widgets(_SCREEN_DEFAULTS)
 
     result = signals.screen(signal_df, [labels[c] for c in chosen], min_avg_volume_lots=min_lots,
@@ -1639,6 +2218,19 @@ def _render_screen_tab(signal_df: pd.DataFrame):
             result = result[result["big1000_pct"].notna() & (result["big1000_pct"] >= big_min)]
         if big_change_min is not None:
             result = result[result["big1000_pct_change"].notna() & (result["big1000_pct_change"] >= big_change_min)]
+        result = result.merge(tables["industry"], on="code", how="left").merge(tables["issued"], on="code", how="left")
+        result["turnover_rate"] = result["volume"] / result["issued_shares"].where(result["issued_shares"] > 0) * 100
+        if price_min is not None:
+            result = result[result["close"] >= price_min]
+        if price_max is not None:
+            result = result[result["close"] <= price_max]
+        if turnover_min is not None:
+            result = result[result["turnover_rate"].notna() & (result["turnover_rate"] >= turnover_min)]
+        if industries:
+            result = result[result["industry"].isin(industries)]
+        result = result.merge(tables["day_trade"], on="code", how="left")
+        if day_trade_max is not None:
+            result = result[result["day_trade_pct"].notna() & (result["day_trade_pct"] <= day_trade_max)]
         result = result.reset_index(drop=True)
 
     _render_screen_results(result)
@@ -1658,11 +2250,13 @@ def _render_screen_results(result: pd.DataFrame):
             return
         actions = st.container()
         result["vol_ma20_lots"] = (result["vol_ma20"] / 1000).round(0)
+        series = _trend_series(result["code"])
+        result["trend"] = [series.get(code, []) for code in result["code"]]
         view = result[list(_SCREEN_COLUMNS)].rename(columns=_SCREEN_COLUMNS)
         styler = _styled_table(
             view, signed=["漲跌%", "20日報酬%", "外資連買賣", "投信連買賣", "營收年增%", "大戶週增(百分點)", "外資20日增(百分點)"],
             thousands=["20日均量(張)", "外資連買賣", "投信連買賣", "年增連續月"],
-            decimals=["收盤", "漲跌%", "20日報酬%", "本益比", "殖利率%", "淨值比", "營收年增%", "千張大戶%",
+            decimals=["收盤", "漲跌%", "20日報酬%", "週轉率%", "當沖比%", "本益比", "殖利率%", "淨值比", "營收年增%", "千張大戶%",
                       "大戶週增(百分點)", "外資持股%", "外資20日增(百分點)", "ROE年化%", "毛利率%", "近四季EPS", "本益比百分位"],
         )
         stocks = list(zip(result["code"], result["name"]))
@@ -1677,6 +2271,7 @@ def _render_screen_results(result: pd.DataFrame):
                 "相對強弱": st.column_config.ProgressColumn("相對強弱", min_value=0, max_value=100, format="%.0f",
                                                         help="同一天全市場 20 日報酬的百分位排名"),
                 "觸發訊號": st.column_config.TextColumn("觸發訊號", width="large"),
+                **_trend_config(),
             },
         )
         st.session_state["screen_checked_codes"] = [codes[i] for i in rows if i < len(codes)]
@@ -1718,7 +2313,7 @@ def _render_signal_alerts(alerts: list[dict], empty_text: str):
             ui.chips([(signals.SIGNALS[k], "") for k in alert["continuing"]])
 
 
-_WATCH_COLUMNS = {"code": "代號", "name": "名稱", "date": "價格日期", "close": "收盤", "change_pct": "漲跌%",
+_WATCH_COLUMNS = {"code": "代號", "name": "名稱", "trend": _TREND_COLUMN, "date": "價格日期", "close": "收盤", "change_pct": "漲跌%",
                   "new": "今日新訊號", "continuing": "持續中訊號"}
 
 
@@ -1779,6 +2374,91 @@ def _render_watch_group_manager(group: str):
                 st.error(str(exc))
 
 
+_COMPARE_DEFAULTS = {"cmp_codes": [], "cmp_period": "6 個月"}
+_COMPARE_COLORS = ["#2864C5", "#D83C48", "#16845B", "#F5B942", "#A78BFA", "#0EA5B7"]
+
+
+def _open_compare(codes: list[str]):
+    """觀察名單「比較勾選的」：帶著勾選的股票切到個股比較分頁（回呼在重跑前執行，可以直接設定 widget 值）"""
+    codes = list(codes)[:compare.MAX_STOCKS]
+    st.session_state["cmp_codes"] = codes
+    st.session_state.setdefault(ui._KEPT_WIDGETS, {})["cmp_codes"] = codes
+    ui.remember_tab("screener", "個股比較")
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _cached_compare_tables() -> list[pd.DataFrame]:
+    return [
+        pd.DataFrame(list(db.query_industry_map().items()), columns=["code", "industry"]),
+        fundamentals.latest_fundamentals(), financials.latest_table(), ownership.latest_table(),
+        shareholding.latest_table()[["code", "big1000_pct"]], day_trading.latest_table(),
+    ]
+
+
+def _render_compare_tab():
+    ui.restore_widgets(_COMPARE_DEFAULTS)
+    names = db.query_stock_names()
+    for code in st.session_state.get("cmp_codes", []):  # 名單裡可能有今天沒交易的，選項要包含才不會報錯
+        names.setdefault(code, db.lookup_stock_name(code) or code)
+    with ui.panel("比較條件", f"最多 {compare.MAX_STOCKS} 檔・也可以在觀察名單勾選後按「比較勾選的」"):
+        col_codes, col_period = st.columns([3, 1.4], vertical_alignment="bottom")
+        codes = col_codes.multiselect("股票", sorted(names), key="cmp_codes", max_selections=compare.MAX_STOCKS,
+                                      format_func=lambda c: f"{c} {names.get(c, '')}", placeholder="輸入代號或名稱搜尋")
+        period = col_period.segmented_control("期間", list(compare.PERIODS), key="cmp_period") or "6 個月"
+    ui.remember_widgets(_COMPARE_DEFAULTS)
+    if len(codes) < 2:
+        st.info("選兩檔以上股票開始比較")
+        return
+
+    days = compare.PERIODS[period]
+    today = _date.today()
+    since = (today - timedelta(days=days)).isoformat()
+    closes, latest = {}, {}
+    with st.spinner("讀取股價中..."):
+        for code in codes:
+            try:
+                rows = _cached_chart_rows(code, days + 10, today.isoformat())
+            except Exception:  # noqa: BLE001 - 單檔抓不到就不畫，其他照常比較
+                rows = []
+            frame = pd.DataFrame(rows, columns=["date", "close"]) if rows else pd.DataFrame(columns=["date", "close"])
+            closes[code] = frame[frame["date"] >= since][["date", "close"]]
+            if not frame.empty:
+                latest[code] = float(frame["close"].iloc[-1])
+    trend = compare.normalize(closes)
+    missing = [c for c in codes if c not in trend.columns]
+
+    with ui.panel("相對走勢", f"{period}・共同起點＝100・未含股利・加權指數為虛線・資料來源 FinMind"):
+        if trend.empty:
+            st.warning("抓不到股價資料")
+        else:
+            fig = go.Figure()
+            for index, code in enumerate(trend.columns):
+                fig.add_scatter(x=trend.index, y=trend[code], mode="lines", name=f"{code} {names.get(code, '')}",
+                                line={"width": 2, "color": _COMPARE_COLORS[index % len(_COMPARE_COLORS)]},
+                                hovertemplate="%{x}<br>%{y:.1f}<extra>" + code + "</extra>")
+            taiex = pd.DataFrame(db.query_market_index(trend.index[0]))
+            if not taiex.empty:
+                taiex = taiex.set_index("date")["taiex"].astype(float)
+                fig.add_scatter(x=taiex.index, y=taiex / taiex.iloc[0] * 100, mode="lines", name="加權指數",
+                                line={"width": 1.5, "color": "#8792A6", "dash": "dash"})
+            fig.add_hline(y=100, line={"color": "rgba(135, 146, 166, 0.5)", "width": 1})
+            fig.update_xaxes(type="category", nticks=10)
+            fig.update_yaxes(title_text="起點＝100")
+            st.plotly_chart(ui.style_chart(fig, height=380), width="stretch", key="compare_chart")
+        if missing:
+            st.caption("抓不到股價：" + "、".join(missing))
+
+    table = compare.metrics_table(codes, names, trend, latest, _cached_compare_tables())
+    with ui.panel("指標比較", "本地資料庫最新值（各指標資料日不同）・點一下股票開啟個股詳情"):
+        view = table.rename(columns={"code": "代號", **compare.METRIC_LABELS})
+        styler = _styled_table(view, signed=["期間報酬%", "期間最大回檔%", "營收年增%"],
+                               decimals=["收盤", "期間報酬%", "期間最大回檔%", "本益比", "淨值比", "殖利率%", "營收年增%",
+                                         "近四季EPS", "ROE年化%", "毛利率%", "負債比%", "外資持股%", "千張大戶%", "當沖比%"])
+        clicked = _clickable_table(styler, "compare_table", width="stretch", hide_index=True)
+        if clicked is not None and clicked < len(table):
+            _go_to_detail(table.iloc[clicked]["code"])
+
+
 def _render_watchlist_tab(signal_df: pd.DataFrame):
     col_group, col_manage, col_add, _ = st.columns([1.4, 0.8, 1.6, 1.2], vertical_alignment="bottom")
     with col_group:
@@ -1808,12 +2488,13 @@ def _render_watchlist_tab(signal_df: pd.DataFrame):
             st.caption("這個名單還沒有股票。可以在上方輸入代號，或在「篩選器」勾選後加入。")
             return
         rows = []
+        series = _trend_series(list(stocks))
         for code, name in stocks.items():
             quote = db.query_latest_close(code) or {}
             close, change = quote.get("close"), quote.get("change")
             alert = alerts_by_code.get(code, {})
             rows.append({
-                "code": code, "name": name, "date": quote.get("date"), "close": close,
+                "code": code, "name": name, "trend": series.get(code, []), "date": quote.get("date"), "close": close,
                 "change_pct": change / (close - change) * 100 if close is not None and change is not None and close - change else None,
                 "new": "、".join(signals.SIGNALS[k] for k in alert.get("new", [])),
                 "continuing": "、".join(signals.SIGNALS[k] for k in alert.get("continuing", [])),
@@ -1826,7 +2507,8 @@ def _render_watchlist_tab(signal_df: pd.DataFrame):
             _styled_table(view, signed=["漲跌%"], decimals=["收盤", "漲跌%"]), table_key,
             width="stretch", hide_index=True,
             column_config={"今日新訊號": st.column_config.TextColumn("今日新訊號", width="medium"),
-                           "持續中訊號": st.column_config.TextColumn("持續中訊號", width="large")},
+                           "持續中訊號": st.column_config.TextColumn("持續中訊號", width="large"),
+                           **_trend_config()},
         )
         if clicked is not None and clicked < len(codes):
             _go_to_detail(codes[clicked])
@@ -1835,17 +2517,23 @@ def _render_watchlist_tab(signal_df: pd.DataFrame):
         ai_targets = [{"code": c, "name": stocks[c]} for c in (selected or codes)]
         ai_label = f"AI 分析勾選的 {len(selected)} 檔" if selected else f"AI 分析全部 {len(codes)} 檔"
         with actions:
-            col_info, col_remove, col_detail, col_ai = st.columns([2.4, 1.1, 1.1, 1.3], vertical_alignment="center")
+            col_info, col_remove, col_detail, col_compare, col_ai = st.columns([2.2, 1.1, 1.1, 1.1, 1.3],
+                                                                              vertical_alignment="center")
             col_info.caption(f"已勾選 {len(selected)} 檔" if selected else "訊號只計算上市股（上櫃資料源無法回補歷史）")
             col_remove.button("從名單移除", width="stretch", disabled=not selected, key="watch_remove",
                               on_click=_remove_selected_from_group, args=(table_key, group, codes))
             if col_detail.button("開啟個股詳情", width="stretch", disabled=len(selected) != 1, key="watch_open_detail",
                                  help="勾選一檔時可用"):
                 _go_to_detail(selected[0])
+            col_compare.button("比較勾選的", width="stretch", key="watch_compare",
+                               disabled=not 2 <= len(selected) <= compare.MAX_STOCKS,
+                               help=f"勾選 2～{compare.MAX_STOCKS} 檔，到「個股比較」並排看走勢與指標",
+                               on_click=_open_compare, args=(selected,))
             run_ai = col_ai.button(ai_label, type="primary", width="stretch", key="watch_ai_run",
                                    help="用 Codex 逐檔分析並儲存（每檔各用一次額度），結果收錄每日報告；沒勾選就分析整個名單")
         if run_ai:
             _analyze_stocks_with_codex(ai_targets, "觀察名單")
+    _render_live_quotes("watch", list(stocks.items()))
 
     today_analysed = [{"code": c, "name": n} for c, n in stocks.items()
                       if db.query_stock_analysis(_date.today().isoformat(), c)]
@@ -1876,6 +2564,8 @@ def screener_page():
             _render_screen_tab(signal_df)
         elif tab == "觀察名單":
             _render_watchlist_tab(signal_df)
+        elif tab == "個股比較":
+            _render_compare_tab()
         elif tab == "訊號回測":
             _render_backtest_tab()
 
@@ -2010,23 +2700,68 @@ def _event_table(events: pd.DataFrame):
                  column_config={"說明": st.column_config.TextColumn("說明", width="large")})
 
 
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def _cached_subscriptions(year: int) -> list[dict]:
+    ok, rows = subscriptions.fetch(year)
+    if not ok:
+        raise RuntimeError(rows)  # 失敗不快取，下次重試
+    return rows
+
+
+_SUBSCRIPTION_COLUMNS = {
+    "status": "狀態", "code": "代號", "name": "名稱", "kind": "類型", "start_date": "申購開始", "end_date": "申購截止",
+    "draw_date": "抽籤日", "listing_date": "撥券日", "price": "承銷價", "close": "最新收盤", "spread_pct": "價差%",
+    "spread_per_lot": "每籤價差(元)", "win_rate": "中籤率%", "broker": "主辦券商",
+}
+
+
+def _render_subscriptions():
+    today = _date.today()
+    try:
+        rows = _cached_subscriptions(today.year)
+        if today.month == 1:  # 年初時去年底的抽籤還在兩週內
+            rows = _cached_subscriptions(today.year - 1) + rows
+    except RuntimeError as exc:
+        st.warning(str(exc))
+        return
+    table = subscriptions.schedule(rows, today, subscriptions.latest_closes([r["code"] for r in rows]))
+    with ui.panel("公開申購", "申購中與即將開始的排前面，另列近兩週已抽籤的・價差用最新收盤估算，撥券時股價會變動・"
+                             "資料來源 證交所・點一下開啟個股詳情"):
+        if table.empty:
+            st.caption("目前沒有公開申購")
+            return
+        view = table[list(_SUBSCRIPTION_COLUMNS)].rename(columns=_SUBSCRIPTION_COLUMNS)
+        styler = _styled_table(view, signed=["價差%", "每籤價差(元)"], thousands=["每籤價差(元)"],
+                               decimals=["承銷價", "最新收盤", "價差%", "中籤率%"])
+        clicked = _clickable_table(styler, "subscription_table", width="stretch", hide_index=True)
+        if clicked is not None and clicked < len(table):
+            _go_to_detail(table.iloc[clicked]["code"])
+        st.caption("初次上市櫃的股票還沒有收盤價，價差留空；申購需在截止日前透過券商下單，並預扣申購處理費與價款")
+
+
 def calendar_page():
     _render_sidebar()
-    ui.page_header("行事曆", "除權息、月營收公布期限與 AI 預測檢驗日；持股與觀察名單相關的事件排在最前面")
+    ui.page_header("行事曆", "除權息、月營收公布期限、AI 預測檢驗日與公開申購；持股與觀察名單相關的事件排在最前面")
 
-    col_range, _ = st.columns([1, 3])
-    days = col_range.segmented_control("期間", [7, 30, 60], default=30, format_func=lambda d: f"{d} 天",
-                                       key="calendar_days") or 30
+    tab, body = ui.page_tabs("calendar", NAV_TABS["calendar"])
+    if tab == "公開申購":
+        with body:
+            _render_subscriptions()
+        return
+    with body:
+        col_range, _ = st.columns([1, 3])
+        days = col_range.segmented_control("期間", [7, 30, 60], default=30, format_func=lambda d: f"{d} 天",
+                                           key="calendar_days") or 30
     events = calendar_events.upcoming_events(_date.today(), days)
     if events.empty:
-        st.info("這段期間沒有事件。除權息預告在每日收集時更新。")
+        with body:
+            st.info("這段期間沒有事件。除權息預告在每日收集時更新。")
         return
 
     mine = events[events["in_holdings"] | events["in_watchlist"]]
     others = events[~(events["in_holdings"] | events["in_watchlist"]) & (events["kind"] != calendar_events.KIND_DIVIDEND)]
     market = events[~(events["in_holdings"] | events["in_watchlist"]) & (events["kind"] == calendar_events.KIND_DIVIDEND)]
 
-    tab, body = ui.page_tabs("calendar", NAV_TABS["calendar"])
     with body:
         if tab == "持股與觀察名單":
             with ui.panel("我的持股與觀察名單", "除權息預估股利未扣二代健保補充保費與匯費"):
@@ -2195,7 +2930,6 @@ def _row_at(rows: list, index: int | None):
     return rows[index] if index is not None and index < len(rows) else None
 
 
-@st.dialog("新聞", width="large", on_dismiss=partial(_clear_table_click, "history_news_table"))
 def _news_dialog(row: dict):
     ui.section(row["title"], f"{row['date']}・{row['source']}" + (f"・關聯 {row['related_code']}" if row.get("related_code") else ""))
     if row.get("excerpt"):
@@ -2210,13 +2944,11 @@ def _news_dialog(row: dict):
         st.link_button("開啟原文", row["url"], type="primary")
 
 
-@st.dialog("個股分析", width="large", on_dismiss=partial(_clear_table_click, "history_stock_table"))
 def _stock_analysis_dialog(row: dict):
     ui.section(f"{row['code']} {row['name']}", f"{row['date']} 的分析・產生時間 {row['created_at']}")
     st.markdown(_md_linebreaks(row["analysis"]))
 
 
-@st.dialog("AI 觀點", width="large", on_dismiss=partial(_clear_table_click, "history_pred_table"))
 def _view_dialog(row: dict):
     dates = row["analysis_dates"]
     period = f"{row['start_date']} 起・{_view_result_text(row)}"
@@ -2247,7 +2979,7 @@ def _render_history_news(start: str, end: str, keyword: str):
                                    column_config={"標題": st.column_config.TextColumn("標題", width="large")})
     row = _row_at(rows, clicked)
     if row:
-        _news_dialog(row)
+        _open_dialog("新聞", "history_news_table", _news_dialog, row)
 
 
 def _render_history_picks(start: str, end: str, keyword: str):
@@ -2291,7 +3023,7 @@ def _render_history_stock_analysis(start: str, end: str, keyword: str):
         clicked = _clickable_table(view, "history_stock_table", width="stretch", hide_index=True, height=320)
     row = _row_at(rows, clicked)
     if row:
-        _stock_analysis_dialog(row)
+        _open_dialog("個股分析", "history_stock_table", _stock_analysis_dialog, row)
 
 
 def _render_history_market_analysis(start: str, end: str, keyword: str):
@@ -2318,7 +3050,7 @@ def _render_history_predictions(start: str, end: str, keyword: str):
         clicked = _views_table(views, key="history_pred_table", height=380)
     row = _row_at(views, clicked)
     if row:
-        _view_dialog(row)
+        _open_dialog("AI 觀點", "history_pred_table", _view_dialog, row)
 
 
 def history_page():
@@ -2532,21 +3264,24 @@ def _render_sidebar_footer():
     """所有頁面共用的側邊欄底部：新版本提示與版本"""
     with st.sidebar:
         st.divider()
+        if config_paths.DB_LOCATION_ERROR:
+            st.warning("找不到自訂位置的資料庫（磁碟沒接上？），目前暫用預設位置。詳見「AI 設定 › 資料儲存」")
         _render_update_notice()
         st.caption(f"台股分析 v{__version__}")
 
 
 # 側邊欄導覽：大項目＝頁面，子項目＝頁內分頁（目前所在的大項目才展開子項目）
 NAV_TABS = {
-    "home": ["市場溫度計", "期貨法人", "產業熱力圖", "股價", "三大法人", "融資融券", "新聞", "收集紀錄"],
+    "home": ["市場溫度計", "新聞焦點", "期貨法人", "產業熱力圖", "排行", "股價", "三大法人", "融資融券", "新聞",
+             "收集紀錄"],
     "portfolio": ["持倉明細", "持股訊號", "AI 持股分析", "新增交易", "交易紀錄", "已實現損益"],
     "detail": ["技術面", "籌碼面", "基本面", "新聞", "AI 分析"],
-    "screener": ["篩選器", "觀察名單", "訊號回測"],
+    "screener": ["篩選器", "觀察名單", "個股比較", "訊號回測"],
     "alerts": ["最近觸發", "提醒規則", "新增提醒"],
-    "calendar": ["持股與觀察名單", "其他提醒", "全市場除權息"],
+    "calendar": ["持股與觀察名單", "其他提醒", "全市場除權息", "公開申購"],
     "ai": ["新聞深度分析", "大盤籌碼分析", "預測追蹤", "手動貼上"],
     "history": ["新聞", "新聞焦點", "個股分析", "大盤分析", "AI 預測"],
-    "ai_settings": ["Codex CLI", "每日排程", "Firecrawl"],
+    "ai_settings": ["Codex CLI", "每日排程", "Firecrawl", "資料儲存"],
 }
 
 ONBOARDING_NEEDED = _onboarding_needed()

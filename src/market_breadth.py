@@ -26,7 +26,7 @@ def load_price_history(since: str) -> pd.DataFrame:
 
 def compute_breadth(history: pd.DataFrame) -> pd.DataFrame:
     """每個交易日一列的市場廣度統計（由舊到新）"""
-    columns = ["date", "up", "down", "flat", "ad_ratio", "turnover", "turnover_ma20_ratio",
+    columns = ["date", "up", "down", "flat", "ad_ratio", "adl", "turnover", "turnover_ma20_ratio",
                *[f"new_high_{n}" for n in WINDOWS], *[f"new_low_{n}" for n in WINDOWS]]
     if history.empty:
         return pd.DataFrame(columns=columns)
@@ -49,6 +49,8 @@ def compute_breadth(history: pd.DataFrame) -> pd.DataFrame:
         **{f"new_low_{n}": (f"new_low_{n}", "sum") for n in WINDOWS},
     ).reset_index().sort_values("date")
     daily["ad_ratio"] = daily["up"] / daily["down"].where(daily["down"] > 0)
+    # 騰落線（ADL）：每天「上漲家數 − 下跌家數」的累計；起點是資料期間第一天，只看趨勢不看絕對數字
+    daily["adl"] = (daily["up"] - daily["down"]).cumsum()
     # 當天成交值 ÷ 前 20 個交易日平均（不含當天），>1 代表比近期熱絡
     daily["turnover_ma20_ratio"] = daily["turnover"] / daily["turnover"].shift(1).rolling(20, min_periods=20).mean()
     # 歷史剛開始的前 N 天，大部分股票還算不出 N 日新高，數字會嚴重偏低，直接標成缺值

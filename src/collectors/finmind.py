@@ -46,3 +46,14 @@ def fetch_institutional_investors(stock_id: str, start_date: str, end_date: str)
 def fetch_margin_trading(stock_id: str, start_date: str, end_date: str) -> list[dict]:
     """個股融資融券，欄位: date, stock_id, MarginPurchaseTodayBalance, ShortSaleTodayBalance ..."""
     return _request("TaiwanStockMarginPurchaseShortSale", stock_id, start_date, end_date)
+
+
+def fetch_dividends(stock_id: str, start_date: str, end_date: str) -> list[dict]:
+    """股利政策（每次董事會／股東會決議一筆），欄位: year(所屬期間，如「114年第2季」), CashEarningsDistribution,
+    CashStatutorySurplus, StockEarningsDistribution, StockStatutorySurplus, CashExDividendTradingDate ..."""
+    return _request("TaiwanStockDividend", stock_id, start_date, end_date)
+
+
+def fetch_dividend_results(stock_id: str, start_date: str, end_date: str) -> list[dict]:
+    """除權息結果（實際除權息日），欄位: date, before_price(除權息前收盤), after_price, stock_and_cache_dividend"""
+    return _request("TaiwanStockDividendResult", stock_id, start_date, end_date)

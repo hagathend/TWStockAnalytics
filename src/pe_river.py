@@ -16,6 +16,9 @@ from src.collectors import fundamentals as fundamentals_collector
 from src.storage import db
 
 BAND_PERCENTILES = (10, 25, 50, 75, 90)
+# 河流圖可以用本益比或股價淨值比：股價 ÷ 倍數＝推算的 EPS 或每股淨值
+METRICS = {"pe": {"column": "pe_ratio", "label": "本益比", "base": "EPS"},
+           "pb": {"column": "pb_ratio", "label": "股價淨值比", "base": "每股淨值"}}
 MIN_VALID_DAYS = 60
 DEFAULT_WINDOW_DAYS = 730
 _POLITE_SECONDS = 3.0
@@ -43,12 +46,13 @@ def backfill(days: int = 180, progress=None, sleep_seconds: float = _POLITE_SECO
     return stats
 
 
-def river(code: str, window_days: int = DEFAULT_WINDOW_DAYS, today: _date | None = None) -> dict | None:
+def river(code: str, window_days: int = DEFAULT_WINDOW_DAYS, today: _date | None = None, metric: str = "pe") -> dict | None:
     """{"frame": DataFrame(date, close, pe, eps, band_10..band_90), "multiples": {10: x, ...},
-        "current_pe", "percentile", "days"}；資料不足回傳 None"""
+        "current_pe", "percentile", "days"}；資料不足回傳 None。
+    metric="pb" 時改用股價淨值比（欄位名稱不變：pe 是倍數、eps 是推算的每股淨值）"""
     today = today or _date.today()
     since = (today - timedelta(days=window_days)).isoformat()
-    rows = db.query_pe_history(code, since)
+    rows = db.query_pe_history(code, since, METRICS[metric]["column"])
     frame = pd.DataFrame(rows, columns=["date", "close", "pe"])
     frame = frame.dropna()
     frame = frame[(frame["pe"] > 0) & (frame["close"] > 0)]
