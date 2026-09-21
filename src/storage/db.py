@@ -596,6 +596,18 @@ def query_stock_names() -> dict[str, str]:
         return {r["code"]: r["name"].strip() for r in cur.fetchall()}
 
 
+def query_security_list(since: str) -> list[dict]:
+    """[{code, name, turnover}]：since 以來有股價的個股與 ETF（排除權證），取每檔最新一天的名稱與成交值。
+    個股搜尋用；不只看最後一天，因為上市與上櫃的最新日期可能不同。
+    依日期範圍掃一遍、在 Python 端保留每檔最後一筆（用 JOIN 找每檔最新日期會用不到主鍵索引，要一分鐘）"""
+    with get_conn() as conn:
+        cur = conn.execute("SELECT code, name, turnover FROM stock_price WHERE date >= ? AND name IS NOT NULL "
+                           "ORDER BY date", (since,))
+        latest = {r["code"]: r for r in cur.fetchall()}
+    return [{"code": code, "name": r["name"].strip(), "turnover": r["turnover"] or 0}
+            for code, r in latest.items() if is_stock_code(code) or code.startswith("00")]
+
+
 def lookup_stock_code_by_name(name: str) -> str | None:
     """從最近一次收集到的股價資料，用名稱反查股票代號。
 

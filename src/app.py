@@ -44,7 +44,7 @@ from src.config_ai import (
     save_report_settings,
     save_scraping_settings,
 )
-from src import compare, config_screener, live_quotes, storage_location, subscriptions, config_watchlist, day_trading, dividend_history, history, scheduled_ai
+from src import compare, config_screener, live_quotes, stock_search, storage_location, subscriptions, config_watchlist, day_trading, dividend_history, history, scheduled_ai
 from src.config_watchlist import add_stocks, load_watchlist
 from src.market_analysis import build_market_analysis_prompt, save_market_analysis
 from src.report_pdf import markdown_to_pdf
@@ -1132,6 +1132,57 @@ def _render_kline_panel(code: str, name: str):
             st.warning("查無此股票的歷史價量資料（可能代號輸入錯誤，或 FinMind 目前沒有資料）")
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def _cached_security_names(today: str) -> tuple[dict[str, str], dict[str, float]]:
+    return stock_search.load_names(_date.fromisoformat(today))
+
+
+def _pick_detail_stock(code: str):
+    st.session_state["selected_code"] = code
+    st.session_state["detail_query"] = code
+    st.session_state["detail_query_synced"] = code
+
+
+def _search_detail_stock():
+    """搜尋框按 Enter：代號或名稱都可以，找不到完全相同的就開最接近的，並記下其他候選"""
+    query = st.session_state.get("detail_query", "").strip()
+    st.session_state.pop("detail_search", None)
+    if not query:
+        st.session_state["selected_code"] = ""
+        st.session_state["detail_query_synced"] = ""
+        return
+    result = stock_search.search(query, *_cached_security_names(_date.today().isoformat()))
+    if result["code"] is None:
+        # 本地沒有的代號（例如興櫃）仍交給 FinMind 查；不像代號的就提示找不到
+        if query.isascii() and query.isalnum() and len(query) <= 6:
+            st.session_state["selected_code"] = query.upper()
+            st.session_state["detail_query_synced"] = query.upper()
+        else:
+            st.session_state["detail_search"] = {"query": query, "code": None, "candidates": []}
+        return
+    st.session_state["selected_code"] = result["code"]
+    st.session_state["detail_query_synced"] = result["code"]
+    if not result["exact"] or result["candidates"]:
+        st.session_state["detail_search"] = {"query": query, **result}
+
+
+def _render_search_result():
+    found = st.session_state.get("detail_search")
+    if not found:
+        return
+    if found["code"] is None:
+        st.warning(f"找不到「{found['query']}」，請換個關鍵字或輸入代號")
+        return
+    names, _ = _cached_security_names(_date.today().isoformat())
+    st.caption(f"「{found['query']}」沒有完全相同的股票，顯示最接近的：{found['code']} {names.get(found['code'], '')}"
+               + ("・其他相近：" if found["candidates"] else ""))
+    if found["candidates"]:
+        columns = st.columns(min(len(found["candidates"]), 4))
+        for index, (code, name) in enumerate(found["candidates"]):
+            columns[index % len(columns)].button(f"{code} {name}", key=f"detail_candidate_{code}", width="stretch",
+                                                 on_click=_pick_detail_stock, args=(code,))
+
+
 def detail_page():
     _render_sidebar()
     selected_date = _query_date()
@@ -1141,13 +1192,19 @@ def detail_page():
             st.switch_page(NAV_PAGES[origin])
     ui.page_header("個股詳情", "K 線、籌碼、基本面、新聞與 AI 分析")
 
+    # 從別頁點股票進來（selected_code 被換掉）時，把搜尋框同步成那檔的代號
+    code = st.session_state.get("selected_code", "")
+    if st.session_state.get("detail_query_synced") != code:
+        st.session_state["detail_query"] = code
+        st.session_state["detail_query_synced"] = code
+        st.session_state.pop("detail_search", None)
     col_input, _ = st.columns([1, 3])
-    code = col_input.text_input("股票代號", value=st.session_state.get("selected_code", ""),
-                                placeholder="輸入股票代號，例如 2330", label_visibility="collapsed")
+    col_input.text_input("股票代號或名稱", key="detail_query", on_change=_search_detail_stock,
+                         placeholder="輸入代號或名稱，例如 2330 或 台積電", label_visibility="collapsed")
+    _render_search_result()
     if not code:
-        st.info("請輸入股票代號，或從「市場總覽 › 新聞焦點」、「選股工具 › 觀察名單」點選")
+        st.info("請輸入股票代號或名稱，或從「市場總覽 › 新聞焦點」、「選股工具 › 觀察名單」點選")
         return
-    st.session_state["selected_code"] = code  # 切換分頁或頁面後回來仍停在這檔
 
     name = db.lookup_stock_name(code) or code
     _render_quote(code, name)
