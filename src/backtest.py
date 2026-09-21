@@ -16,7 +16,7 @@
 
 import pandas as pd
 
-from src.signals import SIGNALS
+from src.signals import SIGNAL_GROUPS, SIGNALS, direction_of
 
 DEFAULT_HORIZONS = (5, 20)
 MIN_EVENTS_FOR_STATS = 10
@@ -88,3 +88,41 @@ def sample_period(df: pd.DataFrame, horizon: int) -> tuple[str | None, str | Non
     if dates.empty:
         return None, None
     return dates.min(), dates.max()
+
+
+_SAME_AS_MARKET = 0.5  # 超額報酬在 ±0.5 個百分點內視為和大盤差不多
+
+
+def describe(direction: str, stats: dict[int, dict]) -> str:
+    """把各持有天數的超額報酬整理成一句話。偏空訊號「跑輸大盤」才符合它的意義，判讀方向相反"""
+    usable = {h: s for h, s in stats.items() if s["events"] >= MIN_EVENTS_FOR_STATS and s["excess_mean"] is not None}
+    if not usable:
+        return "樣本不足，先不參考"
+    if direction == "中性":
+        return "、".join(f"{h} 日超額 {s['excess_mean']:+.1f}%" for h, s in usable.items()) + "（不分多空，只看方向）"
+    sign = -1 if direction == "偏空" else 1
+    good = [h for h, s in usable.items() if s["excess_mean"] * sign > _SAME_AS_MARKET]
+    bad = [h for h, s in usable.items() if s["excess_mean"] * sign < -_SAME_AS_MARKET]
+    days = lambda hs: "、".join(f"{h} 日" for h in hs)  # noqa: E731
+    expected = "跑輸大盤" if direction == "偏空" else "跑贏大盤"
+    if good and not bad:
+        return f"{days(good)}{expected}，和訊號方向一致"
+    if bad and not good:
+        return f"{days(bad)}反而{'跑贏' if direction == '偏空' else '跑輸'}大盤，和訊號方向相反"
+    if good and bad:
+        return f"{days(good)}{expected}、{days(bad)}相反，時間拉長結果不同"
+    return "和大盤差不多，看不出額外效果"
+
+
+def scorecard(df: pd.DataFrame, horizons=DEFAULT_HORIZONS, min_avg_volume_lots: float = 500) -> pd.DataFrame:
+    """所有訊號一張表：分類、方向、各持有天數的樣本數／勝率／超額報酬，加上一句判讀。df 需已經過 add_forward_returns()"""
+    rows = []
+    for group, keys in SIGNAL_GROUPS.items():
+        for key in keys:
+            stats = {h: backtest_signal(df, key, h, min_avg_volume_lots) for h in horizons}
+            row = {"group": group, "signal": key, "label": SIGNALS[key], "direction": direction_of(key)}
+            for h, s in stats.items():
+                row.update({f"events_{h}": s["events"], f"win_rate_{h}": s["win_rate"], f"excess_{h}": s["excess_mean"]})
+            row["verdict"] = describe(row["direction"], stats)
+            rows.append(row)
+    return pd.DataFrame(rows)

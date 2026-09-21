@@ -235,6 +235,7 @@ Schema 變更走 `db.init_db()` 裡的 `ALTER TABLE ... ADD COLUMN` + `try/excep
 - `src/signals.py` 事件訊號（均線排列、突破、缺口、爆量長紅黑、相對強弱、投信認養…）。
   **對整段歷史每一列算布林欄位**，選股器取最新一天、回測取過去每天，共用同一套定義。
   相對強弱是全市場排名，不要只讀部分股票來算。「選股工具」頁與每日報告的觀察名單警示都用它。
+  新增訊號時要一併補 `SIGNAL_GROUPS`（格局／事件／量能／籌碼）與 `SIGNAL_HELP`（說明），測試會檢查；多空整理 `summarize()` 與回測成績單 `backtest.scorecard()` 只描述訊號，不給買賣建議。
 - `src/backtest.py` 訊號回測：**隔天開盤進場**（收盤後才知道訊號，當天收盤價買不到）、第 N 日收盤出場；
   只計「新出現」的訊號（持續型訊號每天算會重複計數）；附同期全市場平均當基準算超額報酬。
 - `src/collectors/fundamentals.py` + `src/fundamentals.py` 本益比／殖利率／淨值比（`valuation` 表）與

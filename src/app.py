@@ -1991,6 +1991,18 @@ _BACKTEST_COLUMNS = {
 }
 
 
+_SCORECARD_COLUMNS = {
+    "group": "分類", "label": "訊號", "direction": "方向", "verdict": "判讀",
+    **{f"{key}_{h}": f"{h}日{label}" for h in backtest.DEFAULT_HORIZONS
+       for key, label in (("excess", "超額%"), ("win_rate", "勝率%"), ("events", "樣本"))},
+}
+
+
+@st.cache_data(ttl=600, show_spinner="計算訊號成績單中...")
+def _cached_scorecard(min_lots: int) -> pd.DataFrame:
+    return backtest.scorecard(_cached_backtest_frame(), min_avg_volume_lots=min_lots)
+
+
 def _render_backtest_tab():
     with ui.panel("回測設定", "隔天開盤買進、第 N 個交易日收盤賣出；只計新出現的訊號"):
         frame = _cached_backtest_frame()
@@ -2005,6 +2017,17 @@ def _render_backtest_tab():
         col3.caption("樣本期間")
         col3.markdown(f"訊號日 {start} ～ {end}")
         st.caption("未扣手續費與交易稅、未處理漲停買不到；樣本期間短時結論容易受單一行情影響，僅供檢驗訊號參考。")
+
+    with ui.panel("訊號成績單", "每個訊號出現後 5 日與 20 日的表現，和同一天全市場平均比較・"
+                               "偏空訊號「跑輸大盤」才符合它的意思・歷史表現不代表未來"):
+        card = _cached_scorecard(min_lots)
+        view = card[list(_SCORECARD_COLUMNS)].rename(columns=_SCORECARD_COLUMNS)
+        excess = [c for c in view.columns if "超額" in c]
+        st.dataframe(_styled_table(view, signed=excess, thousands=[c for c in view.columns if "樣本" in c],
+                                   decimals=excess + [c for c in view.columns if "勝率" in c]),
+                     width="stretch", hide_index=True, height=36 * (len(view) + 1) + 3,
+                     column_config={"判讀": st.column_config.TextColumn("判讀", width="large")})
+        st.caption(f"樣本少於 {backtest.MIN_EVENTS_FOR_STATS} 次的不判讀；超額報酬在 ±0.5 個百分點內視為和大盤差不多")
 
     with ui.panel("各訊號統計", f"樣本數少於 {backtest.MIN_EVENTS_FOR_STATS} 筆參考性很低・超額報酬 = 訊號股報酬 − 同一天全市場平均"):
         table = backtest.backtest_all(frame, horizon, min_avg_volume_lots=min_lots)
@@ -2057,7 +2080,7 @@ _SCREEN_COLUMNS = {
     "big1000_pct": "千張大戶%", "big1000_pct_change": "大戶週增(百分點)", "foreign_pct": "外資持股%",
     "foreign_change_20": "外資20日增(百分點)", "roe_annualized": "ROE年化%", "gross_margin": "毛利率%",
     "eps_ttm": "近四季EPS", "pe_percentile": "本益比百分位",
-    "signals": "觸發訊號",
+    "signal_summary": "多空整理", "signals": "觸發訊號",
 }
 
 
@@ -2148,7 +2171,9 @@ def _render_screen_tab(signal_df: pd.DataFrame):
     with ui.panel("篩選條件", "常用的條件組合可以存成範本，下次一鍵套用"):
         _render_screen_presets()
         labels = {v: k for k, v in signals.SIGNALS.items()}
-        chosen = st.multiselect("訊號條件", list(labels), key="scr_signals")
+        chosen = st.multiselect("訊號條件", list(labels), key="scr_signals",
+                                help="每個訊號的意思與判讀方式見下方「訊號說明與判讀方式」")
+        _render_signal_guide()
         col1, col2, _ = st.columns([1, 1, 2])
         mode = col1.segmented_control("條件組合", ["全部符合", "符合任一"], key="scr_mode") or "全部符合"
         min_lots = col2.number_input("20日均量至少（張）", min_value=0, step=100, key="scr_min_lots")
@@ -2293,10 +2318,31 @@ def _render_screen_results(result: pd.DataFrame):
                 _go_to_detail(selected.iloc[0]["code"])
 
 
+_SIGNAL_TONES = {"偏多": "up", "偏空": "down", "中性": ""}
+
+
+def _render_signal_guide():
+    """訊號說明：四類訊號各自回答什麼問題、每個訊號怎麼判斷，以及綜合判讀的順序（只解釋訊號，不是買賣建議）"""
+    with st.expander("訊號說明與判讀方式"):
+        st.markdown(
+            "1. 先看「格局」：多頭排列是順風、空頭排列是逆風、糾結是還沒選方向\n"
+            "2. 再看「事件」：同樣是突破新高，在多頭排列裡是順勢，在空頭排列裡可能只是反彈\n"
+            "3. 用「量能」確認力道：突破又爆量比沒量的突破可信\n"
+            "4. 用「籌碼」看是誰在買賣：法人連買和突破同時出現，比單獨一個訊號有份量\n"
+            "5. 同方向的訊號橫跨越多類越有意義；多空訊號並存代表看法分歧\n"
+            "6. 每個訊號在歷史上的實際表現，看「選股工具 › 訊號回測」的訊號成績單\n\n"
+            "訊號只看價量與籌碼，不看公司好壞，也不是買賣建議；基本面請另外看個股詳情的「基本面」。")
+        for group, keys in signals.SIGNAL_GROUPS.items():
+            ui.section(group, signals.GROUP_QUESTIONS[group])
+            ui.info_grid([(signals.SIGNALS[k], f"〔{signals.direction_of(k)}〕{signals.SIGNAL_HELP[k]}", True) for k in keys])
+
+
 def _render_signal_alerts(alerts: list[dict], empty_text: str):
+    _render_signal_guide()
     if not alerts:
         st.caption(empty_text)
         return
+    st.caption("每檔訊號依四類分組・紅色偏多、綠色偏空・粗框「今日」是今天新出現的・滑鼠移到訊號上看說明")
     for index, alert in enumerate(alerts):
         if index:
             st.divider()
@@ -2304,17 +2350,18 @@ def _render_signal_alerts(alerts: list[dict], empty_text: str):
         ui.quote_header(alert["code"], alert["name"], alert["close"],
                         None if change is None else alert["close"] - alert["close"] / (1 + change / 100),
                         change, alert["date"])
-        tone = lambda k: "down" if k in signals.BEARISH_SIGNALS else "up"  # noqa: E731
-        if alert["new"]:
-            st.caption("今日新訊號")
-            ui.chips([(signals.SIGNALS[k], tone(k)) for k in alert["new"]])
-        if alert["continuing"]:
-            st.caption("持續中")
-            ui.chips([(signals.SIGNALS[k], "") for k in alert["continuing"]])
+        current = alert["new"] + alert["continuing"]
+        summary = signals.summarize(current)
+        ui.chips([(summary["status"], summary["tone"]), (f"偏多 {len(summary['bullish'])}", "up"),
+                  (f"偏空 {len(summary['bearish'])}", "down")])
+        ui.chip_board([(f"{group}・{signals.GROUP_QUESTIONS[group]}",
+                        [(("今日 " if k in alert["new"] else "") + signals.SIGNALS[k], _SIGNAL_TONES[signals.direction_of(k)],
+                          signals.SIGNAL_HELP[k], k in alert["new"]) for k in keys if k in current])
+                       for group, keys in signals.SIGNAL_GROUPS.items()])
 
 
 _WATCH_COLUMNS = {"code": "代號", "name": "名稱", "trend": _TREND_COLUMN, "date": "價格日期", "close": "收盤", "change_pct": "漲跌%",
-                  "new": "今日新訊號", "continuing": "持續中訊號"}
+                  "summary": "多空整理", "new": "今日新訊號", "continuing": "持續中訊號"}
 
 
 def _watch_group_selector(key: str, label: str = "觀察名單") -> str:
@@ -2498,6 +2545,7 @@ def _render_watchlist_tab(signal_df: pd.DataFrame):
                 "change_pct": change / (close - change) * 100 if close is not None and change is not None and close - change else None,
                 "new": "、".join(signals.SIGNALS[k] for k in alert.get("new", [])),
                 "continuing": "、".join(signals.SIGNALS[k] for k in alert.get("continuing", [])),
+                "summary": signals.summary_text(alert.get("new", []) + alert.get("continuing", [])),
             })
         view = pd.DataFrame(rows)[list(_WATCH_COLUMNS)].rename(columns=_WATCH_COLUMNS)
         actions = st.container()
