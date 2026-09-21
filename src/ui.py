@@ -117,6 +117,12 @@ section[data-testid="stSidebar"] .stButton button[kind="tertiary"]:hover {{ back
 .tw-chip.down {{ color: {DOWN_COLOR}; background: rgba(34, 181, 115, 0.12); border-color: rgba(34, 181, 115, 0.35); }}
 .tw-chip.accent {{ color: #285FAC; background: rgba(76, 141, 246, 0.12); border-color: rgba(76, 141, 246, 0.35); }}
 .tw-chip.warn {{ color: #966215; background: rgba(245, 185, 66, 0.12); border-color: rgba(245, 185, 66, 0.35); }}
+.tw-chip.strong {{ font-weight: 600; border-width: 2px; }}
+.tw-chip[title] {{ cursor: help; }}
+.tw-board {{ display: grid; grid-template-columns: max-content 1fr; gap: 0.1rem 0.8rem; align-items: center;
+             margin: 0.2rem 0 0.4rem 0; }}
+.tw-board .tw-chips {{ margin: 0.15rem 0; }}
+.tw-board-label {{ font-size: 0.8rem; color: {MUTED_COLOR}; white-space: nowrap; }}
 
 /* 新聞卡片 */
 .tw-news {{ padding: 0.75rem 0; border-bottom: 1px solid {BORDER_COLOR}; }}
@@ -319,13 +325,29 @@ def info_grid(items: list[tuple]):
     _html(f'<div class="tw-info-grid">{blocks}</div>')
 
 
-def chips(items: list[tuple[str, str]], empty_text: str = "無"):
-    """items: [(文字, tone)]，tone 為 up / down / accent / warn / ""（中性）"""
+def _chip(item) -> str:
+    """(文字, tone[, 滑鼠提示[, 是否強調]])"""
+    text, tone = item[0], item[1]
+    title = f' title="{escape(item[2])}"' if len(item) > 2 and item[2] else ""
+    strong = " strong" if len(item) > 3 and item[3] else ""
+    return f'<span class="tw-chip {tone}{strong}"{title}>{escape(text)}</span>'
+
+
+def chips(items: list[tuple], empty_text: str = "無"):
+    """items: [(文字, tone)] 或 (文字, tone, 滑鼠提示, 是否強調)；tone 為 up / down / accent / warn / ""（中性）"""
     if not items:
         _html(f'<div class="tw-chips"><span class="tw-chip">{escape(empty_text)}</span></div>')
         return
-    spans = "".join(f'<span class="tw-chip {tone}">{escape(text)}</span>' for text, tone in items)
-    _html(f'<div class="tw-chips">{spans}</div>')
+    _html(f'<div class="tw-chips">{"".join(_chip(item) for item in items)}</div>')
+
+
+def chip_board(rows: list[tuple[str, list[tuple]]]):
+    """左邊分類標籤、右邊一排標籤（訊號依類別分組顯示用）；沒有項目的分類不顯示"""
+    blocks = "".join(f'<div class="tw-board-label">{escape(label)}</div>'
+                     f'<div class="tw-chips">{"".join(_chip(item) for item in items)}</div>'
+                     for label, items in rows if items)
+    if blocks:
+        _html(f'<div class="tw-board">{blocks}</div>')
 
 
 def quote_header(code: str, name: str, close=None, change=None, change_pct=None, date: str | None = None):
