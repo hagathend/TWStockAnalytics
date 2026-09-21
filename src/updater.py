@@ -86,6 +86,20 @@ def check_for_update(force: bool = False, now: datetime | None = None) -> dict |
     return None
 
 
+def release_to_install(cached: dict) -> dict:
+    """按下「安裝更新」時重新問一次 GitHub，一律裝當下最新的版本。
+    提示是一天前查到的，期間可能又出了新版；不重問的話會先裝到舊的那版，隔天還要再更新一次。
+    重問失敗（網路不通）就用原本查到的那版"""
+    try:
+        latest = _fetch_latest()
+    except (OSError, ValueError):
+        return cached
+    if not latest:
+        return cached
+    save_app_settings({"update_checked_at": datetime.now().isoformat(timespec="seconds"), "latest_release": latest})
+    return latest if is_newer(latest["version"], cached["version"]) else cached
+
+
 def download_installer(release: dict, progress=None) -> tuple[bool, str]:
     """下載到暫存資料夾並驗證雜湊。回傳 (ok, 檔案路徑或錯誤訊息)。progress(已下載, 總大小)"""
     target = Path(tempfile.gettempdir()) / release["asset_name"]

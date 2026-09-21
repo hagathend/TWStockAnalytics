@@ -69,6 +69,17 @@ class CheckForUpdateTests(unittest.TestCase):
         with patch.object(updater, "_fetch_latest", return_value=release), patch.object(updater, "__version__", "0.0.9"):
             self.assertIsNone(updater.check_for_update(force=True))
 
+    def test_install_rechecks_for_newer_release(self):
+        cached = updater.summarize_release(RELEASE_PAYLOAD)  # 一天前查到的 0.0.9
+        newer = {**cached, "version": "0.1.0", "asset_name": "TWStockAnalytics-Setup-0.1.0.exe"}
+        with patch.object(updater, "_fetch_latest", return_value=newer):
+            self.assertEqual(updater.release_to_install(cached)["version"], "0.1.0")
+        self.assertEqual(config_app.load_app_settings()["latest_release"]["version"], "0.1.0")
+        with patch.object(updater, "_fetch_latest", side_effect=OSError("offline")):
+            self.assertEqual(updater.release_to_install(cached)["version"], "0.0.9")  # 網路不通就裝原本那版
+        with patch.object(updater, "_fetch_latest", return_value=None):
+            self.assertEqual(updater.release_to_install(cached)["version"], "0.0.9")
+
     def test_network_error_is_silent(self):
         with patch.object(updater, "_fetch_latest", side_effect=OSError("offline")):
             self.assertIsNone(updater.check_for_update(force=True))
