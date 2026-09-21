@@ -3312,10 +3312,12 @@ def _render_update_notice():
     if release.get("page_url"):
         st.markdown(f"[看更新內容]({release['page_url']})")
     if st.button("下載並安裝更新", key="install_update", type="primary", width="stretch"):
-        bar = st.progress(0.0, text="下載中...")
+        release = updater.release_to_install(release)  # 重問一次，直接裝最新版
+        bar = st.progress(0.0, text=f"下載 v{release['version']} 中...")
 
         def _progress(done, total):
-            bar.progress(done / total if total else 0.0, text=f"下載中 {done / 1_048_576:,.0f} MB")
+            bar.progress(done / total if total else 0.0,
+                         text=f"下載 v{release['version']} 中 {done / 1_048_576:,.0f} MB")
 
         ok, result = updater.download_installer(release, progress=_progress)
         bar.empty()
