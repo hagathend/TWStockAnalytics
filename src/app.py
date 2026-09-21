@@ -2072,7 +2072,7 @@ def _trend_series(codes: list[str]) -> dict[str, list[float]]:
 
 _SCREEN_COLUMNS = {
     "code": "代號", "name": "名稱", "industry": "產業", "trend": _TREND_COLUMN, "close": "收盤", "change_pct": "漲跌%",
-    "return_20d": "20日報酬%", "rs_rank_pct": "相對強弱",
+    "return_20d": "20日報酬%", "rs_rank_pct": "相對強弱", "position_60d": "60日位置%", "drawdown_60d": "距60日高點%",
     "foreign_streak": "外資連買賣", "trust_streak": "投信連買賣",
     "vol_ma20_lots": "20日均量(張)", "turnover_rate": "週轉率%", "day_trade_pct": "當沖比%", "pe_ratio": "本益比",
     "dividend_yield": "殖利率%",
@@ -2114,7 +2114,7 @@ _SCREEN_DEFAULTS = {
     "scr_revenue_high": False, "scr_yoy_streak": 0,
     "scr_big_min": None, "scr_big_change_min": None, "scr_foreign_change_min": None,
     "scr_price_min": None, "scr_price_max": None, "scr_turnover_min": None, "scr_industries": [],
-    "scr_day_trade_max": None,
+    "scr_day_trade_max": None, "scr_position_max": None, "scr_drawdown_min": None,
 }
 
 
@@ -2203,6 +2203,15 @@ def _render_screen_tab(signal_df: pd.DataFrame):
                                              key="scr_big_change_min")
             foreign_change_min = s3.number_input("外資持股 20 日增 ≥（百分點）", value=None, step=0.5, format="%.2f",
                                                  key="scr_foreign_change_min")
+        with st.expander("股價位置（避免追高）"):
+            q1, q2, _ = st.columns([1, 1, 2])
+            position_max = q1.number_input("60日位置% ≤", min_value=0.0, max_value=100.0, value=None, step=10.0,
+                                           key="scr_position_max",
+                                           help="收盤在近 60 日最低與最高之間的位置：0＝在最低點、100＝在最高點。"
+                                                "設 30 代表只看還在低檔的股票")
+            drawdown_min = q2.number_input("距60日高點跌幅% ≥", min_value=0.0, max_value=100.0, value=None, step=5.0,
+                                           key="scr_drawdown_min", help="從近 60 日最高價跌了多少，例如 20 代表至少回檔 20%")
+            st.caption("搭配「低檔轉折」類訊號使用；越早進場假訊號越多，可以到「訊號回測」看各訊號的歷史表現")
         with st.expander("價格、產業、週轉率與當沖"):
             p1, p2, p3, p4 = st.columns([1, 1, 1, 1])
             price_min = p1.number_input("股價 ≥（元）", min_value=0.0, value=None, step=10.0, key="scr_price_min")
@@ -2253,6 +2262,10 @@ def _render_screen_tab(signal_df: pd.DataFrame):
             result = result[result["turnover_rate"].notna() & (result["turnover_rate"] >= turnover_min)]
         if industries:
             result = result[result["industry"].isin(industries)]
+        if position_max is not None:
+            result = result[result["position_60d"].notna() & (result["position_60d"] <= position_max)]
+        if drawdown_min is not None:
+            result = result[result["drawdown_60d"].notna() & (result["drawdown_60d"] <= -drawdown_min)]
         result = result.merge(tables["day_trade"], on="code", how="left")
         if day_trade_max is not None:
             result = result[result["day_trade_pct"].notna() & (result["day_trade_pct"] <= day_trade_max)]
@@ -2279,9 +2292,9 @@ def _render_screen_results(result: pd.DataFrame):
         result["trend"] = [series.get(code, []) for code in result["code"]]
         view = result[list(_SCREEN_COLUMNS)].rename(columns=_SCREEN_COLUMNS)
         styler = _styled_table(
-            view, signed=["漲跌%", "20日報酬%", "外資連買賣", "投信連買賣", "營收年增%", "大戶週增(百分點)", "外資20日增(百分點)"],
+            view, signed=["漲跌%", "20日報酬%", "距60日高點%", "外資連買賣", "投信連買賣", "營收年增%", "大戶週增(百分點)", "外資20日增(百分點)"],
             thousands=["20日均量(張)", "外資連買賣", "投信連買賣", "年增連續月"],
-            decimals=["收盤", "漲跌%", "20日報酬%", "週轉率%", "當沖比%", "本益比", "殖利率%", "淨值比", "營收年增%", "千張大戶%",
+            decimals=["收盤", "漲跌%", "20日報酬%", "60日位置%", "距60日高點%", "週轉率%", "當沖比%", "本益比", "殖利率%", "淨值比", "營收年增%", "千張大戶%",
                       "大戶週增(百分點)", "外資持股%", "外資20日增(百分點)", "ROE年化%", "毛利率%", "近四季EPS", "本益比百分位"],
         )
         stocks = list(zip(result["code"], result["name"]))
@@ -2330,7 +2343,10 @@ def _render_signal_guide():
             "3. 用「量能」確認力道：突破又爆量比沒量的突破可信\n"
             "4. 用「籌碼」看是誰在買賣：法人連買和突破同時出現，比單獨一個訊號有份量\n"
             "5. 同方向的訊號橫跨越多類越有意義；多空訊號並存代表看法分歧\n"
-            "6. 每個訊號在歷史上的實際表現，看「選股工具 › 訊號回測」的訊號成績單\n\n"
+            "6. 「低檔轉折」是在跌深後找止跌跡象，能比順勢訊號早進場，但假訊號也比較多；"
+            "越早的訊號（KD、RSI、背離）越容易失敗，站回月線、法人布局這類多等一步確認的較穩。"
+            "可以搭配選股的「股價位置」條件避免追高\n"
+            "7. 每個訊號在歷史上的實際表現，看「選股工具 › 訊號回測」的訊號成績單\n\n"
             "訊號只看價量與籌碼，不看公司好壞，也不是買賣建議；基本面請另外看個股詳情的「基本面」。")
         for group, keys in signals.SIGNAL_GROUPS.items():
             ui.section(group, signals.GROUP_QUESTIONS[group])
