@@ -16,6 +16,8 @@ _DEFAULT = {
     "fee_discount": 1.0,
     # 每日自動收集的執行時間（HH:MM）；實際排程存在 Windows 工作排程器，這裡記住使用者選的時間
     "daily_task_time": "20:00",
+    # 使用者有沒有開啟每日排程；工作排程器裡的工作被移除時（重裝、更新）用這個判斷要不要自動補回來
+    "daily_task_enabled": False,
 }
 
 

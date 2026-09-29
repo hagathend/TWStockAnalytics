@@ -120,3 +120,49 @@ class AppSettingsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DailyTaskStatusTests(unittest.TestCase):
+    def test_parses_status_lines(self):
+        output = "20:30\n2026-09-21 20:30\n0\n2026-09-22 20:30"
+        with patch.object(desktop, "_run_powershell", return_value=(True, output)):
+            status = desktop.daily_task_status()
+        self.assertEqual(status, {"exists": True, "time": "20:30", "last_run": "2026-09-21 20:30",
+                                  "last_result": "0", "next_run": "2026-09-22 20:30"})
+
+    def test_missing_task(self):
+        with patch.object(desktop, "_run_powershell", return_value=(True, "")):
+            self.assertFalse(desktop.daily_task_status()["exists"])
+
+    def test_never_run_task(self):
+        with patch.object(desktop, "_run_powershell", return_value=(True, "20:30\n-\n267011\n-")):
+            status = desktop.daily_task_status()
+        self.assertTrue(status["exists"])
+        self.assertIsNone(status["last_run"])
+        self.assertIsNone(status["next_run"])
+
+
+class EnsureDailyTaskTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._patch = patch.object(config_app, "_PATH", Path(self._tmp.name) / "app_settings.json")
+        self._patch.start()
+
+    def tearDown(self):
+        self._patch.stop()
+        self._tmp.cleanup()
+
+    def test_restores_missing_task(self):
+        config_app.save_app_settings({"daily_task_enabled": True, "daily_task_time": "21:00"})
+        with patch.object(desktop, "register_daily_task", return_value=(True, "已設定")) as register:
+            outcome = desktop.ensure_daily_task({"exists": False, "time": None})
+        register.assert_called_once_with("21:00")
+        self.assertEqual(outcome, (True, "已設定"))
+
+    def test_does_nothing_when_task_exists_or_disabled(self):
+        config_app.save_app_settings({"daily_task_enabled": True, "daily_task_time": "21:00"})
+        with patch.object(desktop, "register_daily_task") as register:
+            self.assertIsNone(desktop.ensure_daily_task({"exists": True, "time": "21:00"}))
+            config_app.save_app_settings({"daily_task_enabled": False})
+            self.assertIsNone(desktop.ensure_daily_task({"exists": False, "time": None}))
+        register.assert_not_called()

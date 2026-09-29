@@ -596,6 +596,13 @@ def query_stock_names() -> dict[str, str]:
         return {r["code"]: r["name"].strip() for r in cur.fetchall()}
 
 
+def query_collect_log_latest() -> str | None:
+    """最後一次執行收集的時間（排程有沒有真的在跑，看這個最準）"""
+    with get_conn() as conn:
+        row = conn.execute("SELECT MAX(run_at) AS run_at FROM collect_log").fetchone()
+        return row["run_at"] if row and row["run_at"] else None
+
+
 def query_security_list(since: str) -> list[dict]:
     """[{code, name, turnover}]：since 以來有股價的個股與 ETF（排除權證），取每檔最新一天的名稱與成交值。
     個股搜尋用；不只看最後一天，因為上市與上櫃的最新日期可能不同。
