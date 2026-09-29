@@ -390,7 +390,7 @@ def _fetch_missing_content(articles: list[dict], progress_callback=None) -> dict
 
 
 def _gather_and_summarize(
-    date: str, summarize_fn, progress_callback=None, inter_call_delay: float = 0.0
+    date: str, summarize_fn, progress_callback=None, inter_call_delay: float = 0.0, force: bool = False
 ) -> tuple[str | None, list[str], list[dict]]:
     """深度分析共用的第一階段：取每則新聞的內文（鉅亨網已經有、Google News RSS 用
     headless 瀏覽器解析JS轉址後抓取），逐篇呼叫 summarize_fn(title, content) -> str 摘要。
@@ -399,6 +399,9 @@ def _gather_and_summarize(
     抓內文與批次處理邏輯都共用，避免每個供應商各寫一份。
 
     inter_call_delay：每次呼叫 summarize_fn 之間的間隔秒數，付費/雲端 API 有請求頻率限制時用。
+
+    資料庫裡已經有 excerpt 的新聞直接沿用，不再送 AI 摘要一次（同一天重跑不會重複花額度）；
+    force=True 才全部重做。
 
     回傳 (錯誤訊息或None, 逐篇摘要文字清單, article_excerpts清單)"""
     news_rows = db.query_news(date)
@@ -415,8 +418,9 @@ def _gather_and_summarize(
     articles = cnyes_rows + rss_rows
     total = len(articles)
 
-    # 先批次抓取缺少內文的新聞（主要是 Google News RSS 來源）
-    needs_fetch = [a for a in articles if not a.get("content") and a.get("url")]
+    # 先批次抓取缺少內文的新聞（主要是 Google News RSS 來源）；已經有摘要的不用再抓
+    needs_fetch = [a for a in articles
+                   if not a.get("content") and a.get("url") and (force or not a.get("excerpt"))]
     fetched_content = _fetch_missing_content(needs_fetch, progress_callback)
 
     summaries = []
@@ -429,9 +433,13 @@ def _gather_and_summarize(
             or article.get("summary")
             or ""
         )
-        excerpt = summarize_fn(article["title"], content) if content else article["title"]
+        stored = (article.get("excerpt") or "").strip()
+        if stored and not force:
+            excerpt = stored  # 之前已經摘要過，直接沿用，不再花額度
+        else:
+            excerpt = summarize_fn(article["title"], content) if content else article["title"]
+            db.save_news_excerpt(article["id"], excerpt)
         summaries.append(f"{i}. {article['title']} — {excerpt}")
-        db.save_news_excerpt(article["id"], excerpt)
         related = news_relevance.merge_related(article.get("related_code"),
                                                news_relevance.related_codes(article["title"], excerpt, company_index))
         if related != article.get("related_code"):
@@ -445,7 +453,7 @@ def _gather_and_summarize(
             }
         )
         if progress_callback:
-            progress_callback(i, total, f"摘要中: {article['title'][:20]}")
+            progress_callback(i, total, ("沿用既有摘要: " if stored and not force else "摘要中: ") + article["title"][:20])
         if inter_call_delay and i < total:
             time.sleep(inter_call_delay)
 
@@ -537,9 +545,23 @@ def analyze_deep_with_provider(
     return result
 
 
-def analyze_with_codex_deep(date: str, progress_callback=None) -> dict:
-    """Codex CLI 摘要與挑股，失敗時保留既有總結及觀察名單。"""
+def already_analyzed(date: str) -> dict | None:
+    """這一天是否已經有新聞分析結果（總結＋焦點個股）"""
+    summary = db.query_ai_analysis_summary(date)
+    picks = db.query_ai_picks(date)
+    return {"summary": summary, "picks": picks} if summary and picks else None
+
+
+def analyze_with_codex_deep(date: str, progress_callback=None, force: bool = False) -> dict:
+    """Codex CLI 摘要與挑股，失敗時保留既有總結及觀察名單。
+    同一天已經分析過就直接沿用結果，force=True 才重新分析（會重新花額度）。"""
     from src.codex_cli import generate_codex_text
+
+    done = None if force else already_analyzed(date)
+    if done:
+        return {"ok": True, "skipped": True, "picks": done["picks"], "summary": done["summary"]["summary"],
+                "message": f"{date} 已經分析過（焦點個股 {len(done['picks'])} 檔），沒有重新分析；"
+                           "要重跑請按「重新分析」"}
 
     def summarize(title, content):
         ok, text = generate_codex_text(_ARTICLE_SUMMARY_PROMPT.format(title=title, content=content))
@@ -554,7 +576,7 @@ def analyze_with_codex_deep(date: str, progress_callback=None) -> dict:
         return ok, text
 
     try:
-        error, summaries, excerpts = _gather_and_summarize(date, summarize, progress_callback)
+        error, summaries, excerpts = _gather_and_summarize(date, summarize, progress_callback, force=force)
         if error:
             return {"ok": False, "message": error, "summary": "", "picks": []}
         if progress_callback:

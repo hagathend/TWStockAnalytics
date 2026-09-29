@@ -156,7 +156,12 @@ Schema 變更走 `db.init_db()` 裡的 `ALTER TABLE ... ADD COLUMN` + `try/excep
 ## AI 分析：Codex CLI
 
 目前所有 AI 分析都走 **Codex CLI**（`src/codex_cli.py`），使用這台電腦已登入的帳號與額度，不需要 API Key：
-- 新聞深度分析：收集後依 `data/codex_settings.json` 的 `auto_analyze_after_collect` 自動觸發（UI 與排程腳本都是）；
+- **收集與分析分開**：側邊欄「立即收集今日資料」一律只收集、不呼叫 Codex；只有每日排程（`scripts/run_daily_collect.py`
+  → `scheduled_ai.run_after_collect()`）會依 `data/codex_settings.json` 自動分析。
+- **同一天不重複花額度**：`ai_analysis.already_analyzed(date)` 有總結＋焦點個股就直接沿用（`force=True` 才重跑）；
+  `_gather_and_summarize()` 沿用 `news.excerpt`，只摘要還沒摘要過的新聞；`scheduled_ai.analyze_stocks()` 預設
+  `skip_existing=True`。UI 上「重新分析」按鈕才會重花額度。
+- 新聞深度分析：收集後依 `data/codex_settings.json` 的 `auto_analyze_after_collect` 自動觸發（排程腳本）；
   排程另可開 `auto_analyze_holdings`／`auto_analyze_watchlist` 逐檔分析個股（**每檔一次 Codex 呼叫，預設關閉**，
   使用者在意額度）。設定 UI 在「AI 設定 › 每日排程」與「開始使用」第 4 步，排程時間存 `app_settings.json` 的 `daily_task_time`
 - 個股／大盤：頁面上「用 Codex 分析並儲存」；也保留「產生提示詞 → 貼到網頁版 AI → 貼回儲存」的手動流程

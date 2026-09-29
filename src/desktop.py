@@ -151,12 +151,40 @@ def unregister_daily_task() -> tuple[bool, str]:
 
 
 def daily_task_status() -> dict:
-    """{"exists": bool, "time": "20:00"|None}"""
+    """{"exists", "time", "last_run", "last_result", "next_run"}；查詢失敗時 exists 為 False"""
     ok, output = _run_powershell(
         f"$t = Get-ScheduledTask -TaskName {_ps_quote(TASK_NAME)} -ErrorAction SilentlyContinue; "
-        "if ($t) { ([datetime]$t.Triggers[0].StartBoundary).ToString('HH:mm') }")
-    time_text = output.strip() if ok else ""
-    return {"exists": bool(time_text), "time": time_text or None}
+        "if ($t) { $i = Get-ScheduledTaskInfo -TaskName $t.TaskName; "
+        "([datetime]$t.Triggers[0].StartBoundary).ToString('HH:mm'); "
+        "if ($i.LastRunTime) { $i.LastRunTime.ToString('yyyy-MM-dd HH:mm') } else { '-' }; "
+        "$i.LastTaskResult; "
+        "if ($i.NextRunTime) { $i.NextRunTime.ToString('yyyy-MM-dd HH:mm') } else { '-' } }")
+    lines = [line.strip() for line in output.splitlines() if line.strip()] if ok else []
+    if len(lines) < 4:
+        return {"exists": bool(lines), "time": lines[0] if lines else None,
+                "last_run": None, "last_result": None, "next_run": None}
+    return {"exists": True, "time": lines[0], "last_run": None if lines[1] == "-" else lines[1],
+            "last_result": lines[2], "next_run": None if lines[3] == "-" else lines[3]}
+
+
+def ensure_daily_task(status: dict | None = None) -> tuple[bool, str] | None:
+    """使用者開過每日排程、但系統裡的工作不見了（重裝、更新或被清掉）時自動補回來。
+    回傳 None 代表不需要處理。開程式時會呼叫一次，不然使用者不會發現排程默默失效了"""
+    from src.config_app import load_app_settings
+
+    settings = load_app_settings()
+    if not settings.get("daily_task_enabled"):
+        return None
+    status = daily_task_status() if status is None else status
+    if status["exists"]:
+        return None
+    return register_daily_task(settings.get("daily_task_time", DEFAULT_TASK_TIME))
+
+
+def run_daily_task_now() -> tuple[bool, str]:
+    """立刻執行一次排程工作（測試排程有沒有設定好；收集會在背景跑，結果寫進收集紀錄）"""
+    ok, output = _run_powershell(f"Start-ScheduledTask -TaskName {_ps_quote(TASK_NAME)}")
+    return (True, "已在背景開始執行，完成後可到「市場總覽 › 收集紀錄」查看") if ok else (False, f"執行失敗：{output[-300:]}")
 
 
 # ─────────────── Codex 登入 ───────────────

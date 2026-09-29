@@ -19,7 +19,7 @@ import os  # noqa: E402
 from functools import partial  # noqa: E402
 import threading  # noqa: E402
 import time  # noqa: E402
-from datetime import date as _date, timedelta  # noqa: E402
+from datetime import date as _date, datetime as _dt, timedelta  # noqa: E402
 
 import pandas as pd  # noqa: E402
 import plotly.express as px  # noqa: E402
@@ -27,6 +27,7 @@ import plotly.graph_objects as go  # noqa: E402
 from plotly.subplots import make_subplots  # noqa: E402
 import streamlit as st  # noqa: E402
 
+from src import ai_analysis  # noqa: E402
 from src.ai_analysis import (NEWS_TOP_N_OPTIONS, analyze_with_codex_deep, build_prompt,  # noqa: E402
                              news_top_n, parse_and_save)
 from src.codex_cli import generate_codex_text, check_codex_login, list_codex_models
@@ -224,40 +225,72 @@ def _go_to_detail(code: str):
 
 
 def _run_collect_from_sidebar():
+    """只收集資料，收集完在下面顯示分析按鈕（按了才花 Codex 額度）；按哪些鈕依「AI 設定 › 每日排程」的勾選"""
     with st.spinner("收集中（官方資料、FinMind、新聞來源）..."):
         result = run_daily_collect()
-    st.success("收集完成")
+    st.session_state["collect_result"] = result
+    st.session_state["collect_done_at"] = _dt.now().strftime("%H:%M")
+
+
+def _render_collect_result():
+    """收集完成後的結果與後續分析按鈕（只在按過收集的這個工作階段顯示）"""
+    if "collect_result" not in st.session_state:
+        return
+    st.success(f"{st.session_state['collect_done_at']} 收集完成")
     with st.expander("收集明細"):
-        st.json(result)
+        st.json(st.session_state["collect_result"])
 
     today = _date.today().isoformat()
-    codex_settings = load_codex_settings()
-    if codex_settings.get("auto_analyze_after_collect"):
-        progress_bar = st.progress(0.0, text="準備深度分析（先抓內文再逐篇摘要，可能要幾分鐘）...")
+    settings = load_codex_settings()
+    if settings.get("auto_analyze_after_collect"):
+        done = ai_analysis.already_analyzed(today)
+        if done:
+            st.caption(f"今天的新聞已經分析過（焦點個股 {len(done['picks'])} 檔）")
+        elif st.button("摘要新聞並挑出焦點個股", key="collect_analyze_news", type="primary", width="stretch"):
+            progress_bar = st.progress(0.0, text="準備中...")
 
-        def _update_progress(cur, total, msg):
-            progress_bar.progress(cur / total if total else 0.0, text=f"{msg} ({cur}/{total})")
+            def _update(cur, total, msg):
+                progress_bar.progress(cur / total if total else 0.0, text=f"{msg} ({cur}/{total})")
 
-        ai_result = analyze_with_codex_deep(today, progress_callback=_update_progress)
-        progress_bar.empty()
-        if ai_result["ok"]:
-            st.success(f"AI 深度分析完成，已產生 {len(ai_result['picks'])} 檔新聞焦點")
-        else:
-            st.warning(f"自動 AI 分析失敗（可到「AI 分析」頁改用複製貼上）：{ai_result['message']}")
-    else:
-        ok, prompt_or_msg = build_prompt(today)
-        if ok:
-            st.session_state["pending_ai_prompt"] = prompt_or_msg
-            st.info("新聞分析提示詞已產生，請到「AI 分析」頁複製使用")
+            outcome = analyze_with_codex_deep(today, progress_callback=_update)
+            progress_bar.empty()
+            (st.success if outcome["ok"] else st.error)(outcome["message"])
+
+    targets = scheduled_ai.stock_targets(settings)
+    if targets and st.button(f"AI 分析持股與觀察名單（{len(targets)} 檔）", key="collect_analyze_stocks",
+                             width="stretch", help="每檔各用一次 Codex 額度；今天已分析過的會跳過"):
+        _analyze_stocks_with_codex(targets, "持股與觀察名單")
+    if not settings.get("auto_analyze_after_collect") and not targets:
+        st.caption("目前設定為收集後不分析；可到「AI 設定 › 每日排程」勾選，或到「AI 分析」頁手動執行")
+
+
+def _ensure_daily_task_once():
+    """每個工作階段檢查一次：使用者開過每日排程但工作不見了（重裝、更新）就自動補回來"""
+    if st.session_state.get("daily_task_checked") or not IS_INSTALLED:
+        return
+    st.session_state["daily_task_checked"] = True
+    try:
+        outcome = desktop.ensure_daily_task()
+    except Exception:  # noqa: BLE001 - 排程檢查失敗不能影響開啟程式
+        return
+    if outcome:
+        st.session_state["daily_task_status"] = desktop.daily_task_status()
+        st.session_state["daily_task_restored"] = outcome
 
 
 def _render_sidebar():
     """各頁共用的側邊欄：只放收集按鈕，保持很短（查詢日期在市場總覽頁上方、新聞焦點在市場總覽的分頁）。
     區塊標題一律用 ui.sidebar_label（比導覽列小一級的灰字），不要用 st.header。"""
+    _ensure_daily_task_once()
+    restored = st.session_state.pop("daily_task_restored", None)
+    if restored:
+        (st.toast if restored[0] else st.warning)(
+            f"每日自動收集排程已重新設定（{restored[1]}）" if restored[0] else f"每日排程自動修復失敗：{restored[1]}")
     with st.sidebar:
         ui.sidebar_label("資料收集")
-        if st.button("立即收集今日資料", type="primary", width="stretch"):
+        if st.button("立即收集今日資料（含新聞）", type="primary", width="stretch"):
             _run_collect_from_sidebar()
+        _render_collect_result()
 
 
 _QUERY_DATE_KEY = "query_date"
@@ -1063,8 +1096,11 @@ def _render_history_panel(code: str):
 
 def _render_stock_ai_panel(code: str):
     with ui.panel("AI 個股分析", "Codex CLI 依技術面、籌碼、基本面與新聞分析，儲存後收錄每日報告"):
+        saved_today = db.query_stock_analysis(_date.today().isoformat(), code)
         col1, col2, _ = st.columns([1.3, 1.1, 2])
-        if col1.button("用 Codex 分析並儲存", key="codex_stock", type="primary",
+        if saved_today:
+            st.caption(f"今天已經分析過（{saved_today['created_at']}），下面可以直接看；再按一次會重新花額度")
+        if col1.button("重新分析並覆蓋" if saved_today else "用 Codex 分析並儲存", key="codex_stock", type="primary",
                        width="stretch"):
             with st.spinner("Codex 正在分析個股..."):
                 ok, text = generate_codex_text(build_stock_analysis_prompt(code))
@@ -1443,13 +1479,15 @@ def _analyze_stocks_with_codex(stocks: list[dict], label: str):
     def _update(done, total, message):
         progress.progress(done / total if total else 0.0, text=f"{message}（{done + 1}/{total}）")
 
-    outcome = scheduled_ai.analyze_stocks(stocks, _date.today().isoformat(), progress=_update, skip_existing=False)
+    # 今天已經分析過的跳過，避免重複花額度；要重做可以到個股詳情按「重新分析並覆蓋」
+    outcome = scheduled_ai.analyze_stocks(stocks, _date.today().isoformat(), progress=_update)
     progress.empty()
+    skipped = f"，今天已分析過跳過 {len(outcome['skipped'])} 檔" if outcome["skipped"] else ""
     if outcome["failed"]:
-        st.error(f"完成 {len(outcome['done'])} 檔；部分分析失敗：\n"
+        st.error(f"完成 {len(outcome['done'])} 檔{skipped}；部分分析失敗：\n"
                  + "\n".join(f"{code}：{message}" for code, message in outcome["failed"]))
     else:
-        st.success(f"已完成 {len(outcome['done'])} 檔{label}分析，並收錄到每日報告")
+        st.success(f"已完成 {len(outcome['done'])} 檔{label}分析{skipped}，並收錄到每日報告")
 
 
 def _render_saved_analyses(stocks: list[dict]):
@@ -1783,13 +1821,21 @@ def ai_analysis_page():
                 col_top, _ = st.columns([2, 3])
                 with col_top:
                     _render_news_top_n("ai_news_top_n")
-                if st.button("用 Codex 分析這天的新聞", type="primary"):
+                done = ai_analysis.already_analyzed(selected_date)
+                col_run, col_again, _ = st.columns([1.5, 1.5, 2])
+                run = col_run.button("用 Codex 分析這天的新聞", type="primary", width="stretch", disabled=bool(done))
+                again = col_again.button("重新分析（重新花額度）", width="stretch", disabled=not done,
+                                         help="已經分析過的日期才需要；會重新摘要並重新挑焦點個股")
+                if done:
+                    st.caption(f"{selected_date} 已經分析過，焦點個股 {len(done['picks'])} 檔・"
+                               f"產生時間 {done['summary']['created_at']}")
+                if run or again:
                     progress_bar = st.progress(0.0, text="準備中...")
 
                     def _update_progress(cur, total, msg):
                         progress_bar.progress(cur / total if total else 0.0, text=f"{msg} ({cur}/{total})")
 
-                    result = analyze_with_codex_deep(selected_date, progress_callback=_update_progress)
+                    result = analyze_with_codex_deep(selected_date, progress_callback=_update_progress, force=again)
                     progress_bar.empty()
                     st.session_state["last_deep_result_date"] = selected_date
                     st.session_state["last_deep_result"] = result
@@ -3289,25 +3335,48 @@ def _render_schedule_setup():
     chosen_time = col_time.selectbox("執行時間", times, index=times.index(current_time), key="schedule_time",
                                      help="建議傍晚以後：三大法人、融資融券等盤後資料大約下午 4 點後才會公布齊全")
     enabled = col_toggle.toggle(f"每天 {chosen_time} 自動收集資料並執行分析", value=status["exists"], key="schedule_enabled")
+    changed = {}
     if chosen_time != app_settings["daily_task_time"]:
-        save_app_settings({"daily_task_time": chosen_time})
+        changed["daily_task_time"] = chosen_time
+    if enabled != app_settings.get("daily_task_enabled"):
+        changed["daily_task_enabled"] = enabled  # 記住使用者的選擇，工作不見時才知道要不要自動補回來
+    if changed:
+        save_app_settings(changed)
     if enabled and (not status["exists"] or status["time"] != chosen_time):
         ok, message = desktop.register_daily_task(chosen_time)
         (st.success if ok else st.error)(message)
-        st.session_state["daily_task_status"] = desktop.daily_task_status()
+        status = st.session_state["daily_task_status"] = desktop.daily_task_status()
     elif not enabled and status["exists"]:
         ok, message = desktop.unregister_daily_task()
         (st.success if ok else st.error)(message)
-        st.session_state["daily_task_status"] = desktop.daily_task_status()
-    st.caption("需要電腦開著並連上網路；如果那個時間電腦沒開，下次開機後會自動補做。")
+        status = st.session_state["daily_task_status"] = desktop.daily_task_status()
+
+    if status["exists"]:
+        last_collect = db.query_collect_log_latest()
+        ui.info_grid([
+            ("下次執行", status["next_run"] or "-"),
+            ("上次執行", (status["last_run"] or "尚未執行過")
+             + ("" if status["last_result"] in (None, "0") else f"（結束代碼 {status['last_result']}）")),
+            ("最後一次收集執行時間", last_collect or "尚無紀錄", True),
+        ])
+        col_run, col_log, _ = st.columns([1.2, 1.6, 2])
+        if col_run.button("立即測試執行", key="schedule_run_now", width="stretch",
+                          help="用工作排程器跑一次，確認設定正確；收集在背景進行"):
+            ok, message = desktop.run_daily_task_now()
+            (st.success if ok else st.error)(message)
+        col_log.caption("執行結果看「市場總覽 › 收集紀錄」")
+    st.caption("需要電腦開著並連上網路；如果那個時間電腦沒開，下次開機後會自動補做。"
+               "重新安裝或更新後排程若被移除，開啟程式時會自動補設定回來。")
 
     st.divider()
-    ui.section("收集完之後的 AI 分析", "都會使用 Codex 帳號額度；個股分析每檔各呼叫一次，檔數多時建議只開需要的項目，同一天已分析過的個股不會重複分析")
+    ui.section("每日排程收集完之後的 AI 分析",
+               "只有排程會依這裡自動分析；側邊欄「立即收集今日資料」一律只收集、不分析。"
+               "都會用 Codex 帳號額度，個股分析每檔各呼叫一次；同一天已經分析過的新聞與個股都會跳過")
     settings = load_codex_settings()
     changes = {}
     col_news, col_top = st.columns([1.2, 1], vertical_alignment="bottom")
     news = col_news.checkbox("分析當日新聞並挑出焦點個股", value=settings["auto_analyze_after_collect"], key="schedule_news",
-                             help="側邊欄「立即收集今日資料」也會依這個設定決定要不要分析新聞")
+                             help="每日排程收集完後自動分析當天新聞；手動收集不會自動分析")
     with col_top:
         _render_news_top_n("schedule_news_top_n")
     holdings_count = len(portfolio.load_positions())

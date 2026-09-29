@@ -2,7 +2,7 @@
 
 每一項都可以在設定（codex_settings.json）單獨開關：個股分析是「每檔一次 Codex 呼叫」，
 持股加觀察名單可能有幾十檔，預設關閉，避免每天排程把帳號額度用光。
-同一天已經分析過的個股會跳過，重跑排程不會重複花額度。
+同一天已經分析過的新聞與個股都會跳過，重跑排程不會重複花額度。
 """
 
 from src import portfolio
@@ -55,7 +55,7 @@ def run_after_collect(date: str, log=print) -> bool:
     all_ok = True
     if settings.get("auto_analyze_after_collect", True):
         log(f"新聞分析（焦點個股最多 {news_top_n()} 檔）")
-        analysis = analyze_with_codex_deep(date)
+        analysis = analyze_with_codex_deep(date)  # 已分析過會直接沿用，不重複花額度
         log(analysis["message"])
         all_ok = all_ok and analysis["ok"]
     else:
