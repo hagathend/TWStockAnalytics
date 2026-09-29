@@ -27,6 +27,7 @@ import plotly.graph_objects as go  # noqa: E402
 from plotly.subplots import make_subplots  # noqa: E402
 import streamlit as st  # noqa: E402
 
+from src import ai_analysis  # noqa: E402
 from src.ai_analysis import (NEWS_TOP_N_OPTIONS, analyze_with_codex_deep, build_prompt,  # noqa: E402
                              news_top_n, parse_and_save)
 from src.codex_cli import generate_codex_text, check_codex_login, list_codex_models
@@ -224,31 +225,14 @@ def _go_to_detail(code: str):
 
 
 def _run_collect_from_sidebar():
+    """只收集資料，不做任何 AI 分析（分析要自己到「AI 分析」頁執行，或交給每日排程依設定執行），
+    這樣按收集不會不小心花掉 Codex 額度"""
     with st.spinner("收集中（官方資料、FinMind、新聞來源）..."):
         result = run_daily_collect()
-    st.success("收集完成")
+    st.success("收集完成（未執行 AI 分析）")
     with st.expander("收集明細"):
         st.json(result)
-
-    today = _date.today().isoformat()
-    codex_settings = load_codex_settings()
-    if codex_settings.get("auto_analyze_after_collect"):
-        progress_bar = st.progress(0.0, text="準備深度分析（先抓內文再逐篇摘要，可能要幾分鐘）...")
-
-        def _update_progress(cur, total, msg):
-            progress_bar.progress(cur / total if total else 0.0, text=f"{msg} ({cur}/{total})")
-
-        ai_result = analyze_with_codex_deep(today, progress_callback=_update_progress)
-        progress_bar.empty()
-        if ai_result["ok"]:
-            st.success(f"AI 深度分析完成，已產生 {len(ai_result['picks'])} 檔新聞焦點")
-        else:
-            st.warning(f"自動 AI 分析失敗（可到「AI 分析」頁改用複製貼上）：{ai_result['message']}")
-    else:
-        ok, prompt_or_msg = build_prompt(today)
-        if ok:
-            st.session_state["pending_ai_prompt"] = prompt_or_msg
-            st.info("新聞分析提示詞已產生，請到「AI 分析」頁複製使用")
+    st.caption("要分析新聞請到「AI 分析 › 新聞深度分析」；每日排程會依「AI 設定 › 每日排程」自動分析")
 
 
 def _render_sidebar():
@@ -1063,8 +1047,11 @@ def _render_history_panel(code: str):
 
 def _render_stock_ai_panel(code: str):
     with ui.panel("AI 個股分析", "Codex CLI 依技術面、籌碼、基本面與新聞分析，儲存後收錄每日報告"):
+        saved_today = db.query_stock_analysis(_date.today().isoformat(), code)
         col1, col2, _ = st.columns([1.3, 1.1, 2])
-        if col1.button("用 Codex 分析並儲存", key="codex_stock", type="primary",
+        if saved_today:
+            st.caption(f"今天已經分析過（{saved_today['created_at']}），下面可以直接看；再按一次會重新花額度")
+        if col1.button("重新分析並覆蓋" if saved_today else "用 Codex 分析並儲存", key="codex_stock", type="primary",
                        width="stretch"):
             with st.spinner("Codex 正在分析個股..."):
                 ok, text = generate_codex_text(build_stock_analysis_prompt(code))
@@ -1443,13 +1430,15 @@ def _analyze_stocks_with_codex(stocks: list[dict], label: str):
     def _update(done, total, message):
         progress.progress(done / total if total else 0.0, text=f"{message}（{done + 1}/{total}）")
 
-    outcome = scheduled_ai.analyze_stocks(stocks, _date.today().isoformat(), progress=_update, skip_existing=False)
+    # 今天已經分析過的跳過，避免重複花額度；要重做可以到個股詳情按「重新分析並覆蓋」
+    outcome = scheduled_ai.analyze_stocks(stocks, _date.today().isoformat(), progress=_update)
     progress.empty()
+    skipped = f"，今天已分析過跳過 {len(outcome['skipped'])} 檔" if outcome["skipped"] else ""
     if outcome["failed"]:
-        st.error(f"完成 {len(outcome['done'])} 檔；部分分析失敗：\n"
+        st.error(f"完成 {len(outcome['done'])} 檔{skipped}；部分分析失敗：\n"
                  + "\n".join(f"{code}：{message}" for code, message in outcome["failed"]))
     else:
-        st.success(f"已完成 {len(outcome['done'])} 檔{label}分析，並收錄到每日報告")
+        st.success(f"已完成 {len(outcome['done'])} 檔{label}分析{skipped}，並收錄到每日報告")
 
 
 def _render_saved_analyses(stocks: list[dict]):
@@ -1783,13 +1772,21 @@ def ai_analysis_page():
                 col_top, _ = st.columns([2, 3])
                 with col_top:
                     _render_news_top_n("ai_news_top_n")
-                if st.button("用 Codex 分析這天的新聞", type="primary"):
+                done = ai_analysis.already_analyzed(selected_date)
+                col_run, col_again, _ = st.columns([1.5, 1.5, 2])
+                run = col_run.button("用 Codex 分析這天的新聞", type="primary", width="stretch", disabled=bool(done))
+                again = col_again.button("重新分析（重新花額度）", width="stretch", disabled=not done,
+                                         help="已經分析過的日期才需要；會重新摘要並重新挑焦點個股")
+                if done:
+                    st.caption(f"{selected_date} 已經分析過，焦點個股 {len(done['picks'])} 檔・"
+                               f"產生時間 {done['summary']['created_at']}")
+                if run or again:
                     progress_bar = st.progress(0.0, text="準備中...")
 
                     def _update_progress(cur, total, msg):
                         progress_bar.progress(cur / total if total else 0.0, text=f"{msg} ({cur}/{total})")
 
-                    result = analyze_with_codex_deep(selected_date, progress_callback=_update_progress)
+                    result = analyze_with_codex_deep(selected_date, progress_callback=_update_progress, force=again)
                     progress_bar.empty()
                     st.session_state["last_deep_result_date"] = selected_date
                     st.session_state["last_deep_result"] = result
@@ -3302,12 +3299,14 @@ def _render_schedule_setup():
     st.caption("需要電腦開著並連上網路；如果那個時間電腦沒開，下次開機後會自動補做。")
 
     st.divider()
-    ui.section("收集完之後的 AI 分析", "都會使用 Codex 帳號額度；個股分析每檔各呼叫一次，檔數多時建議只開需要的項目，同一天已分析過的個股不會重複分析")
+    ui.section("每日排程收集完之後的 AI 分析",
+               "只有排程會依這裡自動分析；側邊欄「立即收集今日資料」一律只收集、不分析。"
+               "都會用 Codex 帳號額度，個股分析每檔各呼叫一次；同一天已經分析過的新聞與個股都會跳過")
     settings = load_codex_settings()
     changes = {}
     col_news, col_top = st.columns([1.2, 1], vertical_alignment="bottom")
     news = col_news.checkbox("分析當日新聞並挑出焦點個股", value=settings["auto_analyze_after_collect"], key="schedule_news",
-                             help="側邊欄「立即收集今日資料」也會依這個設定決定要不要分析新聞")
+                             help="每日排程收集完後自動分析當天新聞；手動收集不會自動分析")
     with col_top:
         _render_news_top_n("schedule_news_top_n")
     holdings_count = len(portfolio.load_positions())

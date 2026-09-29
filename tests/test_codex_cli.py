@@ -46,16 +46,18 @@ class CodexTests(unittest.TestCase):
         self.assertFalse(result["properties"]["items"]["items"]["additionalProperties"])
         self.assertNotIn("additionalProperties", original)
 
+    @patch("src.ai_analysis.already_analyzed", return_value=None)   # 當天還沒分析過
     @patch("src.ai_analysis._save_result")
     @patch("src.ai_analysis._gather_and_summarize", side_effect=RuntimeError("額度不足"))
-    def test_failed_news_preserves_previous_result(self, gather, save):
+    def test_failed_news_preserves_previous_result(self, gather, save, analyzed):
         self.assertFalse(analyze_with_codex_deep("2026-09-13")["ok"])
         save.assert_not_called()
 
+    @patch("src.ai_analysis.already_analyzed", return_value=None)
     @patch("src.ai_analysis._save_result", return_value={"ok": True})
     @patch("src.ai_analysis._select_top_picks", return_value=(None, "摘要", []))
     @patch("src.ai_analysis._gather_and_summarize", return_value=(None, ["摘要"], [{"excerpt": "摘要"}]))
-    def test_news_saves_codex_provider(self, gather, select, save):
+    def test_news_saves_codex_provider(self, gather, select, save, analyzed):
         result = analyze_with_codex_deep("2026-09-13")
         save.assert_called_once_with("2026-09-13", "codex-cli", "摘要", [])
         self.assertEqual(result["article_excerpts"], [{"excerpt": "摘要"}])
